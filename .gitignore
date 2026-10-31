@@ -1,0 +1,17 @@
+# Reconstructed — original .gitignore was not included in the master copy
+venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+dist/
+build/
+app_documentation/
+test_agents/
+test_reports/
+model_logs/
+ragMemory/data/
+ragMemory/rag_config.json
+scratchpadMemory/data/
+workspace/sandbox/
+tools/allowed_paths.json
+orchestration/data/

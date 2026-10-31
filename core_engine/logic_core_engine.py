@@ -1,0 +1,1516 @@
+"""Core-engine domain logic: the agent library, the Think-Act-Observe runtime, the tool
+catalog with its built-in tools, the human-in-the-loop questionnaire registry and
+chat-session management.
+
+Module singletons (bottom of file): ``agent_library``, ``tool_catalog`` (plus the
+``tool`` decorator used by tool modules), ``questionnaire`` and ``chat_service``.
+"""
+
+import ast
+import importlib
+import importlib.util
+import inspect
+import json
+import operator
+import re
+import sys
+import threading
+import time
+import uuid
+from contextvars import ContextVar
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, List
+
+import ollama
+import yaml
+
+from core_engine.schemas_core_engine import AgentProfile
+from editor.logic_editor import editor_files, session_manager
+from editor.schemas_editor import EditorEventType
+
+MAX_NUM_CTX = 32768
+
+# The agent whose tool call is running, so shared tools can record who wrote what.
+_CURRENT_AGENT_ID: ContextVar[str] = ContextVar("current_agent_id", default="")
+
+
+def current_agent_id() -> str:
+    return _CURRENT_AGENT_ID.get()
+
+AGENT_MD_TEMPLATE = """# {name}
+
+## role
+You are {name}, a Novous workspace agent. You act as a specialist in your domain and own every request end to end. Always think before answering and verify any claim you reuse.
+
+## purpose
+{purpose}
+
+## boundaries
+- Stay within the scope described in your purpose.
+- Do not fabricate facts, citations, or tool results.
+- Treat the workspace directory as the default destination for files. File tool paths are relative to the workspace root: use a bare filename for a file in its root, and do not add a `workspace/` prefix.
+- For file requests, use write_file with the requested content; use create_file only for an intentionally empty file.
+- Treat tool errors as failures, never as success. Claim a file was created or updated only after the write tool reports success.
+- Never share secrets, credentials, or private user data.
+- Report errors honestly instead of guessing.
+
+## output format
+Lead with the direct answer, then follow with brief supporting detail. Use bullet lists for three or more items, use markdown headings for long responses, and keep every reply concise.
+"""
+
+
+# --- Agent definition parsing (pure helpers) ---------------------------------------
+
+def parse_markdown_sections(md_text: str) -> dict:
+    sections = {}
+    current_title = None
+    current_lines = []
+
+    for line in md_text.splitlines():
+        if line.startswith("## "):
+            if current_title:
+                sections[current_title] = "\n".join(current_lines).strip()
+            current_title = line[3:].strip().lower()
+            current_lines = []
+        elif current_title is not None:
+            current_lines.append(line)
+
+    if current_title:
+        sections[current_title] = "\n".join(current_lines).strip()
+
+    return sections
+
+
+def _coerce_yaml_scalar(value: str):
+    text = (value or "").strip()
+    if text == "":
+        return ""
+    lower = text.lower()
+    if lower in {"true", "false"}:
+        return lower == "true"
+    if lower in {"null", "~"}:
+        return None
+    if text.startswith(('"', "'")) and text.endswith(('"', "'")):
+        return text[1:-1]
+    if text.startswith("[") and text.endswith("]"):
+        candidate = text.replace("'", '"')
+        try:
+            return json.loads(candidate)
+        except Exception:
+            return text
+    if text.startswith("{") and text.endswith("}"):
+        candidate = text.replace("'", '"')
+        try:
+            return json.loads(candidate)
+        except Exception:
+            return text
+    if text.startswith("0") and text.count(".") == 0:
+        try:
+            return int(text)
+        except ValueError:
+            pass
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def parse_yaml_frontmatter(raw_text: str) -> dict:
+    if raw_text is None:
+        return {}
+    stripped = raw_text.lstrip()
+    if not stripped.startswith("---"):
+        return {}
+    lines = raw_text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    end_index = None
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            end_index = index
+            break
+    if end_index is None:
+        return {}
+
+    data: dict[str, object] = {}
+    current_key: str | None = None
+    current_list: list | None = None
+    nested_map: dict | None = None
+
+    for line in lines[1:end_index]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indentation = len(line) - len(line.lstrip(" "))
+        stripped_line = line.strip()
+
+        if indentation == 0:
+            key, sep, value = stripped_line.partition(":")
+            if not sep:
+                continue
+            key = key.strip()
+            value = value.strip()
+            current_key = key
+            current_list = None
+            nested_map = None
+            if value == "":
+                data[key] = []
+                current_list = data[key]
+            else:
+                data[key] = _coerce_yaml_scalar(value)
+                current_key = None
+            continue
+
+        if current_key is None:
+            continue
+
+        if stripped_line.startswith("- "):
+            item = stripped_line[2:].strip()
+            if item.endswith(":"):
+                item_key = item[:-1].strip()
+                entry = {item_key: {}}
+                if not isinstance(data[current_key], list):
+                    data[current_key] = []
+                data[current_key].append(entry)
+                nested_map = entry[item_key]
+                current_list = None
+            else:
+                if not isinstance(data[current_key], list):
+                    data[current_key] = []
+                data[current_key].append(_coerce_yaml_scalar(item))
+                nested_map = None
+                current_list = None
+            continue
+
+        if nested_map is not None and ":" in stripped_line:
+            nested_key, nested_value = stripped_line.split(":", 1)
+            nested_key = nested_key.strip()
+            nested_value = nested_value.strip()
+            nested_map[nested_key] = _coerce_yaml_scalar(nested_value) if nested_value else ""
+            continue
+
+        if current_list is not None and ":" in stripped_line:
+            list_key, list_value = stripped_line.split(":", 1)
+            list_key = list_key.strip()
+            list_value = list_value.strip()
+            if list_key and isinstance(current_list, list):
+                current_list.append({list_key: _coerce_yaml_scalar(list_value) if list_value else ""})
+
+    return data
+
+
+class AgentLibrary:
+    """Loads primary agents from ``library/*.md`` and sub-agents from ``subAgentLibrary/*.yaml``."""
+
+    REPO_ROOT = Path(__file__).resolve().parent.parent
+    LIBRARY_ROOT = REPO_ROOT / "library"
+    SUBAGENT_LIBRARY_ROOT = REPO_ROOT / "subAgentLibrary"
+    AGENT_ENVIRONMENTS = {
+        "workspace": LIBRARY_ROOT,
+        "codebuilder": LIBRARY_ROOT,
+        "prompt-creation": LIBRARY_ROOT,
+    }
+
+    def normalize_agent_id(self, agent_id: str) -> str:
+        clean = str(agent_id or "").strip().replace("\\", "/")
+        if not clean or clean in (".", "..") or "/" in clean:
+            raise ValueError(f"Invalid agent id: {agent_id!r}")
+        return clean
+
+    def _get_agents_root(self, environment: str = "workspace") -> Path:
+        try:
+            return self.AGENT_ENVIRONMENTS[environment]
+        except KeyError as exc:
+            raise ValueError(f"Unknown agent environment: {environment}") from exc
+
+    def find_agent_file(self, agent_id: str, environment: str = "workspace") -> Path | None:
+        clean = self.normalize_agent_id(agent_id)
+        candidate = self._get_agents_root(environment) / f"{clean}.md"
+        if candidate.is_file():
+            return candidate
+        return None
+
+    def _library_file_for(self, agent_id: str) -> Path:
+        clean = self.normalize_agent_id(agent_id)
+        return self.LIBRARY_ROOT / f"{clean}.md"
+
+    def parse_subagent_yaml(self, subagent_id: str) -> tuple[dict, str]:
+        """Load a pure-YAML sub-agent definition from subAgentLibrary/."""
+        clean = self.normalize_agent_id(subagent_id)
+        subagent_file = self.SUBAGENT_LIBRARY_ROOT / f"{clean}.yaml"
+        if not subagent_file.is_file():
+            raise FileNotFoundError(f"Sub-agent definition not found: {subagent_file}")
+        data = yaml.safe_load(subagent_file.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            raise ValueError(f"Sub-agent definition must be a YAML mapping: {subagent_file}")
+        body = data.pop("prompt", "")
+        data.setdefault("id", clean)
+        if not data.get("type"):
+            data["type"] = "subagent"
+        return data, str(body or "")
+
+    def _read_agent_markdown(self, md_path: Path) -> tuple[str, str]:
+        text = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+        if not text.startswith("---"):
+            return "", text.strip("\n")
+        lines = text.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return "", text.strip("\n")
+        end_index = None
+        for index in range(1, len(lines)):
+            if lines[index].strip() == "---":
+                end_index = index
+                break
+        if end_index is None:
+            return "", text.strip("\n")
+        frontmatter = "\n".join(lines[1:end_index])
+        body = "\n".join(lines[end_index + 1:]).strip("\n")
+        return frontmatter, body
+
+    def load_agent_definition_from_md(self, md_path: Path) -> AgentProfile:
+        if not md_path.is_file():
+            raise FileNotFoundError(f"Agent markdown file not found: {md_path}")
+        raw_text = md_path.read_text(encoding="utf-8")
+        frontmatter = parse_yaml_frontmatter(raw_text)
+        body = raw_text
+        if raw_text.startswith("---"):
+            _, body = self._read_agent_markdown(md_path)
+
+        sections = parse_markdown_sections(body)
+        meta = dict(frontmatter)
+        agent_id = meta.get("id") or md_path.stem
+        profile = AgentProfile(
+            id=str(agent_id),
+            name=str(meta.get("name") or md_path.stem.replace("-", " ").title()),
+            description=str(meta.get("description") or ""),
+            mode=str(meta.get("mode") or "agent"),
+            role=sections.get("role", ""),
+            purpose=sections.get("purpose", ""),
+            boundaries=sections.get("boundaries", ""),
+            model=str(meta.get("model") or ""),
+            tools=list(meta.get("tools") or []),
+            extras={**sections, **({"max_tool_rounds": meta["max_tool_rounds"]} if "max_tool_rounds" in meta else {})},
+        )
+
+        prompt_parts = [
+            f"You are {profile.name}.",
+            f"ROLE:\n{profile.role}" if profile.role else "",
+            f"PURPOSE:\n{profile.purpose}" if profile.purpose else "",
+            f"BOUNDARIES:\n{profile.boundaries}" if profile.boundaries else "",
+        ]
+
+        for title, content in sections.items():
+            if title not in ("role", "purpose", "boundaries") and content:
+                prompt_parts.append(f"{title.upper()}:\n{content}")
+
+        if profile.mode != "agent" or not profile.tools:
+            prompt_parts.append(
+                "NO TOOLS:\nYou have no tools, functions, or file access. Never output function "
+                "calls, tool-call JSON, or claims of creating, writing, or saving files. "
+                "Answer directly in plain Markdown text."
+            )
+
+        profile.system_prompt = "\n\n".join(p for p in prompt_parts if p)
+        return profile
+
+    def load_agent(self, agent_id: str, environment: str = "workspace") -> AgentProfile:
+        clean = self.normalize_agent_id(agent_id)
+        self._get_agents_root(environment)
+        library_file = self.find_agent_file(clean, environment)
+        if library_file:
+            metadata = parse_yaml_frontmatter(library_file.read_text(encoding="utf-8"))
+            if metadata.get("environment", "workspace") == environment:
+                return self.load_agent_definition_from_md(library_file)
+        raise FileNotFoundError(f"Agent not found in {environment}: {agent_id}")
+
+    def list_agents(self, environment: str | None = None) -> list[dict]:
+        seen: set[str] = set()
+        agents: list[dict] = []
+        roots: list[Path] = [self.LIBRARY_ROOT]
+
+        if environment is not None:
+            roots = [self._get_agents_root(environment)]
+
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+                if child.suffix.lower() != ".md":
+                    continue
+                agent_id = child.stem
+                if agent_id in seen:
+                    continue
+                try:
+                    profile = self.load_agent_definition_from_md(child)
+                    metadata = parse_yaml_frontmatter(child.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                agent_environment = metadata.get("environment", "workspace")
+                if environment is not None and agent_environment != environment:
+                    continue
+                seen.add(agent_id)
+                agents.append({
+                    "id": profile.id,
+                    "name": profile.name,
+                    "description": profile.description,
+                    "mode": profile.mode,
+                    "model": profile.model,
+                    "squad": "",
+                    "tools": profile.tools,
+                    "has_markdown": True,
+                    "environment": agent_environment,
+                    "path": child.relative_to(self.REPO_ROOT).as_posix(),
+                })
+
+        return agents
+
+
+# --- Runtime -----------------------------------------------------------------------
+
+class Agent:
+    MAX_TOOL_ROUNDS = 6
+    PARAMETER_DESCRIPTIONS = {
+        "payload": (
+            "JSON object string containing the structured handoff fields. "
+            "Never use triple-quoted strings."
+        ),
+        "status": "One of: success, nothing_found, error.",
+        "subagent_id": "The canonical sub-agent ID.",
+        "task_type": "The task type requested by orchestration.",
+        "proposed_content": "The complete proposed file or editor content.",
+    }
+
+    def __init__(self, model: str | None, tools: List[Callable], profile: AgentProfile, session=None):
+        self.model = model or profile.model or "qwen2.5-coder:latest"
+        self.profile = profile
+        self.tools = {getattr(f, "name", None) or f.__name__: f for f in (tools or [])}
+        self.messages: List[dict] = []
+        self.session = session
+        # Agents may raise the tool-round budget with `max_tool_rounds` in their definition.
+        try:
+            self.max_tool_rounds = max(1, int(profile.extras.get("max_tool_rounds", self.MAX_TOOL_ROUNDS)))
+        except (AttributeError, TypeError, ValueError):
+            self.max_tool_rounds = self.MAX_TOOL_ROUNDS
+        self.tool_events: List[dict] = []
+        self.tool_stats: dict[str, dict] = {}
+
+    def _text_tool_call(self, item: dict) -> dict | None:
+        """Accept both flat and function-wrapped text tool-call objects."""
+        function = item.get("function")
+        source = function if isinstance(function, dict) else item
+        tool_name = source.get("name")
+        if tool_name not in self.tools:
+            return None
+        if source is function:
+            args = source.get("arguments") or source.get("parameters") or source.get("args") or {}
+        else:
+            args = source.get("parameters") or source.get("arguments") or source.get("args") or {}
+        return {"function": {"name": tool_name, "arguments": args}}
+
+    def _extract_text_tool_calls(self, content: str) -> List[dict]:
+        text = (content or "").strip()
+        calls = []
+        decoder = json.JSONDecoder()
+        index = 0
+        while index < len(text):
+            if text[index] not in "[{":
+                index += 1
+                continue
+            try:
+                parsed, end = decoder.raw_decode(text, index)
+            except json.JSONDecodeError:
+                index += 1
+                continue
+
+            items = parsed if isinstance(parsed, list) else [parsed]
+            found_call = False
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                call = self._text_tool_call(item)
+                if call is None:
+                    continue
+                calls.append(call)
+                found_call = True
+
+            index = end if found_call else index + 1
+        return calls
+
+    def _format_rag_presenter_reply(self, content: str) -> str:
+        if self.profile.id != "rag-presenter":
+            return content
+
+        decoder = json.JSONDecoder()
+        index = 0
+        while index < len(content):
+            if content[index] != "{":
+                index += 1
+                continue
+            try:
+                parsed, end = decoder.raw_decode(content, index)
+            except json.JSONDecodeError:
+                index += 1
+                continue
+            index = end
+            if not isinstance(parsed, dict) or parsed.get("name") != "format_answer":
+                continue
+
+            arguments = parsed.get("parameters") or parsed.get("arguments") or {}
+            if not isinstance(arguments, dict):
+                continue
+            answer = str(arguments.get("answer") or "").strip()
+            if not answer:
+                continue
+
+            formatted = answer
+            evidence = arguments.get("evidence")
+            sources = []
+            if isinstance(evidence, list):
+                for item in evidence:
+                    if isinstance(item, dict) and item.get("path"):
+                        path = str(item["path"])
+                        if path not in sources:
+                            sources.append(path)
+            if sources:
+                formatted += "\n\n**Sources**\n" + "\n".join(
+                    f"- {source}" for source in sources
+                )
+            return formatted
+        return content
+
+    @staticmethod
+    def _scratchpad_handoff(name: str, args: Any, result: Any) -> dict:
+        """Summarize a scratchpad read or write for SCRATCHPAD_HANDOFF telemetry."""
+        if name == "write_agent_scratchpad":
+            source = args if isinstance(args, dict) else {}
+            payload = source.get("payload")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    payload = None
+        else:
+            try:
+                memory = json.loads(result) if isinstance(result, str) else {}
+            except json.JSONDecodeError:
+                memory = {}
+            source = memory.get("latest_subagent_result", {}) if isinstance(memory, dict) else {}
+            source = source if isinstance(source, dict) else {}
+            payload = source.get("payload", {})
+        handoff = {
+            "status": source.get("status", "success"),
+            "subagent_id": source.get("subagent_id", ""),
+            "direction": "write" if name == "write_agent_scratchpad" else "read",
+        }
+        if isinstance(payload, dict):
+            for key in ("results", "issues_found"):
+                if isinstance(payload.get(key), list):
+                    handoff["result_count"] = len(payload[key])
+                    break
+        return handoff
+
+    def act(self, tool_call: dict, origin: str) -> Any:
+        from orchestration.logic_orchestration import telemetry_bus
+
+        fn_info = tool_call.get("function", {})
+        name = fn_info.get("name")
+        args = fn_info.get("arguments", {})
+        trace_context = telemetry_bus.current_context()
+        trace_id, agent_id = trace_context or ("", "")
+
+        def log_tool_end(status: str, duration_ms: int) -> None:
+            telemetry_bus.log_event(
+                trace_id, "TOOL_CALL_END", agent_id, name or "unknown",
+                {"tool_name": name or "unknown", "status": status, "duration_ms": duration_ms},
+            )
+
+        if name not in self.tools:
+            if trace_context:
+                log_tool_end("error", 0)
+            return f"Error: Tool '{name}' not found."
+
+        stats = self.tool_stats.setdefault(
+            name, {"calls": 0, "successes": 0, "errors": 0, "success_rate": 0.0}
+        )
+        stats["calls"] += 1
+
+        tool_func = self.tools[name]
+        started = time.perf_counter()
+        if trace_context:
+            telemetry_bus.log_event(trace_id, "TOOL_CALL_START", agent_id, name, {"tool_name": name})
+        try:
+            if isinstance(args, str):
+                args = json.loads(args)
+            agent_token = _CURRENT_AGENT_ID.set(self.profile.id)
+            try:
+                result = tool_func(**args) if isinstance(args, dict) else tool_func(args)
+            finally:
+                _CURRENT_AGENT_ID.reset(agent_token)
+            stats["successes"] += 1
+            stats["success_rate"] = stats["successes"] / stats["calls"]
+            event = {"tool": name, "args": args, "status": "success", "origin": origin}
+            result_text = result if isinstance(result, str) else json.dumps(
+                result, ensure_ascii=False, default=str
+            )
+            event["result"] = result_text[:3000]
+            if len(result_text) > 3000:
+                event["result_truncated"] = True
+            if getattr(tool_func, "display_output", False) and isinstance(result, str):
+                event["display"] = result
+            self.tool_events.append(event)
+            if trace_context:
+                log_tool_end("success", int((time.perf_counter() - started) * 1000))
+                if name in {"write_agent_scratchpad", "read_agent_scratchpad"}:
+                    telemetry_bus.log_event(
+                        trace_id, "SCRATCHPAD_HANDOFF", agent_id, "scratchpad",
+                        self._scratchpad_handoff(name, args, result),
+                    )
+            return result
+        except Exception as exc:
+            stats["errors"] += 1
+            stats["success_rate"] = stats["successes"] / stats["calls"]
+            err_msg = f"Error executing tool '{name}': {str(exc)}"
+            self.tool_events.append({"tool": name, "args": args, "status": "error", "error": str(exc), "origin": origin})
+            if trace_context:
+                log_tool_end("error", int((time.perf_counter() - started) * 1000))
+                if name == "write_agent_scratchpad":
+                    telemetry_bus.log_event(
+                        trace_id, "SCRATCHPAD_HANDOFF", agent_id, "scratchpad",
+                        {
+                            "status": "error",
+                            "subagent_id": args.get("subagent_id", "") if isinstance(args, dict) else "",
+                            "direction": "write",
+                        },
+                    )
+            return err_msg
+
+    def observe(self, tool_name: str, result: Any) -> None:
+        content = json.dumps(result) if not isinstance(result, str) else result
+        self.messages.append({"role": "tool", "name": tool_name, "content": content})
+
+    def think(self, user_input: str) -> str:
+        if not self.messages or self.messages[0].get("role") != "system":
+            self.messages.insert(0, {"role": "system", "content": self.profile.system_prompt})
+
+        self.messages.append({"role": "user", "content": user_input})
+
+        if self.profile.mode == "chat" or not self.tools:
+            res = ollama.chat(model=self.model, messages=self.messages, options={"num_ctx": MAX_NUM_CTX})
+            reply = self._format_rag_presenter_reply(res["message"]["content"])
+            self.messages.append({"role": "assistant", "content": reply})
+            return reply
+
+        for _ in range(self.max_tool_rounds):
+            res = ollama.chat(
+                model=self.model,
+                messages=self.messages,
+                tools=[self._ollama_schema(t) for t in self.tools.values()],
+                options={"num_ctx": MAX_NUM_CTX}
+            )
+            msg = res["message"]
+            self.messages.append(msg)
+
+            native_calls = msg.get("tool_calls")
+            text_calls = self._extract_text_tool_calls(msg.get("content", "")) if not native_calls else []
+            tool_calls = native_calls or text_calls
+
+            if not tool_calls:
+                return self._format_rag_presenter_reply(msg.get("content", ""))
+
+            origin = "native" if native_calls else "text_json"
+            for call in tool_calls:
+                tool_name = call["function"]["name"]
+                result = self.act(call, origin)
+                self.observe(tool_name, result)
+
+        return "(Executed maximum tool rounds without final text summary.)"
+
+    def think_stream(self, user_input: str):
+        """Like think(), but yields token / tool_event dicts as they happen."""
+        if not self.messages or self.messages[0].get("role") != "system":
+            self.messages.insert(0, {"role": "system", "content": self.profile.system_prompt})
+        self.messages.append({"role": "user", "content": user_input})
+
+        use_tools = self.profile.mode != "chat" and bool(self.tools)
+        extra = {"tools": [self._ollama_schema(t) for t in self.tools.values()]} if use_tools else {}
+        final_text = ""
+
+        for _ in range(self.max_tool_rounds if use_tools else 1):
+            content = ""
+            native_calls: List[dict] = []
+            for chunk in ollama.chat(model=self.model, messages=self.messages, stream=True,
+                                     options={"num_ctx": MAX_NUM_CTX}, **extra):
+                msg = chunk["message"]
+                piece = msg.get("content") or ""
+                if piece:
+                    content += piece
+                for call in msg.get("tool_calls") or []:
+                    native_calls.append(call)
+
+            assistant = {"role": "assistant", "content": content}
+            if native_calls:
+                assistant["tool_calls"] = native_calls
+            self.messages.append(assistant)
+            final_text = content
+
+            text_calls = [] if native_calls or not use_tools else self._extract_text_tool_calls(content)
+            tool_calls = native_calls or text_calls
+            if not tool_calls:
+                if content:
+                    content = self._format_rag_presenter_reply(content)
+                    self.messages[-1]["content"] = content
+                    final_text = content
+                    yield {"type": "token", "text": content}
+                break
+
+            origin = "native" if native_calls else "text_json"
+            for call in tool_calls:
+                name = call["function"]["name"]
+                before = len(self.tool_events)
+                result = self.act(call, origin)
+                self.observe(name, result)
+                for event in self.tool_events[before:]:
+                    yield {"type": "tool_event", "event": event}
+        else:
+            final_text = "(Executed maximum tool rounds without final text summary.)"
+
+        yield {"type": "done", "reply": final_text}
+
+    def _ollama_schema(self, func: Callable) -> dict:
+        sig = inspect.signature(func)
+        doc = inspect.getdoc(func) or ""
+        properties = {}
+        required = []
+        for param_name, param in sig.parameters.items():
+            properties[param_name] = {
+                "type": "string",
+                "description": self.PARAMETER_DESCRIPTIONS.get(param_name, f"Parameter {param_name}"),
+            }
+            if param.default == inspect.Parameter.empty:
+                required.append(param_name)
+        return {
+            "type": "function",
+            "function": {
+                "name": getattr(func, "name", None) or func.__name__,
+                "description": doc.splitlines()[0] if doc else "",
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required
+                }
+            }
+        }
+
+
+# --- Tool catalog --------------------------------------------------------------------
+
+class ToolCatalog:
+    """Registry of invocable agent tools and their provider bindings.
+
+    Tools come from three places, registered in this order:
+    first-party tool modules (``tools/logic_tools.py``), plugin files dropped into
+    ``tools/`` (including ``tools/promoted_tools.py``), and the core built-ins below.
+    """
+
+    REPO_ROOT = Path(__file__).resolve().parent.parent
+    TOOLS_DIR = REPO_ROOT / "tools"
+    FIRST_PARTY_MODULES = ("tools.logic_tools",)
+    NON_PLUGIN_FILES = {"__init__.py", "interface_tools.py", "schemas_tools.py", "logic_tools.py"}
+    PROVIDER_BINDINGS = {
+        "core_engine": "core_engine.interface_core_engine",
+        "editor": "editor.interface_editor",
+        "file_manager": "file_manager.interface_file_manager",
+        "workspace": "workspace.interface_workspace",
+        "test_environment": "test_environment.interface_test_environment",
+        "codebuilder": "codebuilder.interface_codebuilder",
+        "orchestration": "orchestration.interface_orchestration",
+        "scratchpadMemory": "scratchpadMemory.interface_scratchpadMemory",
+        "ragMemory": "ragMemory.interface_ragMemory",
+        "tools": "tools.interface_tools",
+        "tools.logic_tools": "tools.logic_tools",
+        "tools.promoted_tools": "tools.promoted_tools",
+        "core_engine.logic_core_engine": "core_engine.logic_core_engine",
+    }
+
+    def __init__(self):
+        self.registry: dict[str, dict] = {}
+        self.load_errors: dict[str, str] = {}
+        self._loaded_files: set[Path] = set()
+        self._declared: dict[str, list[tuple[str, str, Callable]]] = {}
+        self._builtins: list[tuple[str, str, Callable]] = []
+
+    def _register(self, func: Callable, tool_name: str, provider: str) -> Callable:
+        if tool_name in self.registry and self.registry[tool_name]["function"] is not func:
+            raise ValueError(
+                f"Tool '{tool_name}' is already registered by provider '{self.registry[tool_name]['provider']}'."
+            )
+        doc = inspect.getdoc(func) or ""
+        func.name = tool_name
+        func.provider = provider
+        self.registry[tool_name] = {
+            "name": tool_name,
+            "function": func,
+            "provider": provider,
+            "description": doc.splitlines() if doc else "",
+            "signature": str(inspect.signature(func)),
+        }
+        return func
+
+    def _declare(self, func: Callable, tool_name: str, provider: str) -> Callable:
+        self._register(func, tool_name, provider)
+        declared = self._declared.setdefault(func.__module__, [])
+        declared[:] = [entry for entry in declared if entry[0] != tool_name]
+        declared.append((tool_name, provider, func))
+        return func
+
+    def tool(self, name_or_func: str | Callable | None = None, provider: str = "core_engine"):
+        """Decorator that registers a function as an invocable agent tool."""
+        if callable(name_or_func):
+            return self._declare(name_or_func, name_or_func.__name__, provider)
+
+        def decorator(func: Callable) -> Callable:
+            return self._declare(func, name_or_func or func.__name__, provider)
+
+        return decorator
+
+    def builtin(self, provider: str):
+        """Decorator for core built-in tools; they are registered by ``load_tools``."""
+
+        def decorator(func: Callable) -> Callable:
+            func.name = func.__name__
+            func.provider = provider
+            self._builtins.append((func.__name__, provider, func))
+            return func
+
+        return decorator
+
+    def load_tools(self, reload: bool = False) -> None:
+        """Register first-party tool modules, plugin files in ``tools/`` and the built-ins."""
+        if reload:
+            self.registry.clear()
+            self.load_errors.clear()
+            self._loaded_files.clear()
+
+        for module_name in self.FIRST_PARTY_MODULES:
+            self._load_first_party(module_name, reload)
+
+        if self.TOOLS_DIR.is_dir():
+            for path in sorted(self.TOOLS_DIR.glob("*.py")):
+                if path.name in self.NON_PLUGIN_FILES or path.name.startswith("_"):
+                    continue
+                if not reload and path.resolve() in self._loaded_files:
+                    continue
+                self._exec_plugin(path, f"tools.{path.stem}")
+
+        for name, provider, func in self._builtins:
+            try:
+                self._register(func, name, provider)
+                self.load_errors.pop(f"builtin:{name}", None)
+            except ValueError as exc:
+                self.load_errors[f"builtin:{name}"] = str(exc)
+
+    def _load_first_party(self, module_name: str, reload: bool) -> None:
+        """Import a first-party tool module once; on reload re-register its tools."""
+        filename = module_name.rsplit(".", 1)[-1] + ".py"
+        try:
+            if module_name not in sys.modules:
+                importlib.import_module(module_name)
+            elif reload:
+                for name, provider, func in self._declared.get(module_name, []):
+                    self._register(func, name, provider)
+            self.load_errors.pop(filename, None)
+        except Exception as exc:
+            self.load_errors[filename] = str(exc)
+
+    def _exec_plugin(self, path: Path, module_name: str) -> None:
+        """Execute one plugin file; a failing file leaves no partial registrations."""
+        snapshot = dict(self.registry)
+        self._declared.pop(module_name, None)
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not load spec for '{path.name}'.")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+            self._loaded_files.add(path.resolve())
+            self.load_errors.pop(path.name, None)
+        except Exception as exc:
+            self.load_errors[path.name] = str(exc)
+            for key in list(self.registry.keys()):
+                if key not in snapshot:
+                    self.registry.pop(key, None)
+            sys.modules.pop(module_name, None)
+
+    def list_tools(self) -> list[dict]:
+        """Return catalog metadata for all registered tools."""
+        self.load_tools()
+        return [
+            {
+                "name": meta["name"],
+                "provider": meta["provider"],
+                "description": meta["description"],
+                "signature": meta["signature"],
+                "custom": meta.get("custom", False),
+            }
+            for meta in self.registry.values()
+        ]
+
+    def get_tools(self, names: list[str] | None = None) -> list[Callable]:
+        """Resolve registered tool callables, filtered by an optional allow-list."""
+        self.load_tools()
+        if not names:
+            return [meta["function"] for meta in self.registry.values()]
+        resolved = []
+        for name in names:
+            meta = self.registry.get(name)
+            if meta:
+                resolved.append(meta["function"])
+        return resolved
+
+    def get_load_errors(self) -> dict[str, str]:
+        """Return dictionary of tool load errors mapping filename to error message."""
+        return dict(self.load_errors)
+
+    def get_provider_bindings(self) -> dict[str, str]:
+        """Return dictionary of provider doorway bindings."""
+        return dict(self.PROVIDER_BINDINGS)
+
+    def unknown_tool_names(self, names: list[str]) -> list[str]:
+        """Return list of tool names that are not found in the registry."""
+        self.load_tools()
+        return [name for name in names if name not in self.registry]
+
+    def get_catalog_report(self) -> dict:
+        """Generate a comprehensive catalog report without raising exceptions.
+
+        Returns:
+            {
+                tools: list[dict],
+                providers: dict[str, str],
+                load_errors: dict[str, str],
+                missing_agent_tools: dict[str, list[str]],
+                warnings: list[str]
+            }
+        """
+        try:
+            self.load_tools()
+        except Exception:
+            pass
+
+        tools = [
+            {
+                "name": meta["name"],
+                "provider": meta["provider"],
+                "description": meta["description"],
+                "signature": meta["signature"],
+                "custom": meta.get("custom", False),
+            }
+            for meta in self.registry.values()
+        ]
+        providers = dict(self.PROVIDER_BINDINGS)
+        load_errors = dict(self.load_errors)
+        missing_agent_tools: dict[str, list[str]] = {}
+        warnings: list[str] = []
+
+        for filename, err in load_errors.items():
+            warnings.append(f"Failed to load tool module '{filename}': {err}")
+
+        agent_dirs = [agent_library.LIBRARY_ROOT]
+        for agents_dir in agent_dirs:
+            try:
+                if agents_dir.is_dir():
+                    for agent_file in sorted(agents_dir.glob("*.md")):
+                        try:
+                            raw = agent_file.read_text(encoding="utf-8")
+                            meta = parse_yaml_frontmatter(raw)
+                            agent_id = meta.get("id") or agent_file.stem
+                            req_tools = meta.get("tools", [])
+                            missing = [t for t in req_tools if t not in self.registry]
+                            if missing:
+                                missing_agent_tools[agent_id] = missing
+                                warnings.append(
+                                    f"Agent '{agent_id}' references missing tools: {', '.join(missing)}"
+                                )
+                        except Exception as e:
+                            warnings.append(f"Failed to parse '{agent_file}': {e}")
+            except Exception as e:
+                warnings.append(f"Failed to scan agent directory '{agents_dir}': {e}")
+
+        return {
+            "tools": tools,
+            "providers": providers,
+            "load_errors": load_errors,
+            "missing_agent_tools": missing_agent_tools,
+            "warnings": warnings,
+        }
+
+
+# --- Human-in-the-loop questionnaires ------------------------------------------------
+
+class QuestionnaireRegistry:
+    """Connects the blocking ``ask_user_questions`` tool with the browser's answer endpoints."""
+
+    def __init__(self):
+        self.pending: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def create_request(self, questions: list[Any], session_id: str | None = None) -> dict:
+        """Register a new questionnaire and return its record (with a wait Event)."""
+        request_id = f"req_{uuid.uuid4().hex[:8]}"
+        record = {
+            "request_id": request_id,
+            "questions": questions,
+            "answers": {},
+            "completed": False,
+            "event": threading.Event(),
+            "session_id": session_id,
+        }
+        with self._lock:
+            self.pending[request_id] = record
+        return record
+
+    def submit_answers(self, request_id: str, answers: dict) -> bool:
+        """Store user answers and unblock the waiting tool thread. Returns success."""
+        with self._lock:
+            record = self.pending.get(request_id)
+            if record is None or record.get("completed"):
+                return False
+            record["answers"] = dict(answers or {})
+            record["completed"] = True
+            event = record["event"]
+        event.set()
+        return True
+
+    def resolve_request(self, request_id: str) -> dict | None:
+        """Remove and return a request record, or None if it is no longer active."""
+        with self._lock:
+            return self.pending.pop(request_id, None)
+
+    def list_pending(self) -> list[dict]:
+        """Return active questionnaires currently awaiting user input."""
+        with self._lock:
+            return [
+                {
+                    "request_id": request_id,
+                    "questions": record.get("questions", []),
+                    "session_id": record.get("session_id"),
+                }
+                for request_id, record in self.pending.items()
+                if not record.get("completed")
+            ]
+
+
+# --- Chat sessions ---------------------------------------------------------------------
+
+class RequiredDelegationError(RuntimeError):
+    pass
+
+
+class SessionNotFoundError(LookupError):
+    pass
+
+
+class ChatService:
+    """Owns in-memory conversation sessions (keyed by session id) and runs agent turns."""
+
+    def __init__(self):
+        self.sessions: dict[str, Agent] = {}
+
+    def get_agent(self, agent_id: str, model: str | None, session_id: str | None, environment: str):
+        """Load (or reuse) the session's Agent; returns (agent, session_key, profile)."""
+        profile = agent_library.load_agent(agent_id, environment)
+
+        session_key = session_id or agent_id
+        agent = self.sessions.get(session_key)
+        if agent is not None and (
+            agent.profile.system_prompt != profile.system_prompt
+            or agent.profile.mode != profile.mode
+            or agent.profile.tools != profile.tools
+        ):
+            # The agent definition changed since this session started; a stale
+            # system prompt and history would keep the old behavior.
+            self.sessions.pop(session_key, None)
+            agent = None
+        if agent is None:
+            tools = tool_catalog.get_tools(profile.tools) if profile.mode == "agent" else []
+            agent = Agent(model=model or profile.model or None, tools=tools, profile=profile,
+                          session=session_key)
+            self.sessions[session_key] = agent
+        return agent, session_key, profile
+
+    def prepare_agent_message(self, agent: Agent, profile: AgentProfile, message: str) -> str:
+        if profile.id != "rag-presenter":
+            return message
+
+        required_tools = ("call_subagent", "read_agent_scratchpad")
+        missing_tools = [name for name in required_tools if name not in agent.tools]
+        if missing_tools:
+            raise RequiredDelegationError(
+                "RAG Presenter is missing required tools: " + ", ".join(missing_tools)
+            )
+
+        handoff = {
+            "subagent_id": "rag-retriever",
+            "task_prompt": message,
+            "parameters": "{}",
+        }
+        retrieval_result = agent.act(
+            {"function": {"name": "call_subagent", "arguments": handoff}},
+            origin="orchestrator",
+        )
+        if str(retrieval_result).startswith("Error executing tool 'call_subagent'"):
+            scratchpad_result = "Not read because the required sub-agent call failed."
+        else:
+            scratchpad_result = agent.act(
+                {
+                    "function": {
+                        "name": "read_agent_scratchpad",
+                        "arguments": {"memory_type": "latest_subagent_result"},
+                    }
+                },
+                origin="orchestrator",
+            )
+
+        return (
+            f"{message}\n\n"
+            "Required RAG retrieval handoff (already executed for this turn). "
+            "Do not invoke the sub-agent again. Treat errors or missing evidence "
+            "as retrieval failures and report them honestly.\n"
+            f"call_subagent result:\n{retrieval_result}\n"
+            f"latest_subagent_result:\n{scratchpad_result}"
+        )
+
+    def run_single_agent(self, agent_id: str, message: str, model: str | None = None,
+                         session_id: str | None = None,
+                         environment: str = "workspace") -> dict:
+        """Doorway function: run one agent turn through the Think-Act-Observe loop."""
+        try:
+            agent, session_key, profile = self.get_agent(agent_id, model, session_id, environment)
+        except FileNotFoundError:
+            raise
+        except Exception as exc:
+            return {
+                "reply": f"[engine] Failed to initialize agent '{agent_id}': {exc}",
+                "agent_id": agent_id,
+                "session_id": session_id or agent_id,
+                "model": model or "unknown",
+                "tool_events": [],
+                "tool_stats": {},
+            }
+
+
+        agent.tool_events = []
+        try:
+            prepared_message = self.prepare_agent_message(agent, profile, message)
+            reply = agent.think(prepared_message)
+        except RequiredDelegationError as exc:
+            reply = f"[engine] Could not complete required agent setup: {exc}"
+        except Exception as exc:  # Ollama down / model missing -> graceful error reply
+            reply = (f"[engine] Could not reach the model runtime: {exc}\n"
+                     f"Start Ollama (e.g. `ollama serve`) and pull the model "
+                     f"`{model or profile.model or 'qwen2.5-coder:latest'}`, then retry.")
+            if agent.messages and agent.messages[-1].get("role") == "user":
+                agent.messages.pop()
+
+        return {
+            "reply": reply,
+            "agent_id": agent_id,
+            "session_id": session_key,
+            "model": agent.model,
+            "tool_events": list(agent.tool_events),
+            "tool_stats": agent.tool_stats,
+        }
+
+    def list_agents(self) -> list[dict]:
+        """Doorway function: list all canonical agents from the central library."""
+        return agent_library.list_agents("workspace")
+
+    def reset_session(self, session_id: str) -> bool:
+        return self.sessions.pop(session_id, None) is not None
+
+    def publish_tool_event(self, event: dict, session_id: str) -> None:
+        event_data = {
+            "tool": event["tool"],
+            "args": event.get("args", {}),
+            "status": event["status"],
+            "origin": event["origin"],
+        }
+        if event.get("error") is not None:
+            event_data["error"] = event["error"]
+        session_manager.publish(
+            EditorEventType.TOOL_EXECUTED, event["tool"], session_id, **event_data,
+        )
+
+    def list_models(self) -> dict:
+        """Doorway function: list Ollama models installed on this host."""
+        error = None
+        try:
+            models = [m.get("model") or m.get("name") for m in ollama.list().get("models", [])]
+        except Exception as exc:
+            models = []
+            error = str(exc)
+        return {
+            "models": sorted(models),
+            "default": "qwen2.5-coder:latest",
+            "error": error if not models else None,
+        }
+
+    def export_session(self, session_id: str) -> tuple[str, str]:
+        """Render a session as Markdown; returns ``(filename, markdown)``."""
+        agent = self.sessions.get(session_id)
+        if agent is None:
+            raise SessionNotFoundError(f"Session '{session_id}' not found.")
+
+        now = datetime.now()
+        timestamp = now.strftime("%Y%m%d_%H%M%S_%f")
+        safe_session_id = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id).strip("._")
+        if not safe_session_id:
+            safe_session_id = "session"
+        filename = f"novous_{safe_session_id}_{timestamp}.md"
+        exported_at = now.strftime("%Y-%m-%d %H:%M:%S")
+        agent_name = agent.profile.name or session_id
+
+        lines = [
+            f"# Novous Chat Session Log — {agent_name}",
+            f"**Agent ID:** `{agent.profile.id}` | **Model:** `{agent.model}` | "
+            f"**Session Key:** `{session_id}`",
+            f"**Exported At:** `{exported_at}`",
+            "",
+            "---",
+            "",
+            "## Tool Execution Metrics",
+            "",
+        ]
+
+        if agent.tool_stats:
+            lines.extend([
+                "| Tool Name | Total Calls | Successes | Errors | Success Rate |",
+                "| :--- | :---: | :---: | :---: | :---: |",
+            ])
+            for tool_name, metrics in agent.tool_stats.items():
+                lines.append(
+                    f"| `{tool_name}` | {metrics['calls']} | {metrics['successes']} | "
+                    f"{metrics['errors']} | {metrics['success_rate']:.1%} |"
+                )
+        else:
+            lines.append("*No tools executed in this session.*")
+
+        lines.extend(["", "---", "", "## Conversation History", ""])
+        for msg in agent.messages:
+            role = str(msg.get("role", "unknown")).upper()
+            if role == "SYSTEM":
+                continue
+            content = msg.get("content") or ""
+            lines.extend([f"### {role.title()}", "", str(content), ""])
+
+        full_markdown = "\n".join(lines)
+        return filename, full_markdown
+
+
+agent_library = AgentLibrary()
+tool_catalog = ToolCatalog()
+tool = tool_catalog.tool
+questionnaire = QuestionnaireRegistry()
+chat_service = ChatService()
+
+
+# --- Built-in tools (registered by ToolCatalog.load_tools) -----------------------------
+
+_OPERATORS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+}
+
+
+def _safe_eval(expr: str):
+    def _eval(node):
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, ast.BinOp) and type(node.op) in _OPERATORS:
+            return _OPERATORS[type(node.op)](_eval(node.left), _eval(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _OPERATORS:
+            return _OPERATORS[type(node.op)](_eval(node.operand))
+        raise ValueError(f"Unsupported expression element: {ast.dump(node)}")
+
+    return _eval(ast.parse(expr, mode="eval"))
+
+
+@tool_catalog.builtin(provider="core_engine")
+def calculator(expression: str) -> str:
+    """Evaluate a basic arithmetic expression (numbers, + - * / // % ** and parentheses)."""
+    result = _safe_eval(expression)
+    return f"{expression} = {result}"
+
+
+@tool_catalog.builtin(provider="core_engine")
+def rag_agent_tool(
+    query: str,
+    relative_path: str = "",
+    top_k: int = 3,
+    knowledge_base_id: str = "",
+) -> str:
+    """Query a named knowledge source by ID, including archived sources, for relevant passages."""
+    from ragMemory.logic_ragMemory import rag_memory
+
+    return json.dumps(
+        rag_memory.search_knowledge_base(query, top_k, relative_path or "", knowledge_base_id or None),
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+@tool_catalog.builtin(provider="core_engine")
+def agent_info(agent_id: str) -> str:
+    """Return the metadata and composed system prompt of a workspace agent."""
+    profile = agent_library.load_agent(agent_id)
+    return json.dumps(
+        {
+            "id": profile.id,
+            "name": profile.name,
+            "mode": profile.mode,
+            "description": profile.description,
+            "role": profile.role,
+            "purpose": profile.purpose,
+            "boundaries": profile.boundaries,
+            "system_prompt": profile.system_prompt,
+        },
+        indent=2,
+    )
+
+
+@tool_catalog.builtin(provider="editor")
+def extract_docstrings(path: str) -> str:
+    """Parse Python code AST to extract module, class, and function docstrings."""
+    try:
+        abs_path = editor_files.resolve_project_path(path)
+        code = abs_path.read_text(encoding="utf-8")
+        parsed_tree = ast.parse(code)
+
+        docstrings = {
+            "file": path,
+            "module_docstring": ast.get_docstring(parsed_tree),
+            "classes": {},
+            "functions": {},
+        }
+
+        for node in ast.walk(parsed_tree):
+            if isinstance(node, ast.ClassDef):
+                docstrings["classes"][node.name] = ast.get_docstring(node)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                docstrings["functions"][node.name] = ast.get_docstring(node)
+
+        return json.dumps(docstrings, indent=2)
+    except Exception as exc:
+        return f"Error extracting docstrings from '{path}': {exc}"
+
+
+@tool_catalog.builtin(provider="editor")
+def search_workspace(query: str, extension: str = ".py") -> str:
+    """Search workspace files for matching keyword or snippet."""
+    try:
+        matches = []
+        ext = extension if extension.startswith(".") else f".{extension}"
+        for file_path in editor_files.PROJECT_ROOT.rglob(f"*{ext}"):
+            if not file_path.is_file() or file_path.name.startswith("."):
+                continue
+            try:
+                rel = str(file_path.relative_to(editor_files.PROJECT_ROOT)).replace("\\", "/")
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+                for idx, line in enumerate(content.splitlines(), start=1):
+                    if query.lower() in line.lower():
+                        matches.append(f"{rel}:{idx} - {line.strip()}")
+            except Exception:
+                continue
+        return (
+            "\n".join(matches[:50])
+            if matches
+            else f"No matches found for query '{query}'."
+        )
+    except Exception as exc:
+        return f"Error searching workspace: {exc}"
+
+
+@tool_catalog.builtin(provider="codebuilder")
+def run_python_code(code: str) -> str:
+    """Run a Python snippet in CodeBuilder and return its output and diagnostics."""
+    from codebuilder.execution import execute_python_code
+    from codebuilder.schemas_codebuilder import CodeExecutionRequest
+
+    from orchestration.logic_orchestration import codebuilder_run_state, telemetry_bus
+
+    result = execute_python_code(CodeExecutionRequest(code=code))
+    context = telemetry_bus.current_context()
+    if context is not None:
+        trace_id, agent_id = context
+        source_matches_editor = codebuilder_run_state.matches_editor_source(trace_id, code)
+        if codebuilder_run_state.save_execution(
+            trace_id,
+            code,
+            result.model_dump(),
+            allow_non_editor_source=agent_id == "tester",
+        ):
+            diagnostic_lines = sorted(
+                {
+                    item.line
+                    for item in result.diagnostics
+                    if source_matches_editor and item.line is not None and item.line > 0
+                }
+            )[:120]
+            telemetry_bus.log_event(
+                trace_id, "EDITOR_CODE_EXECUTION", agent_id, "editor",
+                {
+                    "status": "success" if result.status == "SUCCESS" else "error",
+                    "diagnostic_lines": diagnostic_lines,
+                },
+            )
+    return json.dumps(result.model_dump(), ensure_ascii=False)
+
+
+@tool_catalog.builtin(provider="codebuilder")
+def send_code_to_editor(code: str) -> str:
+    """Queue generated Python code for insertion into the active CodeBuilder Monaco editor."""
+    if not code.strip():
+        raise ValueError("Code to send to the editor must not be empty.")
+    return "CodeBuilder will insert this code into the active Monaco editor after the chat turn."
+
+
+@tool_catalog.builtin(provider="codebuilder")
+def run_code_in_editor() -> str:
+    """Queue execution of the current contents of the active CodeBuilder editor."""
+    return "CodeBuilder will run the active editor buffer after the chat turn."
+
+
+@tool_catalog.builtin(provider="codebuilder")
+def ask_user_questions(json_file_path: str, timeout_seconds: float = 300.0) -> str:
+    """Pause the agent and ask the user a list of questions from a JSON file in the workspace."""
+    from codebuilder.logic_codebuilder import codebuilder_service
+
+    return codebuilder_service.ask_user(json_file_path, timeout_seconds)
+
+
+@tool_catalog.builtin(provider="workspace")
+def project_status() -> str:
+    """Return the current project state metadata for this workspace."""
+    from workspace.logic_workspace import project_state
+
+    return json.dumps(project_state.get_project_state(), indent=2)
+
+
+@tool_catalog.builtin(provider="codebuilder")
+def preview_editor_code(proposed_content: str) -> str:
+    """Preview complete proposed code in the active CodeBuilder editor without saving it."""
+    from orchestration.logic_orchestration import (
+        MAX_EDITOR_CONTENT_BYTES,
+        codebuilder_run_state,
+        telemetry_bus,
+    )
+    from tools.logic_tools import code_change_preview
+
+    if not isinstance(proposed_content, str):
+        raise ValueError("The editor preview must be text.")
+    if len(proposed_content.encode("utf-8")) > MAX_EDITOR_CONTENT_BYTES:
+        raise ValueError("The editor preview exceeds the 1 MB limit.")
+    context = telemetry_bus.current_context()
+    if context is None:
+        raise ValueError("Editor-buffer previews are only available during a CodeBuilder workflow.")
+    trace_id, agent_id = context
+    original = codebuilder_run_state.get_editor_code(trace_id)
+    if original is None:
+        raise ValueError("The original CodeBuilder editor buffer is unavailable for this workflow.")
+    lines = code_change_preview.changed_line_numbers(original, proposed_content, "after")
+    if not codebuilder_run_state.save_preview(trace_id, proposed_content, lines):
+        raise ValueError("The CodeBuilder workflow preview could not be saved.")
+    telemetry_bus.log_event(trace_id, "EDITOR_CODE_PREVIEW", agent_id, "editor", {"changed_lines": lines})
+    return json.dumps(
+        {"status": "success" if lines else "nothing_found", "changed_lines": lines},
+        ensure_ascii=False,
+    )
+
+
+_HTTP_METHOD_DECORATORS = {"get", "post", "put", "patch", "delete", "options", "head"}
+
+
+@tool_catalog.builtin(provider="codebuilder")
+def inspect_http_routes(path: str) -> str:
+    """Statically list HTTP route decorators in a workspace Python file without running the server."""
+    from tools.logic_tools import workspace_files
+
+    if not isinstance(path, str) or not path.strip() or len(path) > 512:
+        raise ValueError("Provide a workspace-relative Python file path.")
+    if not path.lower().endswith(".py"):
+        raise ValueError("HTTP route inspection only accepts Python source files.")
+    source_info = workspace_files.read_file_bytes(path, 1_000_000)
+    source = source_info["content"].decode("utf-8")
+    try:
+        tree = ast.parse(source, filename=path)
+    except SyntaxError as exc:
+        raise ValueError(
+            f"Could not inspect routes in {path}: Python syntax error at line {exc.lineno}."
+        ) from exc
+
+    routes = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
+                continue
+            method = decorator.func.attr.lower()
+            if method in _HTTP_METHOD_DECORATORS:
+                method_names = [method.upper()]
+            elif method in {"route", "api_route"}:
+                methods_node = next(
+                    (keyword.value for keyword in decorator.keywords if keyword.arg == "methods"),
+                    None,
+                )
+                method_names = (
+                    sorted(
+                        {
+                            item.value.upper()
+                            for item in methods_node.elts
+                            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                        }
+                    )
+                    if isinstance(methods_node, (ast.List, ast.Tuple))
+                    else []
+                )
+            else:
+                continue
+            path_node = decorator.args[0] if decorator.args else None
+            routes.append(
+                {
+                    "line": decorator.lineno,
+                    "function": node.name,
+                    "route": path_node.value
+                    if isinstance(path_node, ast.Constant) and isinstance(path_node.value, str)
+                    else None,
+                    "methods": method_names,
+                    "router": decorator.func.value.id
+                    if isinstance(decorator.func.value, ast.Name)
+                    else None,
+                }
+            )
+    routes.sort(key=lambda route: route["line"])
+    return json.dumps({"path": source_info["path"], "routes": routes}, ensure_ascii=False, indent=2)
+
+
+@tool_catalog.builtin(provider="core_engine")
+def preview_code_change(path: str, proposed_content: str) -> str:
+    """Preview changed line numbers for a workspace file without writing its contents."""
+    from tools.logic_tools import code_change_preview
+
+    return json.dumps(code_change_preview.preview(path, proposed_content), ensure_ascii=False)
