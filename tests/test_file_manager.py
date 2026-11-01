@@ -96,6 +96,7 @@ def test_select_root_only_accepts_configured_directories(tmp_path, monkeypatch):
             {"name": "Root", "path": str(root)},
             {"name": "Alternate", "path": str(alternate)},
         ],
+        "missing": [],
         "active_path": str(root),
     }
     assert client.post(
@@ -242,3 +243,27 @@ def test_elfinder_open_and_put_use_the_shared_workspace_service(tmp_path, monkey
         data={"cmd": "rm", "targets[]": _hash("")},
     ).json()
     assert "error" in rejected
+
+
+def test_missing_root_is_skipped_and_can_be_removed(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    gone = tmp_path / "gone"
+    config_path = tmp_path / "allowed_paths.json"
+    config_path.write_text(json.dumps({
+        "file_manager_roots": [
+            {"name": "Root", "path": str(root)},
+            {"name": "Gone", "path": str(gone)},
+        ],
+        "active_file_manager_root": str(gone),
+    }), encoding="utf-8")
+    monkeypatch.setattr(backend, "CONFIG_PATH", config_path)
+
+    assert backend.configured_roots() == [{"name": "Root", "path": str(root.resolve())}]
+    assert backend.missing_roots() == [{"name": "Gone", "path": str(gone.resolve())}]
+    assert backend.workspace_root() == root.resolve()
+
+    result = backend.manage_roots("remove", [str(gone)])
+    assert result["removed"] == [str(gone.resolve())]
+    assert result["missing"] == []
+    assert backend.missing_roots() == []

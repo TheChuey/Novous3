@@ -1,5 +1,6 @@
 import { Api } from './api.js';
-import { createIcon } from './icons.js';
+import { createIcon, iconSvg } from './icons.js';
+import { setupSidePanels } from './side_panels.js';
 import { buildTestPanel } from './test_panel.js';
 import { openTestSuiteRunner } from './test_suite_runner.js';
 import { renderTree } from './tree.js';
@@ -130,44 +131,56 @@ function esc(value) {
 export function renderChatView(container) {
   container.innerHTML = `
     <div class="chat-layout">
-      <aside class="chat-file-sidebar">
-        <div class="chat-file-header">
-          <h3>Workspace Files</h3>
-          <span class="text-muted small">Open a file in the editor</span>
+      <aside class="chat-file-sidebar" aria-label="Workspace files">
+        <div class="chat-panel-head">
+          <div class="chat-panel-title">
+            <h3>Workspace files</h3>
+            <span class="text-muted small">Open a file in the editor</span>
+          </div>
+          <button type="button" class="cb-btn cb-btn-icon cb-btn-ghost" id="chat-files-toggle">${iconSvg('chevron-left')}</button>
         </div>
         <div id="chat-file-tree" class="tree-pane"></div>
       </aside>
 
-      <section class="chat-main">
-        <div class="chat-font-controls" role="group" aria-label="Chat text size">
-          <span class="text-muted small">Text size</span>
-          <button type="button" class="btn btn-sm" id="chat-font-smaller"
-            title="Smaller text" aria-label="Decrease chat text size">A−</button>
-          <button type="button" class="btn btn-sm" id="chat-font-larger"
-            title="Larger text" aria-label="Increase chat text size">A+</button>
+      <div class="chat-resizer panel-resizer" data-resize="files" role="separator" tabindex="0"
+           aria-orientation="vertical" aria-label="Resize files panel"><span class="cb-grip">${iconSvg('chevron-right', 14)}</span></div>
+
+      <section class="chat-main" aria-label="Conversation">
+        <div class="chat-main-head">
+          <h3>Conversation</h3>
+          <div class="chat-font-controls cb-group" role="group" aria-label="Chat text size">
+            <button type="button" class="cb-btn" id="chat-font-smaller"
+              title="Smaller text" aria-label="Decrease chat text size">A−</button>
+            <button type="button" class="cb-btn" id="chat-font-larger"
+              title="Larger text" aria-label="Increase chat text size">A+</button>
+          </div>
         </div>
         <div id="chat-messages" class="messages-scroll">
           <div class="message system-msg">Select an agent and send a message to start reasoning.</div>
         </div>
         <form id="chat-form" class="chat-input-bar">
-          <input type="text" id="chat-input" placeholder="Type a message or instruction..." autocomplete="off" required />
-          <button type="submit" class="btn btn-primary" disabled>Send</button>
+          <input type="text" id="chat-input" class="form-input" placeholder="Type a message or instruction…" autocomplete="off" required />
+          <button type="submit" class="cb-btn cb-btn-primary" disabled title="Send (Enter)"><span>Send</span></button>
         </form>
         <div class="chat-quick-actions">
-          <button type="button" class="btn btn-sm" id="chat-reset-quick" disabled>Reset session</button>
+          <button type="button" class="cb-btn cb-btn-ghost" id="chat-reset-quick" disabled
+            title="Start a fresh session with this agent">${iconSvg('reset')}<span>Reset session</span></button>
         </div>
       </section>
 
-      <aside class="test-panel">
+      <div class="chat-resizer panel-resizer" data-resize="controls" role="separator" tabindex="0"
+           aria-orientation="vertical" aria-label="Resize controls panel"><span class="cb-grip">${iconSvg('chevron-left', 14)}</span></div>
+
+      <aside class="test-panel" aria-label="Chat and test controls">
         <div class="test-panel-header">
-          <span class="test-panel-title">Chat & Test Controls</span>
+          <span class="test-panel-title">Chat &amp; test controls</span>
+          <button type="button" class="cb-btn cb-btn-icon cb-btn-ghost" id="chat-controls-toggle">${iconSvg('chevron-right')}</button>
         </div>
         <div class="test-panel-content">
-          <div id="testPanelButtons" class="test-grid"></div>
           <section class="chat-controls">
             <h3 class="chat-controls-title">Chat settings</h3>
             <label class="chat-field-label" for="chat-agent-select">Agent</label>
-            <select id="chat-agent-select" class="form-select">
+            <select id="chat-agent-select" class="cb-select">
               <option value="">Loading agents...</option>
             </select>
             <div id="agent-meta-card" class="card chat-agent-meta">
@@ -185,14 +198,15 @@ export function renderChatView(container) {
             </label>
             <label class="model-picker">
               <span class="model-picker-label">Model <span id="model-count" class="text-muted small"></span></span>
-              <select id="chat-model-select" class="form-select" disabled><option value="">Detecting models…</option></select>
+              <select id="chat-model-select" class="cb-select" disabled><option value="">Detecting models…</option></select>
             </label>
             <div class="chat-session-buttons">
-              <button class="btn btn-sm btn-primary" id="chat-save-log" disabled>Save Session Log (.md)</button>
-              <button class="btn btn-sm" id="chat-reset" disabled>Reset session</button>
+              <button class="cb-btn cb-btn-primary" id="chat-save-log" disabled><span>Save session log (.md)</span></button>
+              <button class="cb-btn" id="chat-reset" disabled><span>Reset session</span></button>
             </div>
             <div id="chat-session-info" class="text-muted small"></div>
           </section>
+          <div id="testPanelButtons" class="test-grid"></div>
         </div>
       </aside>
     </div>
@@ -290,6 +304,25 @@ export function renderChatView(container) {
   const scratchpadDialog = container.querySelector('#chat-scratchpad-dialog');
   const scratchpadContent = container.querySelector('#chat-scratchpad-content');
   const chatMain = container.querySelector('.chat-main');
+  const chatLayout = container.querySelector('.chat-layout');
+  setupSidePanels({
+    shell: chatLayout,
+    layout: chatLayout,
+    prefsKey: 'novous2.chat.',
+    centerMin: 360,
+    panels: {
+      files: {
+        var: '--files-w', edge: 'left', min: 200, hideBelow: 130, default: 260, label: 'files',
+        resizer: container.querySelector('.chat-resizer[data-resize="files"]'),
+        toggle: container.querySelector('#chat-files-toggle'),
+      },
+      controls: {
+        var: '--controls-w', edge: 'right', min: 260, hideBelow: 160, default: 330, label: 'controls',
+        resizer: container.querySelector('.chat-resizer[data-resize="controls"]'),
+        toggle: container.querySelector('#chat-controls-toggle'),
+      },
+    },
+  });
 
   function renderScratchpad(memory) {
     scratchpadContent.replaceChildren();

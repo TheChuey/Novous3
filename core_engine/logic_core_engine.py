@@ -368,6 +368,276 @@ class AgentLibrary:
 
         return agents
 
+    # --- Tool assignment ------------------------------------------------------------
+
+    TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    def _definition_file(self, kind: str, agent_id: str) -> Path:
+        clean = self.normalize_agent_id(agent_id)
+        if kind == "prompt":
+            path = self.LIBRARY_ROOT / f"{clean}.md"
+        elif kind == "subagent":
+            path = self.SUBAGENT_LIBRARY_ROOT / f"{clean}.yaml"
+        else:
+            raise ValueError(f"Unknown definition kind: {kind}")
+        if not path.is_file():
+            raise FileNotFoundError(f"Definition not found: {path.relative_to(self.REPO_ROOT).as_posix()}")
+        return path
+
+    def definition_kind(self, agent_id: str) -> str | None:
+        """'prompt' for a library/ agent, 'subagent' for a subAgentLibrary/ worker, else None."""
+        clean = self.normalize_agent_id(agent_id)
+        if (self.LIBRARY_ROOT / f"{clean}.md").is_file():
+            return "prompt"
+        if (self.SUBAGENT_LIBRARY_ROOT / f"{clean}.yaml").is_file():
+            return "subagent"
+        return None
+
+    def allowed_subagents(self, agent_id: str) -> list[str]:
+        """Sub-agent ids an agent's '## Sub-agents' section allows; empty means unrestricted."""
+        kind = self.definition_kind(agent_id)
+        if kind is None:
+            return []
+        return [entry["id"] for entry in self.get_agent_tools(kind, agent_id)["subagents"]]
+
+    @staticmethod
+    def _yaml_bounds(kind: str, lines: list[str]) -> tuple[int, int]:
+        """Line range holding the YAML mapping: the frontmatter of a prompt, the whole sub-agent file."""
+        if kind == "subagent":
+            return 0, len(lines)
+        if not lines or lines[0].strip() != "---":
+            raise ValueError("Prompt file has no YAML frontmatter.")
+        for index in range(1, len(lines)):
+            if lines[index].strip() == "---":
+                return 1, index
+        raise ValueError("Prompt frontmatter is not closed with '---'.")
+
+    @staticmethod
+    def _replace_top_level_key(lines: list[str], start: int, end: int, key: str,
+                               replacement: list[str]) -> list[str]:
+        """Swap one top-level YAML key (and its indented or '- ' continuation lines) for new lines."""
+        pattern = re.compile(rf"^{re.escape(key)}:(\s|$)")
+        for index in range(start, end):
+            if pattern.match(lines[index]):
+                stop = index + 1
+                last = index + 1
+                while stop < end and (not lines[stop].strip() or lines[stop][:1] in (" ", "\t", "-")):
+                    stop += 1
+                    if lines[stop - 1].strip():
+                        last = stop
+                return lines[:index] + replacement + lines[last:]
+        # Key missing: add it before a sub-agent's prompt block, else at the end of the mapping.
+        insert_at = end
+        for index in range(start, end):
+            if lines[index].startswith("prompt:"):
+                insert_at = index
+                break
+        return lines[:insert_at] + replacement + lines[insert_at:]
+
+    def _load_definition_yaml(self, kind: str, text: str) -> dict:
+        lines = text.splitlines()
+        start, end = self._yaml_bounds(kind, lines)
+        data = yaml.safe_load("\n".join(lines[start:end])) or {}
+        if not isinstance(data, dict):
+            raise ValueError("Definition YAML must be a mapping.")
+        return data
+
+    def get_agent_tools(self, kind: str, agent_id: str) -> dict:
+        path = self._definition_file(kind, agent_id)
+        text = path.read_text(encoding="utf-8")
+        data = self._load_definition_yaml(kind, text)
+        _, body, _ = self._split_prompt_body(kind, text.splitlines())
+        return {
+            "kind": kind,
+            "agent_id": path.stem,
+            "path": path.relative_to(self.REPO_ROOT).as_posix(),
+            "mode": str(data.get("mode") or "agent"),
+            "tools": [str(tool) for tool in (data.get("tools") or [])],
+            "subagents": self._parse_subagents_section(body or []),
+        }
+
+    TOOLS_SECTION_HEADING = "## Available Tools"
+    TOOLS_HEADING_PATTERN = re.compile(r"^##\s+(available\s+)?tools\s*$", re.IGNORECASE)
+    SUBAGENTS_SECTION_HEADING = "## Sub-agents"
+    SUBAGENTS_HEADING_PATTERN = re.compile(r"^##\s+sub-?agents\s*$", re.IGNORECASE)
+    SECTION_BOUNDARY_PATTERN = re.compile(r"^#{1,2}\s")
+    USAGE_LABEL = "- When to use:"
+    MAX_USAGE_LENGTH = 2000
+
+    @staticmethod
+    def _render_tools_section(tools: list[str]) -> list[str]:
+        """The same '## Available Tools' layout Prompt Creation writes: name, provider, signature, description."""
+        catalog = {meta["name"]: meta for meta in tool_catalog.list_tools()}
+        entries = []
+        for name in tools:
+            meta = catalog.get(name)
+            if meta is None:
+                entries.append([f"### {name}", "- Not registered in the tool catalog"])
+                continue
+            description = meta.get("description") or ""
+            if isinstance(description, list):
+                description = " ".join(description)
+            entry = [f"### {name}", f"- Provider: {meta['provider']}", f"- Signature: {meta['signature']}"]
+            if description.strip():
+                entry.append(description.strip())
+            entries.append(entry)
+        lines = [AgentLibrary.TOOLS_SECTION_HEADING]
+        for entry in entries:
+            lines += ["", *entry]
+        return lines
+
+    def _render_subagents_section(self, subagents: list[dict]) -> list[str]:
+        """'## Sub-agents': which sub-agents ``call_subagent`` may reach and when; the Tools dialog reads it back."""
+        lines = [
+            self.SUBAGENTS_SECTION_HEADING,
+            "",
+            "Delegate work with `call_subagent(subagent_id, task_prompt, parameters)`. "
+            "Only call the sub-agents listed here, using the exact ID.",
+        ]
+        for entry in subagents:
+            data, _ = self.parse_subagent_yaml(entry["id"])
+            name = " ".join(str(data.get("name") or entry["id"]).split())
+            lines += ["", f"### {entry['id']}", f"- Name: {name}"]
+            description = " ".join(str(data.get("description") or "").split())
+            if description:
+                lines.append(f"- What it does: {description}")
+            lines.append(self.USAGE_LABEL)
+            lines += entry["usage"].splitlines() or ["Use it when the task matches what this sub-agent does."]
+        return lines
+
+    @classmethod
+    def _find_section(cls, body: list[str], pattern: re.Pattern) -> tuple[int, int] | None:
+        start = next((i for i, line in enumerate(body) if pattern.match(line.strip())), None)
+        if start is None:
+            return None
+        stop = next((i for i in range(start + 1, len(body)) if cls.SECTION_BOUNDARY_PATTERN.match(body[i])),
+                    len(body))
+        return start, stop
+
+    @classmethod
+    def _apply_section(cls, body: list[str], pattern: re.Pattern, section: list[str]) -> list[str]:
+        """Replace the section matching ``pattern``; append it when missing, drop it when ``section`` is empty."""
+        bounds = cls._find_section(body, pattern)
+        before, after = (list(body), []) if bounds is None else (body[:bounds[0]], body[bounds[1]:])
+        while before and not before[-1].strip():
+            before.pop()
+        result = before + ([""] if before and section else []) + section
+        if after:
+            result += [""] + after
+        return result
+
+    @classmethod
+    def _parse_subagents_section(cls, body: list[str]) -> list[dict]:
+        bounds = cls._find_section(body, cls.SUBAGENTS_HEADING_PATTERN)
+        if bounds is None:
+            return []
+        entries, current, in_usage = [], None, False
+        for line in body[bounds[0] + 1:bounds[1]]:
+            if line.startswith("### "):
+                current = {"id": line[4:].strip(), "usage": []}
+                entries.append(current)
+                in_usage = False
+            elif current is not None and line.startswith(cls.USAGE_LABEL):
+                in_usage = True
+                inline = line[len(cls.USAGE_LABEL):].strip()
+                if inline:
+                    current["usage"].append(inline)
+            elif current is not None and in_usage:
+                current["usage"].append(line)
+        return [{"id": entry["id"], "usage": "\n".join(entry["usage"]).strip()} for entry in entries]
+
+    def _split_prompt_body(self, kind: str, lines: list[str]) -> tuple[list[str], list[str] | None, dict]:
+        """Split a definition into (prefix, dedented prompt body, layout); body is None when there is none."""
+        if kind == "prompt":
+            _, end = self._yaml_bounds(kind, lines)
+            return lines[:end + 1], lines[end + 1:], {"suffix": [], "indent": 0, "trailing": 0}
+        # Sub-agent: the literal ``prompt: |`` block, edited in place with its indentation kept.
+        header = next((i for i, line in enumerate(lines) if re.match(r"^prompt:\s*\|[-+]?\s*$", line)), None)
+        if header is None:
+            return lines, None, {}
+        stop = header + 1
+        while stop < len(lines) and (not lines[stop].strip() or lines[stop][:1] in (" ", "\t")):
+            stop += 1
+        block = lines[header + 1:stop]
+        indent = next((len(line) - len(line.lstrip()) for line in block if line.strip()), 2)
+        body = [line[indent:] if line.strip() else "" for line in block]
+        trailing = 0
+        while body and not body[-1]:
+            body.pop()
+            trailing += 1
+        return lines[:header + 1], body, {"suffix": lines[stop:], "indent": indent, "trailing": trailing}
+
+    @staticmethod
+    def _join_prompt_body(prefix: list[str], body: list[str], layout: dict) -> list[str]:
+        indent = " " * layout["indent"]
+        return prefix + [(indent + line) if line else "" for line in body] + [""] * layout["trailing"] + layout["suffix"]
+
+    def _clean_subagents(self, kind: str, agent_id: str, subagents: list[dict]) -> list[dict]:
+        cleaned, seen = [], set()
+        for entry in subagents:
+            subagent_id = self.normalize_agent_id(str(entry.get("id") or ""))
+            if subagent_id in seen:
+                continue
+            if kind == "subagent" and subagent_id == agent_id:
+                raise ValueError("A sub-agent cannot list itself as a sub-agent.")
+            if not (self.SUBAGENT_LIBRARY_ROOT / f"{subagent_id}.yaml").is_file():
+                raise ValueError(f"Sub-agent not found in subAgentLibrary/: {subagent_id}")
+            usage = str(entry.get("usage") or "").strip()
+            if len(usage) > self.MAX_USAGE_LENGTH:
+                raise ValueError(f"Usage note for {subagent_id} is longer than {self.MAX_USAGE_LENGTH} characters.")
+            if any(line.lstrip().startswith("#") for line in usage.splitlines()):
+                raise ValueError(f"Usage note for {subagent_id} cannot contain lines starting with '#'.")
+            seen.add(subagent_id)
+            cleaned.append({"id": subagent_id, "usage": usage})
+        return cleaned
+
+    def set_agent_tools(self, kind: str, agent_id: str, tools: list[str], mode: str | None = None,
+                        subagents: list[dict] | None = None) -> dict:
+        """Rewrite the ``tools`` (and optionally ``mode``) keys plus the prompt's generated
+        '## Available Tools' and '## Sub-agents' sections, leaving the rest of the file intact.
+        ``subagents=None`` keeps the sub-agents the prompt already lists."""
+        clean_tools = list(dict.fromkeys(str(tool).strip() for tool in tools))
+        invalid = [tool for tool in clean_tools if not self.TOOL_NAME_PATTERN.match(tool)]
+        if invalid:
+            raise ValueError(f"Invalid tool names: {', '.join(invalid)}")
+        if mode is not None and mode not in ("chat", "agent"):
+            raise ValueError(f"Invalid mode: {mode}")
+
+        path = self._definition_file(kind, agent_id)
+        agent_id = path.stem
+        text = path.read_text(encoding="utf-8")
+        newline = "\r\n" if "\r\n" in text else "\n"
+        lines = text.splitlines()
+        start, end = self._yaml_bounds(kind, lines)
+        block = ["tools:", *(f"  - {tool}" for tool in clean_tools)] if clean_tools else ["tools: []"]
+        lines = self._replace_top_level_key(lines, start, end, "tools", block)
+        if mode is not None:
+            start, end = self._yaml_bounds(kind, lines)
+            lines = self._replace_top_level_key(lines, start, end, "mode", [f"mode: {mode}"])
+
+        prefix, body, layout = self._split_prompt_body(kind, lines)
+        if body is not None:
+            if subagents is None:
+                subagents = self._parse_subagents_section(body)
+            chosen = self._clean_subagents(kind, agent_id, subagents) if "call_subagent" in clean_tools else []
+            body = self._apply_section(body, self.TOOLS_HEADING_PATTERN,
+                                       self._render_tools_section(clean_tools) if clean_tools else [])
+            body = self._apply_section(body, self.SUBAGENTS_HEADING_PATTERN,
+                                       self._render_subagents_section(chosen) if chosen else [])
+            lines = self._join_prompt_body(prefix, body, layout)
+        updated = newline.join(lines) + (newline if text.endswith(("\n", "\r")) else "")
+
+        # Never write a file whose YAML no longer parses to exactly what was requested.
+        before = self._load_definition_yaml(kind, text)
+        data = self._load_definition_yaml(kind, updated)
+        untouched = {key for key in before if key not in ("tools", "mode", "prompt")}
+        if [str(tool) for tool in (data.get("tools") or [])] != clean_tools or (
+            mode is not None and data.get("mode") != mode
+        ) or any(data.get(key) != before[key] for key in untouched):
+            raise ValueError("Could not update tools without changing other YAML; edit the file directly.")
+        path.write_text(updated, encoding="utf-8", newline="")
+        return self.get_agent_tools(kind, agent_id)
+
 
 # --- Runtime -----------------------------------------------------------------------
 

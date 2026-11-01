@@ -31,7 +31,17 @@ class FileBackendService:
         return config
 
     def configured_roots(self) -> list[dict[str, str]]:
-        config = self._read_config()
+        """Configured roots whose folders exist; missing ones are skipped, not fatal."""
+        roots, _missing = self._split_roots(self._read_config())
+        if not roots:
+            raise RuntimeError("None of the folders in 'file_manager_roots' exist on disk.")
+        return roots
+
+    def missing_roots(self) -> list[dict[str, str]]:
+        """Configured roots whose folders are gone (e.g. an unplugged drive)."""
+        return self._split_roots(self._read_config())[1]
+
+    def _split_roots(self, config: dict) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
         roots = config.get("file_manager_roots")
         if roots is None:
             legacy_path = config.get("file_manager_root", str(editor_files.PROJECT_ROOT.resolve()))
@@ -40,6 +50,7 @@ class FileBackendService:
             raise RuntimeError("'file_manager_roots' must be a JSON array.")
 
         result = []
+        missing = []
         names = set()
         paths = set()
         for entry in roots:
@@ -53,18 +64,16 @@ class FileBackendService:
             if not root.is_absolute():
                 raise RuntimeError(f"File-manager root must be an absolute path: {raw_path}")
             resolved = root.resolve()
-            if not resolved.is_dir():
-                raise RuntimeError(f"Configured file-manager root is not an existing directory: {resolved}")
             name_key = name.casefold()
             path_key = os.path.normcase(str(resolved))
             if name_key in names or path_key in paths:
                 raise RuntimeError("File-manager root names and paths must be unique.")
             names.add(name_key)
             paths.add(path_key)
-            result.append({"name": name, "path": str(resolved)})
-        if not result:
+            (result if resolved.is_dir() else missing).append({"name": name, "path": str(resolved)})
+        if not result and not missing:
             raise RuntimeError("Configure at least one entry in 'file_manager_roots'.")
-        return result
+        return result, missing
 
     def active_root_path(self) -> Path:
         config = self._read_config()
@@ -76,6 +85,9 @@ class FileBackendService:
         for root in roots:
             if os.path.normcase(root["path"]) == os.path.normcase(str(selected)):
                 return Path(root["path"])
+        if any(os.path.normcase(root["path"]) == os.path.normcase(str(selected))
+               for root in self.missing_roots()):
+            return Path(roots[0]["path"])
         raise RuntimeError(
             "The active file-manager root is not present in 'file_manager_roots'."
         )
@@ -114,7 +126,7 @@ class FileBackendService:
             raise ValueError("Choose a configured file-manager root.")
 
         config = self._read_config()
-        config["file_manager_roots"] = roots
+        config["file_manager_roots"] = roots + self._split_roots(config)[1]
         config["active_file_manager_root"] = selected["path"]
         config["file_manager_root"] = selected["path"]
         self._write_config(config)
@@ -127,8 +139,9 @@ class FileBackendService:
         if not paths:
             raise ValueError("Provide at least one directory path.")
 
-        roots = self.configured_roots()
         config = self._read_config()
+        available, missing = self._split_roots(config)
+        roots = available + missing
         current_active = str(
             config.get("active_file_manager_root", config.get("file_manager_root", roots[0]["path"]))
         )
@@ -177,19 +190,21 @@ class FileBackendService:
             roots = [root for root in roots if os.path.normcase(root["path"]) not in path_keys]
             if not removed:
                 raise ValueError("None of the provided paths are configured file-manager roots.")
-            if not roots:
-                raise ValueError("At least one file-manager root must remain configured.")
+            if not any(Path(root["path"]).is_dir() for root in roots):
+                raise ValueError("At least one existing file-manager root must remain configured.")
 
+        existing = [root for root in roots if Path(root["path"]).is_dir()]
         active_path = next(
-            (root["path"] for root in roots if os.path.normcase(root["path"]) == os.path.normcase(current_active)),
-            roots[0]["path"],
+            (root["path"] for root in existing if os.path.normcase(root["path"]) == os.path.normcase(current_active)),
+            existing[0]["path"] if existing else roots[0]["path"],
         )
         config["file_manager_roots"] = roots
         config["active_file_manager_root"] = active_path
         config["file_manager_root"] = active_path
         self._write_config(config)
         return {
-            "roots": roots,
+            "roots": existing,
+            "missing": [root for root in roots if root not in existing],
             "active_path": active_path,
             "added": added,
             "removed": removed,

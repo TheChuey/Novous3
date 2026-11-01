@@ -2,26 +2,29 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-height: 610px;
+  min-height: 560px;
   gap: 0.6rem;
 }
 
+/* ---------- Toolbar ---------- */
 .codebuilder-toolbar {
-  min-height: 42px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.4rem 0.65rem;
+  gap: 0.6rem;
+  padding: 0.45rem 0.6rem;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius);
 }
 
 .codebuilder-toolbar-actions {
+  display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
+  gap: 0.5rem;
   min-width: 0;
 }
 
@@ -40,16 +43,13 @@
   min-width: 0;
 }
 
-.codebuilder-file-label,
-.codebuilder-toolbar-actions {
+.codebuilder-file-label {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-}
-
-.codebuilder-file-label {
+  gap: 0.55rem;
   min-width: 0;
-  font-size: 0.86rem;
+  font-size: 0.88rem;
+  font-weight: 600;
 }
 
 .codebuilder-file-label > span:nth-child(2) {
@@ -61,87 +61,41 @@
 .codebuilder-python-icon {
   display: inline-grid;
   place-items: center;
-  width: 25px;
-  height: 25px;
-  border-radius: 6px;
-  background: #3776ab;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, #3776ab, #4b8bbe);
   color: #fff;
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   font-weight: 700;
 }
 
-.codebuilder-toolbar-actions .btn-primary:disabled {
-  cursor: wait;
-  opacity: 0.7;
-}
-
-.codebuilder-run-mode {
-  display: inline-flex;
-  align-items: center;
-}
-
-.codebuilder-run-mode select {
-  max-width: 190px;
-  padding: 0.3rem 0.45rem;
-  font-size: 0.78rem;
-}
+#run-code:disabled { cursor: wait; opacity: 0.75; }
 
 /* ---------- Layout grid ----------
-   Columns: chat | v-resizer | editor | v-resizer | console
-   Rows:    main panes | h-resizer | agents strip
-   Sizes are driven by CSS variables so drag handles and collapse
-   toggles only need to mutate variables. */
+   Columns: chat | divider | editor | divider | console
+   Panel widths are CSS variables; a hidden panel is 0px wide and its divider widens
+   into a tab that brings it back. */
 .codebuilder-layout {
   display: grid;
   grid-template-columns:
-    var(--chat-w, 320px) 6px minmax(0, 1fr) 6px var(--console-w, 300px);
-  grid-template-rows:
-    minmax(0, 1fr) 6px var(--agents-h, 220px);
+    var(--chat-w, 340px) var(--chat-gutter, 8px) minmax(0, 1fr) var(--console-gutter, 8px) var(--console-w, 320px);
+  grid-template-rows: minmax(0, 1fr);
   flex: 1;
   min-height: 250px;
   overflow: hidden;
 }
 
-.codebuilder-chat-panel {
-  grid-column: 1;
-  grid-row: 1;
-}
-
-.codebuilder-resizer[data-resize="chat"] {
-  grid-column: 2;
-  grid-row: 1;
-}
-
-.codebuilder-editor-panel {
-  grid-column: 3;
-  grid-row: 1;
-}
-
-.codebuilder-resizer[data-resize="console"] {
-  grid-column: 4;
-  grid-row: 1;
-}
-
-.codebuilder-console-panel {
-  grid-column: 5;
-  grid-row: 1;
-}
-
-.codebuilder-resizer[data-resize="agents"] {
-  grid-column: 1 / -1;
-  grid-row: 2;
-}
-
-.codebuilder-agents-panel {
-  grid-column: 1 / -1;
-  grid-row: 3;
-}
+.codebuilder-chat-panel { grid-column: 1; grid-row: 1; }
+.codebuilder-resizer[data-resize="chat"] { grid-column: 2; grid-row: 1; }
+.codebuilder-editor-panel { grid-column: 3; grid-row: 1; }
+.codebuilder-resizer[data-resize="console"] { grid-column: 4; grid-row: 1; }
+.codebuilder-console-panel { grid-column: 5; grid-row: 1; }
 
 /* ---------- Panes ---------- */
 .codebuilder-chat-panel,
 .codebuilder-editor-panel,
-.codebuilder-console-panel,
-.codebuilder-agents-panel {
+.codebuilder-console-panel {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -151,97 +105,24 @@
 }
 
 .codebuilder-chat-panel,
-.codebuilder-console-panel,
-.codebuilder-agents-panel {
+.codebuilder-console-panel {
   display: flex;
   flex-direction: column;
 }
 
-/* ---------- Resizers ---------- */
-.codebuilder-resizer {
-  background: var(--border-color);
-  opacity: 0.5;
-}
+/* ---------- Dividers (look shared via .panel-resizer in style.css) ---------- */
+/* While a drag is past the hide point, preview that the panel will disappear. */
+.codebuilder-shell.chat-hiding .codebuilder-chat-panel,
+.codebuilder-shell.console-hiding .codebuilder-console-panel { opacity: 0.35; }
 
-.codebuilder-resizer:hover,
-body.is-resizing .codebuilder-resizer.is-dragging {
-  background: var(--primary);
-  opacity: 0.9;
-}
+/* Hidden panel: nothing on screen but a slim tab on the divider. */
+.codebuilder-shell.chat-collapsed { --chat-w: 0px; --chat-gutter: 18px; }
+.codebuilder-shell.console-collapsed { --console-w: 0px; --console-gutter: 18px; }
+.codebuilder-shell.chat-collapsed .codebuilder-chat-panel,
+.codebuilder-shell.console-collapsed .codebuilder-console-panel { visibility: hidden; border: 0; }
+body.is-resizing .editor-surface { pointer-events: none; }
 
-.codebuilder-resizer[data-resize="chat"],
-.codebuilder-resizer[data-resize="console"] {
-  cursor: col-resize;
-}
-
-.codebuilder-resizer[data-resize="agents"] {
-  cursor: row-resize;
-}
-
-body.is-resizing {
-  cursor: default;
-  user-select: none;
-}
-
-/* ---------- Agents panel (bottom strip) ---------- */
-.codebuilder-agents-heading {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  min-height: 36px;
-  padding: 0.35rem 0.55rem;
-  border-bottom: 1px solid var(--border-color);
-}
-
-.codebuilder-agents-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.codebuilder-agents-title h2 {
-  margin: 0;
-  font-size: 0.86rem;
-}
-
-.codebuilder-agents-toggle,
-.codebuilder-agent-refresh,
-.codebuilder-console-collapse,
-.codebuilder-chat-expand {
-  flex: 0 0 auto;
-  min-width: 30px;
-  padding: 0.2rem 0.45rem;
-  line-height: 1.2;
-}
-
-.codebuilder-agent-refresh {
-  flex: 0 0 auto;
-  margin-left: auto;
-}
-
-.codebuilder-agent-status {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.codebuilder-agent-list {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 0.6rem;
-  overflow-y: auto;
-  padding: 0.6rem 0.75rem;
-}
-
-.codebuilder-agent-list > p {
-  grid-column: 1 / -1;
-  margin: 0;
-  padding: 0.35rem;
-}
-
+/* ---------- Code scratchpad dialog ---------- */
 .codebuilder-scratchpad-dialog {
   width: min(760px, 92vw);
   max-height: 85vh;
@@ -275,7 +156,7 @@ body.is-resizing {
   gap: 0.35rem;
   align-items: center;
 }
-.codebuilder-scratchpad-toolbar .form-select { width: auto; min-width: 9rem; }
+.codebuilder-scratchpad-toolbar .cb-select { min-width: 9rem; }
 .codebuilder-scratchpad-run + .codebuilder-scratchpad-run { margin-top: 1rem; }
 .codebuilder-scratchpad-run h3 {
   margin: 0 0 0.5rem;
@@ -309,22 +190,6 @@ body.is-resizing {
   font-weight: 600;
 }
 .codebuilder-scratchpad-entry-title { margin: 0.3rem 0; font-weight: 600; }
-
-.codebuilder-agent-select {
-  grid-column: 1 / -1;
-  width: 100%;
-}
-
-.codebuilder-agent-tile.selected {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 1px var(--primary);
-  background: var(--bg-elev);
-}
-
-.codebuilder-agent-tile.selected i,
-.codebuilder-agent-tile.selected svg {
-  color: var(--primary);
-}
 
 /* ---------- Editor panel ---------- */
 .codebuilder-editor-panel {
@@ -399,39 +264,80 @@ body.is-resizing {
   flex-direction: column;
 }
 
-.codebuilder-console-heading,
-.codebuilder-chat-heading {
+/* ---------- Panel headings ---------- */
+.codebuilder-chat-heading,
+.codebuilder-console-heading {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.7rem 0.85rem;
+  gap: 0.3rem;
+  min-height: 46px;
+  padding: 0.4rem 0.5rem;
   border-bottom: 1px solid var(--border-color);
 }
-
-.codebuilder-console-heading h2,
-.codebuilder-output-section h3,
-.codebuilder-problems-section h3 {
-  display: inline-block;
+.codebuilder-agent-select { flex: 1; min-width: 0; font-weight: 600; }
+.codebuilder-chat-status {
   margin: 0;
-  font-size: 0.85rem;
-}
-
-#codebuilder-fix-with-agent,
-#codebuilder-copy-console {
-  float: right;
-}
-
-.codebuilder-output-section h3 {
-  display: inline-block;
-  margin: 0;
-  font-size: 0.85rem;
-}
-
-.codebuilder-console-subtitle {
+  padding: 0.35rem 0.75rem;
+  border-bottom: 1px solid var(--border-color);
   color: var(--text-muted);
-  font-size: 0.72rem;
+  font-size: 0.74rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+
+.codebuilder-console-tabs { display: flex; gap: 0.2rem; flex: 1; min-width: 0; }
+.codebuilder-console-tabs button {
+  height: 30px;
+  padding: 0 0.75rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.codebuilder-console-tabs button:hover { color: var(--text-main); background: var(--bg-elev); }
+.codebuilder-console-tabs button.active { color: var(--text-main); background: var(--bg-elev); box-shadow: inset 0 -2px 0 var(--primary); }
+.codebuilder-console-tabs button:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+
+.cb-section-head { display: flex; align-items: center; gap: 0.25rem; min-height: 32px; }
+.cb-section-head h3 { margin: 0 auto 0 0; font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.cb-section-head .cb-btn-accent { height: 28px; font-size: 0.78rem; }
+
+/* ---------- Chat composer ---------- */
+.codebuilder-chat-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.55rem 0.6rem 0.6rem;
+  border-top: 1px solid var(--border-color);
+}
+.codebuilder-chat-form textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 64px;
+  max-height: 180px;
+  resize: vertical;
+  padding: 0.55rem 0.65rem;
+  border-radius: 8px;
+  font-size: 0.84rem;
+}
+.codebuilder-chat-footer { display: flex; align-items: center; gap: 0.35rem; }
+.codebuilder-model { flex: 1; min-width: 0; color: var(--text-muted); }
+
+.codebuilder-workflow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border-color);
+}
+.cb-squad-label { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-right: 0.15rem; }
+.codebuilder-workflow-actions .cb-btn { height: 30px; }
 
 .codebuilder-output-section,
 .codebuilder-problems-section {
@@ -508,23 +414,6 @@ button.diagnostic-item {
 }
 
 /* ---------- Chat panel (left column) ---------- */
-.codebuilder-chat-heading {
-  flex: 0 0 auto;
-  padding: 0.45rem 0.75rem;
-}
-
-.codebuilder-chat-heading h2 {
-  margin: 0;
-  font-size: 0.86rem;
-}
-
-.codebuilder-chat-heading .text-muted {
-  max-width: 60%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .codebuilder-chat-messages {
   display: flex;
   flex: 1;
@@ -648,59 +537,6 @@ button.diagnostic-item {
   color: var(--text-muted);
 }
 
-.codebuilder-chat-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 0.5rem;
-  padding: 0.45rem 0.65rem;
-  border-top: 1px solid var(--border-color);
-}
-
-.codebuilder-model-picker {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-}
-
-.codebuilder-model-picker .form-select {
-  width: 100%;
-  min-width: 0;
-  padding: 0.4rem 0.5rem;
-  font-size: 0.78rem;
-}
-
-.codebuilder-chat-form textarea {
-  grid-column: 1;
-  box-sizing: border-box;
-  width: 100%;
-  min-width: 0;
-  min-height: 38px;
-  max-height: 110px;
-  resize: vertical;
-  padding: 0.45rem 0.6rem;
-  font-size: 0.82rem;
-}
-
-.codebuilder-chat-actions {
-  grid-column: 2;
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-
-.codebuilder-chat-actions .btn {
-  width: 100%;
-}
-
-.codebuilder-workflow-actions {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-}
-
 .codebuilder-orchestration-bar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -792,179 +628,38 @@ body.codebuilder-modal-open {
   overflow: hidden;
 }
 
-/* ---------- Collapse rails ---------- */
-.codebuilder-shell.chat-collapsed {
-  --chat-w: 44px;
-}
-
-.codebuilder-shell.console-collapsed {
-  --console-w: 44px;
-}
-
-.codebuilder-shell.agents-collapsed {
-  --agents-h: 38px;
-}
-
-.codebuilder-shell.chat-collapsed .codebuilder-chat-heading {
-  justify-content: center;
-  padding: 0.45rem 0.2rem;
-}
-
-.codebuilder-shell.chat-collapsed .codebuilder-chat-heading h2,
-.codebuilder-shell.chat-collapsed .codebuilder-chat-heading .text-muted,
-.codebuilder-shell.chat-collapsed .codebuilder-chat-messages,
-.codebuilder-shell.chat-collapsed .codebuilder-chat-form {
-  display: none;
-}
-
-.codebuilder-shell.console-collapsed .codebuilder-console-heading {
-  justify-content: center;
-  padding: 0.45rem 0.2rem;
-}
-
-.codebuilder-shell.console-collapsed .codebuilder-console-heading h2,
-.codebuilder-shell.console-collapsed .codebuilder-console-subtitle,
-.codebuilder-shell.console-collapsed .codebuilder-output-section,
-.codebuilder-shell.console-collapsed .codebuilder-problems-section {
-  display: none;
-}
-
-.codebuilder-shell.agents-collapsed .codebuilder-agents-heading {
-  justify-content: flex-end;
-}
-
-.codebuilder-shell.agents-collapsed .codebuilder-agents-title {
-  display: none;
-}
-
-.codebuilder-shell.agents-collapsed .codebuilder-agent-list {
-  display: none;
-}
-
 /* ---------- Responsive: medium ---------- */
 @media (max-width: 1100px) {
   .codebuilder-layout {
-    grid-template-columns: var(--chat-w, 280px) 6px minmax(0, 1fr);
-    grid-template-rows:
-      minmax(280px, 1.2fr) minmax(180px, 0.6fr) 6px var(--agents-h, 200px);
+    grid-template-columns: var(--chat-w, 300px) var(--chat-gutter, 8px) minmax(0, 1fr);
+    grid-template-rows: minmax(280px, 1.4fr) minmax(180px, 0.7fr);
   }
-
-  .codebuilder-chat-panel {
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .codebuilder-resizer[data-resize="chat"] {
-    grid-column: 2;
-    grid-row: 1;
-  }
-
-  .codebuilder-editor-panel {
-    grid-column: 3;
-    grid-row: 1;
-  }
-
-  .codebuilder-resizer[data-resize="console"] {
-    display: none;
-  }
-
-  .codebuilder-console-panel {
-    grid-column: 3;
-    grid-row: 2;
-  }
-
-  .codebuilder-resizer[data-resize="agents"] {
-    grid-column: 1 / -1;
-    grid-row: 3;
-  }
-
-  .codebuilder-agents-panel {
-    grid-column: 1 / -1;
-    grid-row: 4;
-  }
+  .codebuilder-chat-panel { grid-row: 1 / span 2; }
+  .codebuilder-resizer[data-resize="chat"] { grid-row: 1 / span 2; }
+  .codebuilder-resizer[data-resize="console"] { display: none; }
+  .codebuilder-console-panel { grid-column: 3; grid-row: 2; margin-top: 0.5rem; }
+  .codebuilder-shell.console-collapsed .codebuilder-console-panel { visibility: visible; border: 1px solid var(--border-color); }
 }
 
 /* ---------- Responsive: small ---------- */
 @media (max-width: 700px) {
-  .codebuilder-shell {
-    height: auto;
-    min-height: 900px;
-  }
-
-  .codebuilder-toolbar {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .codebuilder-toolbar-actions {
-    width: 100%;
-    flex-wrap: wrap;
-  }
-
-  .codebuilder-run-mode,
-  .codebuilder-run-mode select {
-    flex: 1;
-    max-width: none;
-    width: 100%;
-  }
-
-  .codebuilder-toolbar-actions .btn {
-    flex: 1;
-    padding: 0.4rem 0.5rem;
-    font-size: 0.75rem;
-  }
-
+  .codebuilder-shell { height: auto; min-height: 900px; }
+  .codebuilder-toolbar { align-items: stretch; flex-direction: column; }
+  .codebuilder-toolbar-actions { justify-content: flex-start; }
   .codebuilder-layout {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows:
-      auto minmax(350px, 55vh) minmax(260px, 35vh) var(--agents-h, 190px);
+    grid-template-rows: 460px minmax(350px, 55vh) minmax(260px, 35vh);
     min-height: 900px;
+    gap: 0.5rem;
   }
-
-  .codebuilder-resizer {
-    display: none;
-  }
-
-  .codebuilder-chat-panel {
-    grid-column: 1;
-    grid-row: 1;
-    height: 460px;
-  }
-
-  .codebuilder-editor-panel {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  .codebuilder-console-panel {
-    grid-column: 1;
-    grid-row: 3;
-  }
-
-  .codebuilder-agents-panel {
-    grid-column: 1;
-    grid-row: 4;
-  }
-
-  .codebuilder-statusbar {
-    gap: 0.55rem;
-    font-size: 0.65rem;
-  }
+  .codebuilder-resizer { display: none; }
+  .codebuilder-chat-panel { grid-column: 1; grid-row: 1; }
+  .codebuilder-editor-panel { grid-column: 1; grid-row: 2; }
+  .codebuilder-console-panel { grid-column: 1; grid-row: 3; margin-top: 0; }
+  .codebuilder-shell.chat-collapsed .codebuilder-chat-panel { visibility: visible; border: 1px solid var(--border-color); }
+  .codebuilder-statusbar { gap: 0.55rem; font-size: 0.65rem; }
 }
 /* ---------- Terminal (docked tab + pop-out page) ---------- */
-.codebuilder-console-tabs {
-  display: flex;
-  gap: 0.35rem;
-  padding: 0.4rem 0.85rem 0;
-  border-bottom: 1px solid var(--border-color);
-}
-
-.codebuilder-console-tabs .btn.active {
-  background: var(--bg-elev);
-  border-bottom-color: var(--primary);
-  color: var(--text-main);
-}
-
 .codebuilder-console-panel.show-terminal .codebuilder-output-section,
 .codebuilder-console-panel.show-terminal .codebuilder-problems-section {
   display: none;

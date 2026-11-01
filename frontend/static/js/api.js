@@ -75,6 +75,14 @@ export const Api = {
     return send('DELETE', `/api/agents/${encodeURIComponent(agentId)}?environment=${encodeURIComponent(environment)}`);
   },
 
+  async getAgentTools(kind, agentId) {
+    return get(`/api/agent-tools/${encodeURIComponent(kind)}/${encodeURIComponent(agentId)}`);
+  },
+
+  async setAgentTools(kind, agentId, tools, mode = null, subagents = null) {
+    return send('PUT', `/api/agent-tools/${encodeURIComponent(kind)}/${encodeURIComponent(agentId)}`, { tools, mode, subagents });
+  },
+
   async getCodeBuilderAgents() {
     return get('/api/codebuilder/agents');
   },
@@ -402,6 +410,14 @@ export const Api = {
     return get('/api/orchestration/catalog');
   },
 
+  async createSubagent(subagentId, name, description = '') {
+    return send('POST', '/api/orchestration/subagents', { subagent_id: subagentId, name, description });
+  },
+
+  async deleteSubagent(subagentId) {
+    return send('DELETE', `/api/orchestration/subagents/${encodeURIComponent(subagentId)}`);
+  },
+
   async createOrchestrationSquad(squad) {
     return send('POST', '/api/orchestration/squads', squad);
   },
@@ -410,13 +426,51 @@ export const Api = {
     return send('DELETE', `/api/orchestration/squads/${encodeURIComponent(squadId)}`);
   },
 
-  async startOrchestrationRun(squadId, userQuery, workflowAction = 'all', parameters = {}) {
+  async startOrchestrationRun(squadId, userQuery, workflowAction = 'all', parameters = {}, pattern = null) {
     return send('POST', '/api/orchestration/run/start', {
       squad_id: squadId,
       user_query: userQuery,
       workflow_action: workflowAction,
-      parameters
+      parameters,
+      ...(pattern ? { pattern } : {})
     });
+  },
+
+  async updateSquad(squadId, fields) {
+    return send('PATCH', `/api/orchestration/squads/${encodeURIComponent(squadId)}`, fields);
+  },
+
+  // --- Squad Architect ---
+  async getSquadsOverview() {
+    return get('/api/squads-architect/overview');
+  },
+
+  async getSquadAgent(agentId) {
+    return get(`/api/squads-architect/agents/${encodeURIComponent(agentId)}`);
+  },
+
+  async getSquadBlueprint(squadId) {
+    return get(`/api/squads-architect/blueprints/${encodeURIComponent(squadId)}`);
+  },
+
+  async validateSquadBlueprint(blueprint) {
+    return send('POST', '/api/squads-architect/blueprints/validate', blueprint);
+  },
+
+  async saveSquadBlueprint(blueprint) {
+    return send('POST', '/api/squads-architect/blueprints', blueprint);
+  },
+
+  async createSquadMember(kind, agentId, name, description = '') {
+    return send('POST', '/api/squads-architect/members', { kind, agent_id: agentId, name, description });
+  },
+
+  async attachAgentTool(agentId, tool) {
+    return send('POST', '/api/squads-architect/tools/attach', { agent_id: agentId, tool });
+  },
+
+  async detachAgentTool(agentId, tool) {
+    return send('POST', '/api/squads-architect/tools/detach', { agent_id: agentId, tool });
   },
 
   async getOrchestrationRunResult(traceId) {
@@ -440,72 +494,6 @@ export const Api = {
   },
 
   // --- Testing & Prompt Builder ---
-  async getPromptCategories() {
-    return get('/api/prompt-builder/categories');
-  },
-
-  async addPromptCategory(id, name, description = '', requiredHeader = '') {
-    return send('POST', '/api/prompt-builder/categories', {
-      id, name, description, required_header: requiredHeader
-    });
-  },
-
-  async deletePromptCategory(catId) {
-    return send('DELETE', `/api/prompt-builder/categories/${encodeURIComponent(catId)}`);
-  },
-
-  async getPromptParts(category = null) {
-    const q = category ? `?category=${encodeURIComponent(category)}` : '';
-    return get(`/api/prompt-builder/parts${q}`);
-  },
-
-  async addPromptPart(category, title, content, id = null) {
-    return send('POST', '/api/prompt-builder/parts', {
-      category, title, content, id
-    });
-  },
-
-  async deletePromptPart(partId) {
-    return send('DELETE', `/api/prompt-builder/parts/${encodeURIComponent(partId)}`);
-  },
-
-  async assemblePrompt(parts, extraInstructions = '') {
-    return send('POST', '/api/prompt-builder/assemble', {
-      parts, extra_instructions: extraInstructions
-    });
-  },
-
-  async evaluatePromptComponents(title, description, sections, tools) {
-    return send('POST', '/api/prompt-builder/evaluate', {
-      title, description, sections, tools
-    });
-  },
-
-  async judgePrompt(model, title, description, sections, tools) {
-    return send('POST', '/api/prompt-builder/judge', { model, title, description, sections, tools });
-  },
-
-  async probePrompt(model, title, description, prompt, factQuestion = '', factAnswer = '') {
-    return send('POST', '/api/prompt-builder/probe', {
-      model, title, description, prompt, fact_question: factQuestion, fact_answer: factAnswer
-    });
-  },
-
-  async saveTestReport(report) {
-    return send('POST', '/api/testing/reports', report);
-  },
-
-  async listTestReports() {
-    return get('/api/testing/reports');
-  },
-
-  async getTestReport(id) {
-    return get(`/api/testing/reports/${encodeURIComponent(id)}`);
-  },
-
-  async runHeaderTests(agentId, environment = 'workspace') {
-    return send('POST', '/api/testing/run_header_tests', { agent_id: agentId, environment });
-  },
 
   async executeToolTest(toolCode, functionInput = {}, timeoutSeconds = 5) {
     return send('POST', '/api/testing/tool-workbench/execute', {
@@ -531,19 +519,5 @@ export const Api = {
     return send('POST', '/api/testing/tool-workbench/promote', {
       tool_code: toolCode, function_input: functionInput, timeout_seconds: timeoutSeconds
     });
-  },
-
-  async evaluateMarkdown(markdown, agentId = 'draft') {
-    return send('POST', '/api/testing/evaluate_markdown', { markdown, agent_id: agentId });
-  },
-
-  async publishAgent(agentId, label = '', markdown, environment = 'workspace', tools = []) {
-    return send('POST', '/api/testing/publish', {
-      agent_id: agentId, label, markdown, environment, tools
-    });
-  },
-
-  async getTestFixtures() {
-    return get('/api/testing/fixtures');
   }
 };

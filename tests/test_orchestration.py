@@ -152,3 +152,107 @@ def test_rag_presenter_delegates_to_retriever_and_reads_scratchpad(tmp_path, mon
     result = scratchpad.read_memory("latest_subagent_result")
     assert result["latest_subagent_result"]["subagent_id"] == "rag-retriever"
     assert result["latest_subagent_result"]["payload"] == retrieval_payload
+
+
+def _fake_scratchpad():
+    return (
+        patch.object(subagent_runner, "read_latest_subagent_scratchpad", return_value={}),
+        patch.object(subagent_runner, "read_scratchpad_snapshot", return_value={}),
+    )
+
+
+def test_fanout_runs_every_member_with_bounded_parallelism():
+    import threading
+    import time as _time
+
+    active, peak, lock = [0], [0], threading.Lock()
+
+    def fake_turn(agent_id, prompt_input, parameters=None, trace_id=None):
+        if agent_id == "lead":
+            return f"lead saw: {prompt_input}"
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        _time.sleep(0.05)
+        with lock:
+            active[0] -= 1
+        return f"{agent_id} output"
+
+    req = OrchestrationRequest(
+        pattern="fanout", primary_agent="lead", subagents=["a", "b", "c", "d"],
+        user_query="Compare options", parameters={"max_parallel": 2},
+    )
+    latest, snapshot = _fake_scratchpad()
+    with patch.object(subagent_runner, "run_agent_turn", side_effect=fake_turn), latest, snapshot:
+        res = pipeline_registry.run_orchestration(req)
+
+    assert res.pattern == "fanout"
+    assert res.status == "success"
+    assert peak[0] == 2
+    assert res.result_payload["fanout_results"] == {m: f"{m} output" for m in "abcd"}
+    assert "--- c ---\nc output" in res.final_answer
+    assert [s.phase for s in res.execution_trace].count("SUBAGENT_EXECUTION") == 4
+
+
+def test_router_runs_only_chosen_members_and_drops_unknown_ids():
+    calls = []
+
+    def fake_turn(agent_id, prompt_input, parameters=None, trace_id=None):
+        calls.append(agent_id)
+        if agent_id == "lead" and "routing" in prompt_input:
+            return 'Sure: {"subagents": ["ghost", "b"], "reason": "b knows this"}'
+        return f"{agent_id} done"
+
+    req = OrchestrationRequest(
+        pattern="router", primary_agent="lead", subagents=["a", "b"], user_query="Route me",
+    )
+    latest, snapshot = _fake_scratchpad()
+    with patch.object(subagent_runner, "run_agent_turn", side_effect=fake_turn), latest, snapshot:
+        res = pipeline_registry.run_orchestration(req)
+
+    assert calls == ["lead", "b", "lead"]
+    assert res.result_payload["routing"] == {"chosen": ["b"], "reason": "b knows this", "skipped": ["a"]}
+    assert res.execution_trace[0].phase == "ROUTING"
+
+
+def test_router_falls_back_to_first_member_on_unparseable_reply():
+    def fake_turn(agent_id, prompt_input, parameters=None, trace_id=None):
+        return "no json here"
+
+    req = OrchestrationRequest(pattern="router", primary_agent="lead", subagents=["a", "b"], user_query="x")
+    latest, snapshot = _fake_scratchpad()
+    with patch.object(subagent_runner, "run_agent_turn", side_effect=fake_turn), latest, snapshot:
+        res = pipeline_registry.run_orchestration(req)
+
+    assert res.result_payload["routing"]["chosen"] == ["a"]
+    assert res.result_payload["routing"]["reason"].startswith("Fallback")
+
+
+def test_squad_default_pattern_applies_unless_the_run_overrides_it(monkeypatch):
+    from orchestration.logic_orchestration import squad_registry
+
+    monkeypatch.setattr(
+        squad_registry, "list_agent_catalog",
+        lambda: {
+            "agents": [{"id": "lead", "name": "Lead", "description": ""},
+                       {"id": "peer", "name": "Peer", "description": ""}],
+            "subagents": [{"id": "worker", "name": "Worker", "description": ""}],
+        },
+    )
+    squad = squad_registry.create_squad("Mixed", "", "lead", ["peer", "worker"], "fanout", 3)
+    assert squad["default_pattern"] == "fanout" and squad["max_parallel"] == 3
+
+    assert pipeline_registry.resolve_pattern(
+        OrchestrationRequest(squad_id=squad["squad_id"], user_query="x")) == "fanout"
+    assert pipeline_registry.resolve_pattern(
+        OrchestrationRequest(squad_id=squad["squad_id"], pattern="router", user_query="x")) == "router"
+
+    updated = squad_registry.update_squad(squad["squad_id"], default_pattern="router", subagents=["worker"])
+    assert updated["default_pattern"] == "router" and updated["subagents"] == ["worker"]
+    assert squad_registry.update_squad("missing", default_pattern="router") is None
+
+    import pytest
+    with pytest.raises(ValueError, match="Pattern must be one of"):
+        squad_registry.create_squad("Bad", "", "lead", [], "parallel")
+    with pytest.raises(ValueError, match="cannot also be a squad member"):
+        squad_registry.create_squad("Self", "", "lead", ["lead"])

@@ -4,6 +4,8 @@ import { renderTree } from '../tree.js';
 import { mountTerminal, TERMINAL_CHANNEL } from '../terminal.js?v=2';
 import { setupFileControls } from './files_ui.js';
 import { Api } from '../api.js?v=2';
+import { iconSvg } from '../icons.js';
+import { setupSidePanels } from '../side_panels.js';
 
 const DEMO_CODE = `print("Hello from Novous CodeBuilder!")
 for i in range(3):
@@ -43,101 +45,12 @@ async function copyTextToClipboard(text) {
 }
 
 const PREFS_KEY = 'novous2.codebuilder.';
-const PANEL_CONF = {
-  chat:    { var: '--chat-w',    min: 240, maxFactor: 0.45, rail: 44, default: 320 },
-  console: { var: '--console-w', min: 220, maxFactor: 0.45, rail: 44, default: 300 },
-  agents:  { var: '--agents-h',  min: 120, max: 340,        rail: 38, default: 220 },
-};
-const PANEL_LABELS = { chat: 'Chat', console: 'Console', agents: 'Agents' };
-const PANEL_GLYPHS = { chat: ['«', '»'], console: ['»', '«'], agents: ['⌄', '⌃'] };
-const PANEL_BUTTONS = {
-  chat: '#codebuilder-chat-expand',
-  console: '#codebuilder-console-collapse',
-  agents: '#codebuilder-agents-toggle',
-};
-
 const readPref = key => {
   try { return localStorage.getItem(PREFS_KEY + key); } catch { return null; }
 };
 const writePref = (key, value) => {
   try { localStorage.setItem(PREFS_KEY + key, value); } catch { /* storage unavailable */ }
 };
-const readVar = (element, name) => parseFloat(
-  element.style.getPropertyValue(name) || getComputedStyle(element).getPropertyValue(name)
-);
-
-const clampSize = (layout, name, value) => {
-  const conf = PANEL_CONF[name];
-  const max = conf.max ?? Math.max(conf.min, layout.clientWidth * conf.maxFactor);
-  return Math.round(Math.min(Math.max(value, conf.min), max));
-};
-
-function restoreLayoutState(shell) {
-  const layout = shell.querySelector('.codebuilder-layout');
-  if (!layout) return;
-  for (const name of Object.keys(PANEL_CONF)) {
-    const conf = PANEL_CONF[name];
-    const saved = parseFloat(readPref(name + 'Width'));
-    if (Number.isFinite(saved)) layout.style.setProperty(conf.var, clampSize(layout, name, saved) + 'px');
-    if (readPref(name + 'Collapsed') === '1') {
-      shell.classList.add(name + '-collapsed');
-      layout.style.setProperty(conf.var, conf.rail + 'px');
-    }
-  }
-}
-
-function refreshPanelToggle(shell, name) {
-  const button = shell.querySelector(PANEL_BUTTONS[name]);
-  if (!button) return;
-  const collapsed = shell.classList.contains(name + '-collapsed');
-  const label = PANEL_LABELS[name];
-  button.textContent = collapsed ? PANEL_GLYPHS[name][1] : PANEL_GLYPHS[name][0];
-  button.title = collapsed ? `Expand ${label} panel` : `Collapse ${label} panel`;
-  button.setAttribute('aria-label', button.title);
-  button.setAttribute('aria-expanded', String(!collapsed));
-}
-
-function setupResizers(shell) {
-  const layout = shell.querySelector('.codebuilder-layout');
-  if (!layout) return;
-  shell.querySelectorAll('.codebuilder-resizer').forEach(resizer => {
-    const name = resizer.dataset.resize;
-    const conf = PANEL_CONF[name];
-    if (!conf) return;
-    resizer.addEventListener('pointerdown', event => {
-      if (event.button !== 0) return;
-      event.preventDefault();
-      if (shell.classList.contains(name + '-collapsed')) {
-        shell.classList.remove(name + '-collapsed');
-        writePref(name + 'Collapsed', '0');
-        refreshPanelToggle(shell, name);
-      }
-      const axis = name === 'agents' ? 'clientY' : 'clientX';
-      const startPos = event[axis];
-      const start = clampSize(layout, name, readVar(layout, conf.var) || conf.default);
-      resizer.setPointerCapture(event.pointerId);
-      document.body.classList.add('is-resizing');
-      resizer.classList.add('is-dragging');
-      const onMove = moveEvent => {
-        layout.style.setProperty(
-          conf.var,
-          clampSize(layout, name, start + (moveEvent[axis] - startPos)) + 'px'
-        );
-      };
-      const onUp = () => {
-        resizer.removeEventListener('pointermove', onMove);
-        resizer.removeEventListener('pointerup', onUp);
-        document.body.classList.remove('is-resizing');
-        resizer.classList.remove('is-dragging');
-        const final = readVar(layout, conf.var);
-        if (Number.isFinite(final)) writePref(name + 'Width', String(final));
-      };
-      resizer.addEventListener('pointermove', onMove);
-      resizer.addEventListener('pointerup', onUp);
-    });
-  });
-}
-
 const RISKY_CODE_PATTERN = /\b(?:subprocess|os\.system|os\.popen|os\.spawn|pty|commands)\b|shell\s*[:=]\s*true|\binput\s*\(|^\s*!/im;
 const RUN_MODE_KEY = 'codebuilder.runMode';
 
@@ -167,7 +80,9 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
   const demoButton = document.getElementById('load-demo');
   const clearButton = document.getElementById('clear-console');
   const status = document.getElementById('codebuilder-status');
-  const agentList = document.getElementById('codebuilder-agent-list');
+  const agentPicker = document.getElementById('codebuilder-agent-select');
+  const memoryToggle = document.getElementById('codebuilder-memory-toggle');
+  const scratchpadOpen = document.getElementById('codebuilder-scratchpad-open');
   const scratchpadDialog = document.getElementById('codebuilder-scratchpad-dialog');
   const scratchpadContent = document.getElementById('codebuilder-scratchpad-content');
   const scratchpadStatus = document.getElementById('codebuilder-scratchpad-status');
@@ -175,8 +90,6 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
   const scratchpadClear = document.getElementById('codebuilder-scratchpad-clear');
   const scratchpadAuthorFilter = document.getElementById('codebuilder-scratchpad-author');
   const agentRefresh = document.getElementById('codebuilder-agent-refresh');
-  const agentsPanel = document.getElementById('codebuilder-agents-panel');
-  const agentsToggle = document.getElementById('codebuilder-agents-toggle');
   const modelSelect = document.getElementById('codebuilder-model');
   const chatForm = document.getElementById('codebuilder-chat-form');
   const chatInput = document.getElementById('codebuilder-chat-input');
@@ -194,11 +107,11 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
   const changeCount = document.getElementById('codebuilder-change-count');
   const changeViewToggle = document.getElementById('codebuilder-change-view');
   const consoleCollapse = document.getElementById('codebuilder-console-collapse');
-  const shell = agentsPanel?.closest('.codebuilder-shell') ?? root.closest('.codebuilder-shell');
+  const shell = root?.closest('.codebuilder-shell');
   const layout = shell?.querySelector('.codebuilder-layout');
 
   if (!root || !output || !diagnostics || !runButton || !runMode || !demoButton || !clearButton ||
-      !agentList || !agentRefresh || !agentsPanel || !agentsToggle ||
+      !agentPicker || !memoryToggle || !scratchpadOpen || !agentRefresh ||
       !modelSelect || !chatForm || !chatInput || !chatMessages || !chatStatus ||
       !chatPanel || !chatExpand || !chatClear || !consoleCollapse || !shell || !layout ||
       !scratchpadDialog || !scratchpadContent || !scratchpadStatus ||
@@ -210,8 +123,21 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
     return null;
   }
 
-  restoreLayoutState(shell);
-  setupResizers(shell);
+  setupSidePanels({
+    shell,
+    layout,
+    prefsKey: PREFS_KEY,
+    panels: {
+      chat: {
+        var: '--chat-w', edge: 'left', min: 220, hideBelow: 140, default: 340, label: 'chat',
+        resizer: shell.querySelector('.codebuilder-resizer[data-resize="chat"]'), toggle: chatExpand,
+      },
+      console: {
+        var: '--console-w', edge: 'right', min: 220, hideBelow: 140, default: 320, label: 'console',
+        resizer: shell.querySelector('.codebuilder-resizer[data-resize="console"]'), toggle: consoleCollapse,
+      },
+    },
+  });
 
   const editor = await attachCodeBuilderEditor(root, DEMO_CODE);
   let agents = [];
@@ -408,8 +334,12 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
       document.execCommand('copy');
       area.remove();
     }
-    copyConsoleButton.textContent = 'Copied';
-    setTimeout(() => { copyConsoleButton.textContent = 'Copy'; }, 1500);
+    copyConsoleButton.classList.add('is-done');
+    copyConsoleButton.title = 'Copied';
+    setTimeout(() => {
+      copyConsoleButton.classList.remove('is-done');
+      copyConsoleButton.title = 'Copy the console output';
+    }, 1500);
   });
 
   fixButton?.addEventListener('click', () => {
@@ -550,7 +480,7 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
     const mode = serverMode() ? 'risky' : currentRunMode();
     lastRunCode = editor.getValue();
     runButton.disabled = true;
-    runButton.textContent = mode === 'risky' ? 'Running… (stream)' : 'Running…';
+    runButton.querySelector('.cb-btn-label').textContent = mode === 'risky' ? 'Running… (stream)' : 'Running…';
     output.textContent = '';
     status.textContent = 'Running';
     diagnostics.replaceChildren();
@@ -593,7 +523,7 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
       activeRunId = null;
       stopButton.hidden = true;
       runButton.disabled = false;
-      runButton.textContent = '▶ Run Python';
+      runButton.querySelector('.cb-btn-label').textContent = 'Run';
       editor.focus();
     }
   };
@@ -881,11 +811,6 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
     orchestrationButtons.forEach(button => { button.disabled = chatPending || orchestrationRunning; });
   };
 
-  const FUTURE_AGENT_OPTIONS = [
-    { id: 'debugAgent', label: 'Debug Agent', icon: 'bug' },
-    { id: 'diagnostics', label: 'Diagnostics', icon: 'activity' },
-  ];
-
   // Memory mode: the chat transcript is saved to a file the user picks.
   let memoryPath = null;
   let transcript = [];
@@ -1000,85 +925,6 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
 
   const hasAgentFunctions = agent => Array.isArray(agent.tools) && agent.tools.length > 0;
 
-  const AGENT_TILE_ICONS = {
-    clipboard: [
-      'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2',
-      'M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z',
-      'M8 11h8',
-      'M8 15h5',
-    ],
-    bot: [
-      'M12 8V4H8',
-      'M4 8v12a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1Z',
-      'M8 13v2',
-      'M12 13v2',
-      'M16 13v2',
-    ],
-    bug: [
-      'm8 2 1.88 1.88',
-      'M14.12 3.88 16 2',
-      'M9 7.13v-1a3.003 3.003 0 1 1 6 0v1',
-      'M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6',
-      'M12 20v-9',
-      'M6.53 9C4.6 8.8 3 7.1 3 5',
-      'M6 13H2',
-      'M3 21c0-2.1 1.7-3.9 3.8-4',
-      'M20.97 5c0 2.1-1.6 3.8-3.5 4',
-      'M22 13h-4',
-      'M17.2 17c2.1.1 3.8 1.9 3.8 4',
-    ],
-    activity: [
-      'M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2',
-    ],
-    memory: [
-      'M4 6c0-1.1 3.6-2 8-2s8 .9 8 2-3.6 2-8 2-8-.9-8-2Z',
-      'M4 6v6c0 1.1 3.6 2 8 2s8-.9 8-2V6',
-      'M4 12v6c0 1.1 3.6 2 8 2s8-.9 8-2v-6',
-    ],
-  };
-
-  const buildTileIcon = (name) => {
-    const iconPath = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(iconPath, 'svg');
-    svg.setAttribute('viewBox', '0 0 24 24');
-    svg.setAttribute('width', '20');
-    svg.setAttribute('height', '20');
-    svg.setAttribute('fill', 'none');
-    svg.setAttribute('stroke', 'currentColor');
-    svg.setAttribute('stroke-width', '2');
-    svg.setAttribute('stroke-linecap', 'round');
-    svg.setAttribute('stroke-linejoin', 'round');
-    svg.setAttribute('aria-hidden', 'true');
-    (AGENT_TILE_ICONS[name] || []).forEach(pathData => {
-      const path = document.createElementNS(iconPath, 'path');
-      path.setAttribute('d', pathData);
-      svg.appendChild(path);
-    });
-    return svg;
-  };
-
-  const buildAgentTile = (label, icon, title, onClick, isSelected) => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'test-function codebuilder-agent-tile';
-    button.title = title;
-    if (isSelected) button.classList.add('selected');
-    button.setAttribute('aria-pressed', String(Boolean(isSelected)));
-
-    const iconElement = buildTileIcon(icon);
-    const labelElement = document.createElement('span');
-    labelElement.textContent = label;
-
-    if (typeof onClick === 'function') {
-      button.addEventListener('click', onClick);
-    } else {
-      button.disabled = true;
-      button.classList.add('disabled');
-    }
-    button.append(iconElement, labelElement);
-    return button;
-  };
-
   // The coding agents' shared scratchpad (the RAG agents keep their own in the Chat Console).
   let codeScratchpadCount = 0;
   const SCRATCHPAD_KIND_LABELS = {
@@ -1094,8 +940,9 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
   };
 
   const updateScratchpadTile = () => {
-    const label = document.querySelector('#codebuilder-scratchpad-tile span');
-    if (label) label.textContent = `Scratchpad (${codeScratchpadCount})`;
+    const count = document.getElementById('codebuilder-scratchpad-count');
+    if (count) count.textContent = String(codeScratchpadCount);
+    scratchpadOpen.classList.toggle('has-count', codeScratchpadCount > 0);
   };
 
   const refreshScratchpadCount = async () => {
@@ -1208,92 +1055,39 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
   scratchpadClear.addEventListener('click', clearScratchpad);
   scratchpadAuthorFilter.addEventListener('change', loadScratchpad);
 
+  // The agent picker and its buttons live in the chat panel heading.
   const renderAgents = () => {
-    agentList.replaceChildren();
-
-    const picker = document.createElement('select');
-    picker.className = 'form-select codebuilder-agent-select';
-    picker.id = 'codebuilder-agent-select';
-    picker.setAttribute('aria-label', 'Choose agent');
-    picker.disabled = chatPending || !agents.length;
-    agents.forEach(agent => {
-      const toolCount = (agent.tools || []).length;
-      const option = new Option(`${agent.name} (${toolCount} tool${toolCount === 1 ? '' : 's'})`, agent.id);
-      option.disabled = !hasAgentFunctions(agent);
-      option.title = (agent.tools || []).join(', ') || 'No tools';
-      picker.add(option);
-    });
-    if (selectedAgent) picker.value = selectedAgent.id;
-    picker.addEventListener('change', () => {
-      const chosen = agents.find(agent => agent.id === picker.value);
-      if (chosen && chosen.id !== selectedAgent?.id) selectAgent(chosen);
-    });
-    agentList.appendChild(picker);
-
-    agents.forEach(agent => {
-      const isSelected = selectedAgent?.id === agent.id;
-      const hasFunctions = hasAgentFunctions(agent);
-      const tile = buildAgentTile(
-        agent.name,
-        'bot',
-        hasFunctions
-          ? (agent.description || agent.name)
-          : `${agent.name} — no tools available`,
-        () => selectAgent(agent),
-        isSelected
-      );
-      tile.setAttribute('aria-label', `${agent.name} agent`);
-      if (chatPending || !hasFunctions) {
-        tile.disabled = true;
-        tile.classList.add('disabled');
-      }
-      agentList.appendChild(tile);
-    });
-
-    const memoryTile = buildAgentTile(
-      'Memory',
-      'memory',
-      memoryPath
-        ? `Memory mode on — saving to ${memoryPath}. Click to turn off.`
-        : 'Save this chat to a text file you choose',
-      toggleMemory,
-      Boolean(memoryPath)
-    );
-    memoryTile.setAttribute('aria-label', 'Memory mode');
-    agentList.appendChild(memoryTile);
-
-    const scratchpadTile = buildAgentTile(
-      `Scratchpad (${codeScratchpadCount})`,
-      'clipboard',
-      'Shared scratchpad for the coding agents: plans, code, test results, fixes, and notes',
-      viewScratchpad,
-      false
-    );
-    scratchpadTile.id = 'codebuilder-scratchpad-tile';
-    scratchpadTile.setAttribute('aria-label', 'Open the code scratchpad');
-    agentList.appendChild(scratchpadTile);
-
-    FUTURE_AGENT_OPTIONS.forEach(option => {
-      const tile = buildAgentTile(
-        option.label,
-        option.icon,
-        `${option.label} — not implemented yet`,
-        null,
-        false
-      );
-      agentList.appendChild(tile);
-    });
-
+    agentPicker.replaceChildren();
     if (!agents.length) {
       selectedAgent = null;
-      const empty = document.createElement('p');
-      empty.className = 'text-muted small';
-      empty.textContent = 'No agents found in the workspace agents folder.';
-      agentList.appendChild(empty);
+      agentPicker.add(new Option('No agents found', ''));
     }
+    agents.forEach(agent => {
+      const toolCount = (agent.tools || []).length;
+      const option = new Option(`${agent.name} · ${toolCount} tool${toolCount === 1 ? '' : 's'}`, agent.id);
+      option.disabled = !hasAgentFunctions(agent);
+      option.title = (agent.tools || []).join(', ') || 'No tools';
+      agentPicker.add(option);
+    });
+    if (selectedAgent) agentPicker.value = selectedAgent.id;
+    agentPicker.disabled = chatPending || !agents.length;
+    agentPicker.title = selectedAgent?.description || 'Choose agent';
+
+    memoryToggle.setAttribute('aria-pressed', String(Boolean(memoryPath)));
+    memoryToggle.classList.toggle('is-on', Boolean(memoryPath));
+    memoryToggle.title = memoryPath
+      ? `Memory mode on — saving to ${memoryPath}. Click to turn off.`
+      : 'Memory mode: save this chat to a text file you choose';
 
     updateChatControls();
   };
+
+  agentPicker.addEventListener('change', () => {
+    const chosen = agents.find(agent => agent.id === agentPicker.value);
+    if (chosen && chosen.id !== selectedAgent?.id) selectAgent(chosen);
+  });
+  memoryToggle.addEventListener('click', toggleMemory);
+  scratchpadOpen.addEventListener('click', viewScratchpad);
 
   const selectAgent = (agent) => {
     selectedAgent = agent;
@@ -1305,7 +1099,7 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
     chatMessages.replaceChildren();
     disposeChatCodeEditors();
     appendChatMessage('system', `Chatting with ${agent.name}.`);
-    chatStatus.textContent = `Agent: ${agent.name}`;
+    chatStatus.textContent = agent.description || `Chatting with ${agent.name}.`;
   };
 
   const loadAgents = async () => {
@@ -1322,10 +1116,8 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
       renderAgents();
       if (selectedAgent) selectAgent(selectedAgent);
     } catch (error) {
-      const message = document.createElement('p');
-      message.className = 'text-danger small';
-      message.textContent = error instanceof Error ? error.message : String(error);
-      agentList.replaceChildren(message);
+      agentPicker.replaceChildren(new Option('Could not load agents', ''));
+      chatStatus.textContent = error instanceof Error ? error.message : String(error);
     } finally {
       agentRefresh.disabled = false;
     }
@@ -1763,33 +1555,17 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
   });
   agentRefresh.addEventListener('click', loadAgents);
 
-  const togglePanel = (name) => {
-    const conf = PANEL_CONF[name];
-    const collapsed = !shell.classList.contains(name + '-collapsed');
-    if (collapsed) {
-      const current = readVar(layout, conf.var);
-      if (Number.isFinite(current) && current > conf.rail) writePref(name + 'Width', String(current));
-      shell.classList.add(name + '-collapsed');
-      layout.style.setProperty(conf.var, conf.rail + 'px');
-    } else {
-      const saved = parseFloat(readPref(name + 'Width'));
-      layout.style.setProperty(
-        conf.var,
-        (Number.isFinite(saved) ? clampSize(layout, name, saved) : conf.default) + 'px'
-      );
-      shell.classList.remove(name + '-collapsed');
-    }
-    writePref(name + 'Collapsed', collapsed ? '1' : '0');
-    return collapsed;
-  };
-
-  chatExpand.addEventListener('click', () => { togglePanel('chat'); refreshPanelToggle(shell, 'chat'); });
-  consoleCollapse.addEventListener('click', () => { togglePanel('console'); refreshPanelToggle(shell, 'console'); });
-  agentsToggle.addEventListener('click', () => { togglePanel('agents'); refreshPanelToggle(shell, 'agents'); });
-
-  refreshPanelToggle(shell, 'chat');
-  refreshPanelToggle(shell, 'console');
-  refreshPanelToggle(shell, 'agents');
+  // The toolbar shows the same file name as the status bar.
+  const statusFilename = document.getElementById('codebuilder-filename');
+  const toolbarFilename = document.getElementById('codebuilder-toolbar-filename');
+  if (statusFilename && toolbarFilename) {
+    const mirror = () => {
+      toolbarFilename.textContent = statusFilename.textContent;
+      toolbarFilename.title = statusFilename.title;
+    };
+    new MutationObserver(mirror).observe(statusFilename, { childList: true, characterData: true, subtree: true, attributes: true });
+    mirror();
+  }
 
   chatForm.addEventListener('submit', async event => {
     event.preventDefault();
@@ -1947,78 +1723,85 @@ export function renderCodeBuilderView(container) {
       <div class="codebuilder-toolbar">
         <div class="codebuilder-file-label">
           <span class="codebuilder-python-icon">Py</span>
-          <span>Untitled Python File</span>
-          <span class="badge badge-success">Python</span>
+          <span id="codebuilder-toolbar-filename">Untitled</span>
         </div>
         <div class="codebuilder-toolbar-actions">
-          <label class="codebuilder-run-mode">
-            <select id="codebuilder-run-mode" aria-label="Choose how to run Python code">
-              <option value="safe">Safe (in-process)</option>
-              <option value="risky">Risky (isolated, streams)</option>
+          <div class="cb-group" role="group" aria-label="File">
+            <button id="open-file" class="cb-btn" type="button" title="Open a file from the file manager">${iconSvg('folder-open')}<span>Open</span></button>
+            <button id="save-file" class="cb-btn" type="button" title="Save (Ctrl+S)">${iconSvg('save')}<span>Save</span></button>
+            <button id="save-file-as" class="cb-btn cb-btn-icon" type="button" title="Save as a new file" aria-label="Save as">${iconSvg('save-as')}</button>
+          </div>
+          <div class="cb-group" role="group" aria-label="Run settings">
+            <select id="codebuilder-run-mode" class="cb-select" aria-label="Choose how to run Python code"
+                    title="Safe runs in-process; Isolated runs in a separate process and streams output">
+              <option value="safe">Safe</option>
+              <option value="risky">Isolated · streams</option>
             </select>
-          </label>
-          <label class="codebuilder-run-mode">
-            <select id="codebuilder-run-timeout" aria-label="Time limit for a run">
-              <option value="10">Limit: 10 sec</option>
-              <option value="120">Limit: 2 min</option>
-              <option value="240">Limit: 4 min</option>
-              <option value="480">Limit: 8 min</option>
-              <option value="server">Server: no limit (Stop)</option>
+            <select id="codebuilder-run-timeout" class="cb-select" aria-label="Time limit for a run" title="Time limit for a run">
+              <option value="10">10 s limit</option>
+              <option value="120">2 min limit</option>
+              <option value="240">4 min limit</option>
+              <option value="480">8 min limit</option>
+              <option value="server">Server · no limit</option>
             </select>
-          </label>
-          <button id="load-demo" class="btn btn-sm" type="button" title="Load the sample Python program">Sample</button>
-          <button id="open-file" class="btn btn-sm" type="button" title="Open a file from the file manager">Open…</button>
-          <button id="save-file" class="btn btn-sm" type="button" title="Save (Ctrl+S)">Save</button>
-          <button id="save-file-as" class="btn btn-sm" type="button" title="Save as a new file">Save As…</button>
-          <button id="run-in-terminal" class="btn btn-sm" type="button" title="Save, then prepare the command in the Terminal tab">Run in Terminal</button>
-          <button id="clear-console" class="btn btn-sm" type="button" title="Clear console and diagnostics">Clear Output</button>
-          <button id="reset-sandbox" class="btn btn-sm" type="button" title="Remove all packages installed for testing">Reset Environment</button>
-          <button id="stop-run" class="btn btn-sm" type="button" title="Stop the running program" hidden>■ Stop</button>
-          <button id="run-code" class="btn btn-sm btn-primary" type="button" title="Run Python (Ctrl+Enter)">▶ Run Python</button>
+          </div>
+          <button id="stop-run" class="cb-btn cb-btn-danger" type="button" title="Stop the running program" hidden>${iconSvg('square')}<span>Stop</span></button>
+          <button id="run-code" class="cb-btn cb-btn-primary" type="button" title="Run Python (Ctrl+Enter)">${iconSvg('play')}<span class="cb-btn-label">Run</span><kbd>Ctrl ↵</kbd></button>
+          <details class="cb-menu">
+            <summary class="cb-btn cb-btn-icon" title="More actions" aria-label="More actions">${iconSvg('more-horizontal')}</summary>
+            <div class="cb-menu-list" role="menu">
+              <button id="run-in-terminal" type="button" role="menuitem">${iconSvg('terminal')}<span>Run in Terminal</span></button>
+              <button id="load-demo" type="button" role="menuitem">${iconSvg('file-code')}<span>Load sample program</span></button>
+              <button id="reset-sandbox" type="button" role="menuitem" class="is-danger">${iconSvg('reset')}<span>Reset environment</span></button>
+            </div>
+          </details>
         </div>
       </div>
 
       <main class="codebuilder-layout">
         <section id="codebuilder-chat-panel" class="codebuilder-chat-panel" aria-label="Chat with an agent">
           <div class="codebuilder-chat-heading">
-            <h2>Ask an Agent</h2>
-            <span id="codebuilder-chat-status" class="text-muted small">Select an agent to start.</span>
-            <button id="codebuilder-chat-expand" class="btn btn-sm codebuilder-chat-expand"
-                    type="button" aria-label="Collapse chat panel" aria-expanded="true"
-                    title="Collapse chat panel">«</button>
+            <select id="codebuilder-agent-select" class="cb-select codebuilder-agent-select" aria-label="Choose agent">
+              <option value="">Loading agents…</option>
+            </select>
+            <button id="codebuilder-agent-refresh" class="cb-btn cb-btn-icon cb-btn-ghost" type="button" title="Reload agents" aria-label="Reload agents">${iconSvg('refresh')}</button>
+            <button id="codebuilder-memory-toggle" class="cb-btn cb-btn-icon cb-btn-ghost" type="button" aria-pressed="false" title="Save this chat to a text file you choose" aria-label="Memory mode">${iconSvg('database')}</button>
+            <button id="codebuilder-scratchpad-open" class="cb-btn cb-btn-icon cb-btn-ghost cb-count" type="button" title="Code scratchpad: plans, code, tests, fixes and notes" aria-label="Open the code scratchpad">${iconSvg('clipboard')}<span id="codebuilder-scratchpad-count">0</span></button>
+            <button id="codebuilder-chat-expand" class="cb-btn cb-btn-icon cb-btn-ghost" type="button" aria-expanded="true" title="Hide chat panel" aria-label="Hide chat panel">${iconSvg('chevron-left')}</button>
           </div>
+          <p id="codebuilder-chat-status" class="codebuilder-chat-status">Select an agent to start.</p>
           <div id="codebuilder-chat-messages" class="codebuilder-chat-messages" aria-live="polite">
             <div class="codebuilder-chat-message system">Messages with your selected agent appear here.</div>
           </div>
           <form id="codebuilder-chat-form" class="codebuilder-chat-form">
-            <label class="codebuilder-model-picker">
-              <span class="text-muted small">Model</span>
-              <select id="codebuilder-model" class="form-select" aria-label="Choose model">
+            <textarea id="codebuilder-chat-input" class="form-input" rows="3"
+                      placeholder="Ask the agent, or describe a task for the code squad…"
+                      aria-label="Message to agent or Code squad workflow"></textarea>
+            <div class="codebuilder-chat-footer">
+              <select id="codebuilder-model" class="cb-select codebuilder-model" aria-label="Choose model" title="Model">
                 <option value="">Loading models…</option>
               </select>
-            </label>
-            <textarea id="codebuilder-chat-input" class="form-input" rows="4"
-                      placeholder="Ask the selected agent, or enter a task for Code squad…"
-                      aria-label="Message to agent or Code squad workflow"></textarea>
-            <div class="codebuilder-chat-actions">
-              <button id="codebuilder-chat-clear" class="btn btn-sm"
-                      type="button" aria-label="Clear chat" title="Clear the chat conversation">Clear</button>
-              <button class="btn btn-primary" type="submit" disabled>Send</button>
+              <button id="codebuilder-chat-clear" class="cb-btn cb-btn-icon cb-btn-ghost" type="button" title="Clear the conversation" aria-label="Clear chat">${iconSvg('trash-2')}</button>
+              <button class="cb-btn cb-btn-primary" type="submit" disabled title="Send (Enter)">${iconSvg('send')}<span>Send</span></button>
             </div>
-            <div class="codebuilder-workflow-actions" aria-label="Code squad orchestration">
-              <button class="btn btn-sm" type="button" data-codebuilder-workflow="plan" title="Code Planner writes a plan for your request">🧭 Plan</button>
-              <button class="btn btn-sm" type="button" data-codebuilder-workflow="build" title="Code Builder writes the module into the editor (uses the last plan)">🛠️ Build</button>
-              <button class="btn btn-sm" type="button" data-codebuilder-workflow="test" title="Run the editor code and the Code Tester's checks">🧪 Test</button>
-              <button class="btn btn-sm" type="button" data-codebuilder-workflow="fix" title="Code Troubleshooter fixes test failures, retesting up to 3 times">🩺 Fix</button>
-              <button class="btn btn-sm btn-primary" type="button" data-codebuilder-workflow="all" title="Plan, build, test, and fix until the checks pass">▶ Run All</button>
-              <button id="codebuilder-workflow-stop" class="btn btn-sm codebuilder-workflow-stop" type="button" title="Stop the code squad" hidden>■ Stop</button>
-              <button id="codebuilder-workflow-revert" class="btn btn-sm" type="button" title="Restore the editor to how it was before the last run" hidden>↶ Revert run</button>
+            <div class="codebuilder-workflow-actions" role="group" aria-label="Code squad orchestration">
+              <span class="cb-squad-label">Squad</span>
+              <div class="cb-segmented">
+                <button type="button" data-codebuilder-workflow="plan" title="Code Planner writes a plan for your request">Plan</button>
+                <button type="button" data-codebuilder-workflow="build" title="Code Builder writes the module into the editor (uses the last plan)">Build</button>
+                <button type="button" data-codebuilder-workflow="test" title="Run the editor code and the Code Tester's checks">Test</button>
+                <button type="button" data-codebuilder-workflow="fix" title="Code Troubleshooter fixes test failures, retesting up to 3 times">Fix</button>
+              </div>
+              <button class="cb-btn cb-btn-accent" type="button" data-codebuilder-workflow="all" title="Plan, build, test, and fix until the checks pass">${iconSvg('play')}<span>Run all</span></button>
+              <button id="codebuilder-workflow-stop" class="cb-btn cb-btn-danger" type="button" title="Stop the code squad" hidden>${iconSvg('square')}<span>Stop</span></button>
+              <button id="codebuilder-workflow-revert" class="cb-btn" type="button" title="Restore the editor to how it was before the last run" hidden>${iconSvg('reset')}<span>Revert</span></button>
             </div>
           </form>
         </section>
 
-        <div class="codebuilder-resizer" data-resize="chat" role="separator"
-             aria-orientation="vertical" aria-label="Resize chat panel"></div>
+        <div class="codebuilder-resizer panel-resizer" data-resize="chat" role="separator" tabindex="0"
+             aria-orientation="vertical" aria-label="Resize chat panel"
+             title="Drag to resize · drag to the edge or double-click to hide"><span class="cb-grip">${iconSvg('chevron-right', 14)}</span></div>
 
         <section class="codebuilder-editor-panel" aria-label="Python editor">
           <div class="codebuilder-orchestration-bar" aria-live="polite">
@@ -2033,7 +1816,7 @@ export function renderCodeBuilderView(container) {
               <li data-step="fix" data-state="idle">Fix<span class="codebuilder-step-attempt"></span></li>
             </ol>
             <p id="codebuilder-orchestration-status" role="status">Type a request, then use the squad buttons under the chat.</p>
-            <button id="codebuilder-change-view" class="btn btn-sm" type="button" disabled>Show full file</button>
+            <button id="codebuilder-change-view" class="cb-btn" type="button" disabled>Show full file</button>
           </div>
           <div id="codebuilder-editor" class="editor-surface"></div>
           <div class="codebuilder-statusbar">
@@ -2045,54 +1828,42 @@ export function renderCodeBuilderView(container) {
           </div>
         </section>
 
-        <div class="codebuilder-resizer" data-resize="console" role="separator"
-             aria-orientation="vertical" aria-label="Resize console panel"></div>
+        <div class="codebuilder-resizer panel-resizer" data-resize="console" role="separator" tabindex="0"
+             aria-orientation="vertical" aria-label="Resize console panel"
+             title="Drag to resize · drag to the edge or double-click to hide"><span class="cb-grip">${iconSvg('chevron-left', 14)}</span></div>
 
         <aside class="codebuilder-console-panel" aria-label="Run output and diagnostics">
           <div class="codebuilder-console-heading">
-            <h2>Run Output</h2>
-            <span class="codebuilder-console-subtitle">Console &amp; Problems</span>
-            <button id="codebuilder-console-collapse" class="btn btn-sm codebuilder-console-collapse"
-                    type="button" aria-label="Collapse console panel" aria-expanded="true"
-                    title="Collapse console panel">»</button>
-          </div>
-          <div class="codebuilder-console-tabs" role="tablist">
-            <button type="button" class="btn btn-sm active" data-console-tab="console" role="tab">Console</button>
-            <button type="button" class="btn btn-sm" data-console-tab="terminal" role="tab">Terminal</button>
+            <div class="codebuilder-console-tabs" role="tablist">
+              <button type="button" class="active" data-console-tab="console" role="tab">Console</button>
+              <button type="button" data-console-tab="terminal" role="tab">Terminal</button>
+            </div>
+            <button id="codebuilder-console-collapse" class="cb-btn cb-btn-icon cb-btn-ghost" type="button"
+                    aria-expanded="true" title="Hide console panel" aria-label="Hide console panel">${iconSvg('chevron-right')}</button>
           </div>
           <section class="codebuilder-output-section">
-            <h3>Console</h3>
-            <button id="codebuilder-copy-console" class="btn btn-sm" type="button"
-                    title="Copy the console output">Copy</button>
+            <div class="cb-section-head">
+              <h3>Output</h3>
+              <button id="codebuilder-copy-console" class="cb-btn cb-btn-icon cb-btn-ghost" type="button" title="Copy the console output" aria-label="Copy console output">${iconSvg('copy')}</button>
+              <button id="clear-console" class="cb-btn cb-btn-icon cb-btn-ghost" type="button" title="Clear console and problems" aria-label="Clear output">${iconSvg('eraser')}</button>
+            </div>
             <pre id="codebuilder-output" class="console-output">Ready. Run your Python code to see output here.</pre>
           </section>
           <section class="codebuilder-problems-section">
-            <h3>Problems</h3>
-            <button id="codebuilder-fix-with-agent" class="btn btn-sm btn-primary" type="button" disabled
-                    title="Copy the error, console output and code into the agent message box">Fix with Agent</button>
+            <div class="cb-section-head">
+              <h3>Problems</h3>
+              <button id="codebuilder-fix-with-agent" class="cb-btn cb-btn-accent" type="button" disabled
+                      title="Copy the error, console output and code into the agent message box">${iconSvg('bug')}<span>Fix with agent</span></button>
+            </div>
             <div id="diagnostics" class="diagnostics-list"></div>
           </section>
           <section class="codebuilder-terminal-section" hidden>
             <div id="codebuilder-terminal-mount" class="codebuilder-terminal-mount"></div>
             <div id="codebuilder-terminal-popped" class="codebuilder-terminal-popped" hidden>
               <p>The terminal is open in a separate window.</p>
-              <button id="codebuilder-terminal-bring-back" class="btn btn-sm btn-primary" type="button">Bring back</button>
+              <button id="codebuilder-terminal-bring-back" class="cb-btn cb-btn-primary" type="button">Bring back</button>
             </div>
           </section>
-        </aside>
-
-        <div class="codebuilder-resizer" data-resize="agents" role="separator"
-             aria-orientation="horizontal" aria-label="Resize agents panel"></div>
-
-        <aside id="codebuilder-agents-panel" class="codebuilder-agents-panel" aria-label="Workspace agents">
-          <div class="codebuilder-agents-heading">
-            <button id="codebuilder-agents-toggle" class="btn btn-sm codebuilder-agents-toggle"
-                    type="button" aria-label="Collapse agents panel" aria-expanded="true"
-                    title="Collapse agents panel">⌄</button>
-            <button id="codebuilder-agent-refresh" class="btn btn-sm codebuilder-agent-refresh"
-                    type="button" title="Refresh agents" aria-label="Refresh agents">↻</button>
-          </div>
-          <div id="codebuilder-agent-list" class="codebuilder-agent-list"></div>
         </aside>
       </main>
       <dialog id="codebuilder-scratchpad-dialog" class="codebuilder-scratchpad-dialog">
@@ -2102,12 +1873,12 @@ export function renderCodeBuilderView(container) {
             <p id="codebuilder-scratchpad-status" class="text-muted small" role="status">Ready.</p>
           </div>
           <div class="codebuilder-scratchpad-toolbar">
-            <select id="codebuilder-scratchpad-author" class="form-select" aria-label="Filter by agent">
+            <select id="codebuilder-scratchpad-author" class="cb-select" aria-label="Filter by agent">
               <option value="">All agents</option>
             </select>
-            <button id="codebuilder-scratchpad-refresh" class="btn btn-sm" type="button">Refresh</button>
-            <button id="codebuilder-scratchpad-clear" class="btn btn-sm btn-danger" type="button">Clear</button>
-            <button class="btn btn-sm" type="button" data-scratchpad-close>Close</button>
+            <button id="codebuilder-scratchpad-refresh" class="cb-btn cb-btn-icon" type="button" title="Refresh" aria-label="Refresh">${iconSvg('refresh')}</button>
+            <button id="codebuilder-scratchpad-clear" class="cb-btn cb-btn-danger" type="button">${iconSvg('trash-2')}<span>Clear</span></button>
+            <button class="cb-btn" type="button" data-scratchpad-close>Close</button>
           </div>
         </div>
         <div id="codebuilder-scratchpad-content" class="codebuilder-scratchpad-content" aria-live="polite"></div>
@@ -2118,6 +1889,17 @@ export function renderCodeBuilderView(container) {
   container.querySelector('[data-scratchpad-close]')?.addEventListener('click', () => {
     container.querySelector('#codebuilder-scratchpad-dialog')?.close();
   });
+  // The "more" menu closes after a choice, on Escape, or on a click elsewhere.
+  const moreMenu = container.querySelector('.cb-menu');
+  moreMenu?.querySelector('.cb-menu-list').addEventListener('click', () => { moreMenu.open = false; });
+  moreMenu?.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { moreMenu.open = false; moreMenu.querySelector('summary').focus(); }
+  });
+  const closeMenuOutside = event => {
+    if (!moreMenu?.isConnected) { document.removeEventListener('pointerdown', closeMenuOutside); return; }
+    if (!moreMenu.contains(event.target)) moreMenu.open = false;
+  };
+  document.addEventListener('pointerdown', closeMenuOutside);
   setupCodeBuilderPage();
 }
 

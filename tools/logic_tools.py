@@ -16,7 +16,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 
-from core_engine.logic_core_engine import current_agent_id, tool, tool_catalog
+from core_engine.logic_core_engine import agent_library, current_agent_id, tool, tool_catalog
 from editor.logic_editor import editor_files
 from file_manager.logic_file_manager import file_backend
 from ragMemory.logic_ragMemory import rag_memory
@@ -599,6 +599,16 @@ def read_agent_scratchpad(memory_type: str = "all") -> str:
 def call_subagent(subagent_id: str, task_prompt: str, parameters: str = "{}") -> str:
     """Dynamically invoke a background sub-agent from subAgentLibrary/ with a task prompt and parameters."""
     from orchestration.logic_orchestration import RAG_RETRIEVER_ID, rag_retriever, subagent_runner
+
+    # A caller whose prompt lists '## Sub-agents' may only reach those; no list means unrestricted.
+    caller_id = current_agent_id()
+    allowed = agent_library.allowed_subagents(caller_id) if caller_id else []
+    if allowed and subagent_id not in allowed:
+        return json.dumps(
+            {"subagent_id": subagent_id, "error": f"Agent '{caller_id}' may only call: {', '.join(allowed)}"},
+            ensure_ascii=False,
+            indent=2,
+        )
 
     if subagent_id == RAG_RETRIEVER_ID:
         parsed_params = parameters

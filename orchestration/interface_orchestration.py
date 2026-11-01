@@ -20,6 +20,8 @@ from orchestration.schemas_orchestration import (
     OrchestrationRequest,
     OrchestrationResponse,
     SquadCreateRequest,
+    SquadUpdateRequest,
+    SubagentCreateRequest,
 )
 
 router = APIRouter(prefix="/api/orchestration", tags=["Orchestration"])
@@ -43,9 +45,22 @@ def create_registered_squad(request: SquadCreateRequest):
             request.description,
             request.primary_agent,
             request.subagents,
+            request.default_pattern,
+            request.max_parallel,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"squad": squad}
+
+
+@router.patch("/squads/{squad_id}")
+def update_registered_squad(squad_id: str, request: SquadUpdateRequest):
+    try:
+        squad = squad_registry.update_squad(squad_id, **request.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if squad is None:
+        raise HTTPException(status_code=404, detail="Squad not found.")
     return {"squad": squad}
 
 
@@ -54,6 +69,26 @@ def delete_registered_squad(squad_id: str):
     if not squad_registry.delete_squad(squad_id):
         raise HTTPException(status_code=404, detail="Squad not found.")
     return {"deleted": True, "squad_id": squad_id}
+
+
+@router.post("/subagents", status_code=201)
+def create_subagent_definition(request: SubagentCreateRequest):
+    try:
+        return squad_registry.create_subagent(request.subagent_id, request.name, request.description)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/subagents/{subagent_id}")
+def delete_subagent_definition(subagent_id: str):
+    try:
+        return squad_registry.delete_subagent(subagent_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/squads/{squad_id}/latest")

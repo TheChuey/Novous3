@@ -26,6 +26,7 @@ _ELFINDER_API = "2.1"
 def api_file_manager_roots():
     return {
         "roots": file_backend.configured_roots(),
+        "missing": file_backend.missing_roots(),
         "active_path": str(file_backend.workspace_root()),
     }
 

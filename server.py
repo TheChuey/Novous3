@@ -12,6 +12,7 @@ from file_manager.interface_file_manager import router as file_manager_router
 from orchestration.interface_orchestration import router as orchestration_router
 from ragMemory.interface_ragMemory import router as rag_router
 from scratchpadMemory.interface_scratchpadMemory import router as scratchpad_router
+from squads.interface_squads import router as squads_router
 from test_environment.interface_test_environment import router as test_router
 from tools.interface_tools import router as tools_router
 from workspace.interface_workspace import router as workspace_router
@@ -47,6 +48,32 @@ app.include_router(file_manager_router)
 app.include_router(orchestration_router)
 app.include_router(rag_router)
 app.include_router(scratchpad_router)
+app.include_router(squads_router)
+
+class RevalidateFrontendAssets:
+    """Make browsers re-check pages, scripts and styles on every load, so UI updates show
+    up without a hard refresh (unchanged files still come back as cheap 304s). API routes,
+    including the SSE streams, pass through untouched."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["path"].startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_header(message):
+            if message["type"] == "http.response.start":
+                headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"cache-control"]
+                message["headers"] = headers + [(b"cache-control", b"no-cache")]
+            await send(message)
+
+        await self.app(scope, receive, send_with_header)
+
+
+app.add_middleware(RevalidateFrontendAssets)
+
 
 # Serve Static Assets (CSS, JS)
 app.mount("/static", StaticFiles(directory=Path("frontend") / "static"), name="static")

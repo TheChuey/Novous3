@@ -17,6 +17,7 @@ tools:
   - search_knowledge_branch
   - list_knowledge_branch_documents
   - read_knowledge_branch_document
+  - call_subagent
 ---
 
 ## Role
@@ -70,7 +71,7 @@ Create workspace folders using relative paths.  - Creates a folder, including an
 ### read_agent_scratchpad
 - Provider: scratchpadMemory
 - Signature: (memory_type: str = 'all') -> str
-Read recent file contents and/or the latest workspace map saved in agent scratchpad memory.
+Read scratchpad entries ('latest_subagent_result', 'latest_read', 'latest_map', or 'all').
 
 ### get_knowledge_catalog
 - Provider: ragMemory
@@ -91,3 +92,8 @@ List indexed document names, paths, and chunk counts in a branch. Use get_knowle
 - Provider: ragMemory
 - Signature: (document_path: str, knowledge_branch_id: str = '') -> str
 Read the full indexed text of one document. Use get_knowledge_catalog and list_knowledge_branch_documents first, then pass the exact listed path and branch ID.
+
+### call_subagent
+- Provider: orchestration
+- Signature: (subagent_id: str, task_prompt: str, parameters: str = '{}') -> str
+Dynamically invoke a background sub-agent from subAgentLibrary/ with a task prompt and parameters.

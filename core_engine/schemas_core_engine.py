@@ -33,6 +33,21 @@ class CreateAgentRequest(BaseModel):
     environment_name: str = Field("", max_length=64)
 
 
+AgentDefinitionKind = Literal["prompt", "subagent"]
+
+
+class SubagentUsage(BaseModel):
+    id: str = Field(..., min_length=1, max_length=64)
+    usage: str = Field(default="", max_length=2000)
+
+
+class AgentToolsRequest(BaseModel):
+    tools: List[str] = Field(default_factory=list, max_length=200)
+    mode: Literal["chat", "agent"] | None = None
+    # None keeps the sub-agents the prompt already lists; [] clears them.
+    subagents: List[SubagentUsage] | None = Field(default=None, max_length=50)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     agent_id: str

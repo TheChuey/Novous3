@@ -1,4 +1,15 @@
 const ICON_MARKUP = {
+  'chevron-left': '<path d="m15 18-6-6 6-6"/>',
+  'chevron-right': '<path d="m9 18 6-6-6-6"/>',
+  clipboard: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M8 11h8"/><path d="M8 15h5"/>',
+  eraser: '<path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4l10-10a1 1 0 0 1 1.4 0l5.6 5.6a1 1 0 0 1 0 1.4L13 19"/><path d="M22 21H7"/><path d="m5 11 9 9"/>',
+  'folder-open': '<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>',
+  'more-horizontal': '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+  play: '<path d="m6 3 14 9-14 9z"/>',
+  plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+  'save-as': '<path d="M14 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v5"/><path d="M7 3v5h8"/><path d="M17 15v6"/><path d="M14 18h6"/>',
+  square: '<rect x="5" y="5" width="14" height="14" rx="2"/>',
   activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
   bug: '<path d="M12 20v-8"/><path d="M8 20v-4a4 4 0 0 1 8 0v4"/><path d="M19 8h-3"/><path d="M8 8H5"/><path d="M19 12h-3"/><path d="M8 12H5"/><path d="M16 4a4 4 0 0 0-8 0"/>',
   'check-square': '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="m9 12 2 2 4-4"/>',
@@ -32,4 +43,12 @@ export function createIcon(name) {
   svg.classList.add('chat-icon');
   svg.innerHTML = markup;
   return svg;
+}
+
+/** The same icon as markup, for HTML templates. */
+export function iconSvg(name, size = 16) {
+  const markup = ICON_MARKUP[name];
+  if (!markup) throw new Error(`Unknown icon: ${name}`);
+  return `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor"`
+    + ` stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${markup}</svg>`;
 }

@@ -8,7 +8,9 @@ from starlette.concurrency import run_in_threadpool
 
 from core_engine.logic_core_engine import SessionNotFoundError, agent_library, chat_service, questionnaire
 from core_engine.schemas_core_engine import (
+    AgentDefinitionKind,
     AgentEnvironment,
+    AgentToolsRequest,
     AnswerSubmissionRequest,
     ChatRequest,
     CreateAgentRequest,
@@ -47,6 +49,27 @@ def api_create_agent(req: CreateAgentRequest):
 def api_delete_agent(agent_id: str, environment: str = "workspace"):
     try:
         return workspace_workflow.delete_agent(agent_id, environment)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/api/agent-tools/{kind}/{agent_id}")
+def api_get_agent_tools(kind: AgentDefinitionKind, agent_id: str):
+    try:
+        return agent_library.get_agent_tools(kind, agent_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.put("/api/agent-tools/{kind}/{agent_id}")
+def api_set_agent_tools(kind: AgentDefinitionKind, agent_id: str, req: AgentToolsRequest):
+    try:
+        subagents = None if req.subagents is None else [entry.model_dump() for entry in req.subagents]
+        return agent_library.set_agent_tools(kind, agent_id, req.tools, req.mode, subagents)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
