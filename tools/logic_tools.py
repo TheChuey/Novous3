@@ -19,7 +19,7 @@ from typing import Callable
 from core_engine.logic_core_engine import agent_library, current_agent_id, tool, tool_catalog
 from editor.logic_editor import editor_files
 from file_manager.logic_file_manager import file_backend
-from ragMemory.logic_ragMemory import rag_memory
+from ragMemory import interface_ragMemory as rag
 from scratchpadMemory.logic_scratchpadMemory import code_scratchpad, scratchpad
 
 
@@ -730,7 +730,7 @@ def get_knowledge_catalog() -> str:
             "indexed_documents": int(base.get("documents", 0)),
             "chunks": int(base.get("chunks", 0)),
         }
-        for base in rag_memory.list_rag_bases()
+        for base in rag.list_knowledge_sources()
     ]
     return json.dumps(
         {"title": "Knowledge TOC", "branches": branches},
@@ -745,9 +745,7 @@ def search_knowledge_branch(
 ) -> str:
     """Find relevant passages for a question in one knowledge branch. Get its ID from get_knowledge_catalog and pass it as knowledge_branch_id; results are source text for answering the user."""
     return json.dumps(
-        rag_memory.search_knowledge_base(
-            query, top_k, base_id=knowledge_branch_id or None
-        ),
+        rag.search_knowledge(query, top_k, source_id=knowledge_branch_id or None),
         ensure_ascii=False,
         indent=2,
     )
@@ -757,7 +755,7 @@ def search_knowledge_branch(
 def list_knowledge_branch_documents(knowledge_branch_id: str = "") -> str:
     """List indexed document names, paths, and chunk counts in a branch. Use get_knowledge_catalog first and pass the matching branch ID; this lists metadata, not document contents."""
     return json.dumps(
-        rag_memory.list_documents(knowledge_branch_id or None),
+        rag.list_documents(knowledge_branch_id or None),
         ensure_ascii=False,
         indent=2,
     )
@@ -768,7 +766,7 @@ def read_knowledge_branch_document(
     document_path: str, knowledge_branch_id: str = ""
 ) -> str:
     """Read the full indexed text of one document. Use get_knowledge_catalog and list_knowledge_branch_documents first, then pass the exact listed path and branch ID."""
-    document = rag_memory.get_document(document_path, knowledge_branch_id or None)
+    document = rag.read_document(document_path, knowledge_branch_id or None)
     return json.dumps(
         {
             "path": document["path"],

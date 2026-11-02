@@ -1,13 +1,12 @@
 import json
 import tempfile
-from contextlib import nullcontext
 from pathlib import Path
 import unittest
 from unittest.mock import patch
 
 from core_engine.logic_core_engine import tool_catalog
 from ragMemory import logic_ragMemory
-from ragMemory.logic_ragMemory import rag_config, rag_database, rag_memory
+from ragMemory.logic_ragMemory import rag_config, rag_memory
 from scratchpadMemory.logic_scratchpadMemory import scratchpad
 from tools import logic_tools
 
@@ -24,7 +23,7 @@ class TestKnowledgeSourceTools(unittest.TestCase):
                 )
             )
 
-        search.assert_called_once_with("leadership", 5, base_id="archived-id")
+        search.assert_called_once_with("leadership", 5, "", "archived-id")
         self.assertEqual(result["knowledge_base_id"], "archived-id")
 
     def test_knowledge_catalog_uses_branch_names_and_ids(self):
@@ -133,47 +132,20 @@ class TestKnowledgeSourceTools(unittest.TestCase):
                                 latest["payload"]["error"],
                             )
 
-    def test_vector_search_skips_incompatible_embedding_dimensions(self):
-        chunks = [
-            {
-                "path": "notes.docx",
-                "chunk_index": 0,
-                "content": "Compatible evidence",
-                "embedding": [1.0, 0.0, 0.0],
-            },
-            {
-                "path": "old-notes.docx",
-                "chunk_index": 0,
-                "content": "Incompatible stale vector",
-                "embedding": [1.0, 0.0],
-            },
-        ]
-        with patch.object(
-            rag_config,
-            "selected_knowledge_base_id",
-            return_value="branch-id",
-        ), patch.object(
-            rag_config,
-            "get_knowledge_base",
-            return_value={"id": "branch-id", "name": "Leadership"},
-        ), patch.object(
-            rag_config,
-            "database_context",
-            return_value=nullcontext(),
-        ), patch.object(
-            rag_database, "initialize"
-        ), patch.object(
-            rag_database, "list_chunks", return_value=chunks
-        ), patch.object(
-            logic_ragMemory.ollama,
-            "embed",
-            return_value={"embeddings": [[1.0, 0.0, 0.0]]},
-        ):
-            result = rag_memory.search_knowledge_base("leadership")
-
-        self.assertEqual(result["skipped_incompatible_chunks"], 1)
-        self.assertEqual(len(result["results"]), 1)
-        self.assertEqual(result["results"][0]["content"], "Compatible evidence")
+    def test_vector_search_rejects_index_from_another_embedding_size(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            service = logic_ragMemory.create_rag_memory(temp_dir)
+            branch = service.add_rag_base("Leadership", temp_dir)
+            with patch.object(
+                logic_ragMemory.ollama, "embed",
+                return_value={"embeddings": [[1.0, 0.0, 0.0]]},
+            ):
+                service.add_text_document("notes", "Compatible evidence", branch["id"])
+            with patch.object(
+                logic_ragMemory.ollama, "embed",
+                return_value={"embeddings": [[1.0, 0.0]]},
+            ), self.assertRaisesRegex(RuntimeError, "reindex"):
+                service.search_knowledge_base("leadership")
 
     def test_scratchpad_rejects_unsupported_subagent_status(self):
         with self.assertRaisesRegex(ValueError, "Sub-agent status"):

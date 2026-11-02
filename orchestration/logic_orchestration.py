@@ -38,7 +38,7 @@ from orchestration.schemas_orchestration import (
     OrchestrationResponse,
     TraceStep,
 )
-from ragMemory.logic_ragMemory import rag_config, rag_memory
+from ragMemory import interface_ragMemory as rag
 from scratchpadMemory.logic_scratchpadMemory import code_scratchpad, scratchpad
 
 RAG_RETRIEVER_ID = "rag-retriever"
@@ -1300,10 +1300,10 @@ class RagRetriever:
                 raise ValueError("A retrieval query is required.")
             branch_id = str(
                 parameters.get("knowledge_branch_id")
-                or rag_config.selected_knowledge_base_id()
+                or rag.selected_source_id()
             )
             top_k = int(parameters.get("top_k", 5))
-            result = rag_memory.search_knowledge_base(query, top_k, base_id=branch_id)
+            result = rag.search_knowledge(query, top_k, source_id=branch_id)
             payload = {
                 "query": query,
                 "knowledge_branch_id": result["knowledge_base_id"],

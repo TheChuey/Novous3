@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "novous-ragmemory"
+version = "1.0.0"
+description = "Named RAG knowledge sources: Ollama embeddings, ChromaDB vectors, background folder scanner, FastAPI routes and an MCP server."
+readme = "README_ragMemory.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ollama>=0.4",
+    "chromadb>=1.0",
+    "fastapi>=0.110",
+]
+
+[project.optional-dependencies]
+documents = [
+    "docling>=1.0.0",
+    "docling-slim[format-pdf-docling]>=1.0.0",
+    "pymupdf>=1.24.0",
+]
+mcp = ["mcp>=1.0"]
+
+[project.scripts]
+ragmemory-mcp = "ragMemory.mcp_ragMemory:main"
+
+[tool.setuptools]
+# This folder is the package itself: the import name stays ``ragMemory``.
+package-dir = { "ragMemory" = "." }
+packages = ["ragMemory"]
+include-package-data = false
+
+[tool.setuptools.exclude-package-data]
+ragMemory = ["data/*", "rag_config.json", "*.bak"]

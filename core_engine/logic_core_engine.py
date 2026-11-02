@@ -1534,10 +1534,11 @@ def rag_agent_tool(
     knowledge_base_id: str = "",
 ) -> str:
     """Query a named knowledge source by ID, including archived sources, for relevant passages."""
-    from ragMemory.logic_ragMemory import rag_memory
+    from ragMemory import interface_ragMemory as rag
 
+    document_path = str(editor_files.resolve_project_path(relative_path)) if relative_path else ""
     return json.dumps(
-        rag_memory.search_knowledge_base(query, top_k, relative_path or "", knowledge_base_id or None),
+        rag.search_knowledge(query, top_k, document_path, knowledge_base_id or None),
         ensure_ascii=False,
         indent=2,
     )

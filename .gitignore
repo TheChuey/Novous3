@@ -11,6 +11,7 @@ test_reports/
 model_logs/
 ragMemory/data/
 ragMemory/rag_config.json
+*.egg-info/
 scratchpadMemory/data/
 workspace/sandbox/
 tools/allowed_paths.json

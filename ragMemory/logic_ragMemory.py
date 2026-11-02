@@ -1,15 +1,21 @@
-"""RAG domain logic: named knowledge sources, their isolated SQLite indexes, document
+"""RAG domain logic: named knowledge sources, their isolated indexes, document
 parsing/chunking/embedding, the background scanner and semantic search.
 
-Object graph (singletons at the bottom of the module): RagDatabaseEngine is used by
-RagConfigStore; both feed DocumentIndexer; DocumentScannerService drives the indexer;
-RagMemoryService is the public facade over all four.
+Storage per knowledge source: a small SQLite manifest (``rag_indexes/<id>.sqlite3``:
+documents and meta) plus a ChromaDB collection (``rag_indexes/chroma/``, collection
+``kb_<id>``) holding the chunk text and its Ollama embedding vectors.
+
+Object graph (built by ``create_rag_memory``): RagDatabaseEngine is used by
+RagConfigStore; both feed DocumentIndexer, which embeds through OllamaEmbedder;
+DocumentScannerService drives the indexer; RagMemoryService is the facade over all of
+them. Nothing here imports other Novous components, so the folder can be reused as is;
+callers outside this package go through ``interface_ragMemory``.
 """
 
 import json
 import logging
-import math
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -23,12 +29,17 @@ from typing import Any, Iterable, Iterator
 
 import ollama
 
-from editor.logic_editor import editor_files
-
 LOGGER = logging.getLogger(__name__)
 COMPONENT_ROOT = Path(__file__).resolve().parent
-DATA_DIR = COMPONENT_ROOT / "data"
+# RAG_HOME holds rag_config.json and data/; inside Novous it is this folder.
+RAG_HOME = Path(os.environ.get("RAG_HOME") or COMPONENT_ROOT).expanduser().resolve()
+DATA_DIR = RAG_HOME / "data"
 LEGACY_ROOT = COMPONENT_ROOT.parent / "agentMemory"
+
+
+def _env(name: str, default: str) -> str:
+    """Read a RAG_* setting, falling back to its former NOVOUS_* name."""
+    return os.environ.get(f"RAG_{name}") or os.environ.get(f"NOVOUS_{name}") or default
 
 
 def migrate_legacy_layout() -> list[str]:
@@ -40,10 +51,13 @@ def migrate_legacy_layout() -> list[str]:
     moved = []
     candidates = [
         (LEGACY_ROOT / "rag_config.json", COMPONENT_ROOT / "rag_config.json"),
-        (LEGACY_ROOT / "data" / "rag_indexes", DATA_DIR / "rag_indexes"),
-        (LEGACY_ROOT / "data" / "rag_scan_job.json", DATA_DIR / "rag_scan_job.json"),
+        (LEGACY_ROOT / "data" / "rag_indexes", COMPONENT_ROOT / "data" / "rag_indexes"),
+        (LEGACY_ROOT / "data" / "rag_scan_job.json", COMPONENT_ROOT / "data" / "rag_scan_job.json"),
     ] + [
-        (LEGACY_ROOT / "data" / f"knowledge.sqlite3{suffix}", DATA_DIR / f"knowledge.sqlite3{suffix}")
+        (
+            LEGACY_ROOT / "data" / f"knowledge.sqlite3{suffix}",
+            COMPONENT_ROOT / "data" / f"knowledge.sqlite3{suffix}",
+        )
         for suffix in ("", "-wal", "-shm")
     ]
     for source, target in candidates:
@@ -59,16 +73,20 @@ class _ScanStopped(Exception):
 
 
 class RagDatabaseEngine:
-    """SQLite CRUD for indexed documents, chunks and embedding vectors.
+    """Index storage: a SQLite manifest of documents plus a ChromaDB vector collection.
 
-    Each named knowledge source has its own database file; ``use_database``
-    routes the operations of the current context to that file.
+    Each named knowledge source has its own manifest file; ``use_database`` routes the
+    operations of the current context to that file and to its Chroma collection
+    (``<manifest folder>/chroma``, collection ``kb_<manifest stem>``). Chroma clients are
+    opened per operation, like the SQLite connections, so no file stays locked.
     """
 
-    DATABASE_PATH = DATA_DIR / "knowledge.sqlite3"
+    VECTOR_STORE = "chroma"
 
-    def __init__(self):
+    def __init__(self, data_dir: Path = DATA_DIR):
+        self.DATABASE_PATH = Path(data_dir) / "knowledge.sqlite3"
         self._active_path: ContextVar[Path | None] = ContextVar("rag_database_path", default=None)
+        self._vector_lock = threading.RLock()
 
     @contextmanager
     def use_database(self, path: Path) -> Iterator[None]:
@@ -79,9 +97,12 @@ class RagDatabaseEngine:
         finally:
             self._active_path.reset(token)
 
+    def _database_path(self) -> Path:
+        return self._active_path.get() or self.DATABASE_PATH
+
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        database_path = self._active_path.get() or self.DATABASE_PATH
+        database_path = self._database_path()
         database_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(database_path, timeout=30)
         try:
@@ -96,6 +117,50 @@ class RagDatabaseEngine:
         finally:
             connection.close()
 
+    @staticmethod
+    def collection_name(database_path: Path) -> str:
+        clean = re.sub(r"[^A-Za-z0-9_-]", "_", database_path.stem)[:60].strip("_-")
+        return f"kb_{clean or 'default'}"
+
+    @contextmanager
+    def _client(self, create: bool = True) -> Iterator[Any]:
+        """Open the Chroma client next to the active manifest; ``None`` if absent and not creating."""
+        import chromadb
+        from chromadb.config import Settings
+
+        chroma_dir = self._database_path().parent / "chroma"
+        with self._vector_lock:
+            if not create and not chroma_dir.is_dir():
+                yield None
+                return
+            with chromadb.PersistentClient(
+                path=str(chroma_dir), settings=Settings(anonymized_telemetry=False)
+            ) as client:
+                yield client
+
+    @contextmanager
+    def vectors(self, create: bool = True) -> Iterator[Any]:
+        """Open this index's Chroma collection for one operation.
+
+        Yields ``None`` when ``create`` is false and the collection does not exist yet.
+        """
+        name = self.collection_name(self._database_path())
+        with self._client(create) as client:
+            if client is None:
+                yield None
+                return
+            if create:
+                collection = client.get_or_create_collection(
+                    name, metadata={"hnsw:space": "cosine"}, embedding_function=None
+                )
+            elif name in {item.name for item in client.list_collections()}:
+                collection = client.get_collection(name, embedding_function=None)
+            else:
+                yield None
+                return
+            collection.max_batch_size = client.get_max_batch_size()
+            yield collection
+
     def initialize(self) -> None:
         with self.connect() as connection:
             connection.executescript(
@@ -104,22 +169,73 @@ class RagDatabaseEngine:
                     path TEXT PRIMARY KEY,
                     modified_ns INTEGER NOT NULL,
                     size_bytes INTEGER NOT NULL,
-                    indexed_at TEXT NOT NULL
+                    indexed_at TEXT NOT NULL,
+                    chunks INTEGER NOT NULL DEFAULT 0
                 );
-                CREATE TABLE IF NOT EXISTS chunks (
-                    path TEXT NOT NULL REFERENCES documents(path) ON DELETE CASCADE,
-                    chunk_index INTEGER NOT NULL,
-                    content TEXT NOT NULL,
-                    embedding TEXT NOT NULL,
-                    PRIMARY KEY (path, chunk_index)
-                );
-                CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
                 CREATE TABLE IF NOT EXISTS meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
                 """
             )
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(documents)")}
+            if "chunks" not in columns:
+                connection.execute(
+                    "ALTER TABLE documents ADD COLUMN chunks INTEGER NOT NULL DEFAULT 0"
+                )
+            legacy_chunks = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks'"
+            ).fetchone()
+        if legacy_chunks:
+            self._migrate_legacy_chunks()
+
+    def _migrate_legacy_chunks(self) -> None:
+        """Move vectors stored as JSON in the former ``chunks`` table into Chroma, once.
+
+        The stored embeddings are reused, so no Ollama calls are made. The manifest is
+        backed up to ``<name>.pre-chroma.bak`` before the old table is dropped.
+        """
+        database_path = self._database_path()
+        backup = database_path.with_name(f"{database_path.name}.pre-chroma.bak")
+        with self.connect() as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if not backup.exists():
+            shutil.copy2(database_path, backup)
+
+        dimensions = None
+        with self.connect() as connection, self.vectors() as collection:
+            total = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            cursor = connection.execute(
+                "SELECT path, chunk_index, content, embedding FROM chunks ORDER BY path, chunk_index"
+            )
+            while rows := cursor.fetchmany(min(1000, collection.max_batch_size)):
+                embeddings = [json.loads(row["embedding"]) for row in rows]
+                dimensions = dimensions or len(embeddings[0])
+                collection.upsert(
+                    ids=[self._chunk_id(row["path"], row["chunk_index"]) for row in rows],
+                    embeddings=embeddings,
+                    documents=[row["content"] for row in rows],
+                    metadatas=[{"path": row["path"], "chunk_index": row["chunk_index"]} for row in rows],
+                )
+            if collection.count() < total:
+                raise RuntimeError(
+                    f"Chroma migration of {database_path} stored {collection.count()} of {total} chunks."
+                )
+            connection.execute(
+                "UPDATE documents SET chunks = "
+                "(SELECT COUNT(*) FROM chunks c WHERE c.path = documents.path)"
+            )
+            connection.execute("DROP TABLE chunks")
+            self._set_meta(connection, "vector_store", self.VECTOR_STORE)
+            if dimensions:
+                self._set_meta(connection, "embedding_dimensions", str(dimensions))
+        with self.connect() as connection:
+            connection.execute("VACUUM")
+        LOGGER.info("Migrated %d RAG chunks from %s into Chroma.", total, database_path)
+
+    @staticmethod
+    def _chunk_id(path: str, chunk_index: int) -> str:
+        return f"{path}#{chunk_index}"
 
     def replace_document(self,
         path: str,
@@ -128,19 +244,31 @@ class RagDatabaseEngine:
         indexed_at: str,
         chunks: Iterable[tuple[str, list[float]]],
     ) -> None:
-        """Atomically replace one indexed document and all of its chunks."""
+        """Replace one indexed document and all of its chunks.
+
+        The manifest row is written last, so an interrupted replace leaves the document
+        unlisted and the next scan indexes it again.
+        """
+        chunks = list(chunks)
         with self.connect() as connection:
             connection.execute("DELETE FROM documents WHERE path = ?", (path,))
+        with self.vectors(create=bool(chunks)) as collection:
+            if collection is not None:
+                collection.delete(where={"path": path})
+                numbered = list(enumerate(chunks))
+                for offset in range(0, len(numbered), collection.max_batch_size):
+                    batch = numbered[offset:offset + collection.max_batch_size]
+                    collection.add(
+                        ids=[self._chunk_id(path, index) for index, _ in batch],
+                        embeddings=[vector for _, (_, vector) in batch],
+                        documents=[content for _, (content, _) in batch],
+                        metadatas=[{"path": path, "chunk_index": index} for index, _ in batch],
+                    )
+        with self.connect() as connection:
             connection.execute(
-                "INSERT INTO documents(path, modified_ns, size_bytes, indexed_at) VALUES (?, ?, ?, ?)",
-                (path, modified_ns, size_bytes, indexed_at),
-            )
-            connection.executemany(
-                "INSERT INTO chunks(path, chunk_index, content, embedding) VALUES (?, ?, ?, ?)",
-                [
-                    (path, index, content, json.dumps(vector, separators=(",", ":")))
-                    for index, (content, vector) in enumerate(chunks)
-                ],
+                "INSERT INTO documents(path, modified_ns, size_bytes, indexed_at, chunks) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (path, modified_ns, size_bytes, indexed_at, len(chunks)),
             )
 
     def document_metadata(self, path: str) -> dict[str, Any] | None:
@@ -155,17 +283,25 @@ class RagDatabaseEngine:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT d.path, d.modified_ns, d.size_bytes, d.indexed_at, COUNT(c.chunk_index) AS chunks
-                FROM documents d LEFT JOIN chunks c ON c.path = d.path
-                GROUP BY d.path
-                ORDER BY d.path COLLATE NOCASE
+                SELECT path, modified_ns, size_bytes, indexed_at, chunks
+                FROM documents ORDER BY path COLLATE NOCASE
                 """
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def _delete_vectors(self, paths: list[str]) -> None:
+        if not paths:
+            return
+        with self.vectors(create=False) as collection:
+            if collection is None:
+                return
+            for offset in range(0, len(paths), 500):
+                collection.delete(where={"path": {"$in": paths[offset:offset + 500]}})
+
     def delete_document(self, path: str) -> bool:
         with self.connect() as connection:
             cursor = connection.execute("DELETE FROM documents WHERE path = ?", (path,))
+        self._delete_vectors([path])
         return cursor.rowcount > 0
 
     def delete_documents_under(self, prefix: str, keep_paths: set[str]) -> list[str]:
@@ -180,15 +316,34 @@ class RagDatabaseEngine:
                 and row["path"].replace("\\", "/") not in normalized_keep
             ]
             connection.executemany("DELETE FROM documents WHERE path = ?", [(path,) for path in stale])
+        self._delete_vectors(stale)
         return stale
 
     def clear_all(self) -> int:
         """Delete every indexed document and chunk; returns the document count removed."""
         with self.connect() as connection:
             count = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-            connection.execute("DELETE FROM chunks")
             connection.execute("DELETE FROM documents")
+            connection.execute(
+                "DELETE FROM meta WHERE key IN ('embedding_model', 'embedding_dimensions')"
+            )
+        self.drop_vectors()
         return count
+
+    def drop_vectors(self) -> None:
+        """Delete this index's Chroma collection."""
+        name = self.collection_name(self._database_path())
+        with self._client(create=False) as client:
+            if client is not None and name in {item.name for item in client.list_collections()}:
+                client.delete_collection(name)
+
+    @staticmethod
+    def _set_meta(connection: sqlite3.Connection, key: str, value: str) -> None:
+        connection.execute(
+            "INSERT INTO meta(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
 
     def get_meta(self, key: str) -> str | None:
         with self.connect() as connection:
@@ -197,55 +352,114 @@ class RagDatabaseEngine:
 
     def set_meta(self, key: str, value: str) -> None:
         with self.connect() as connection:
-            connection.execute(
-                "INSERT INTO meta(key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (key, value),
+            self._set_meta(connection, key, value)
+
+    def check_embedding_space(self, model: str, dimensions: int, record: bool = True) -> None:
+        """Refuse vectors from a different model or size than the ones already indexed."""
+        stored_model = self.get_meta("embedding_model")
+        stored_dimensions = self.get_meta("embedding_dimensions")
+        has_documents = bool(self.list_documents())
+        if has_documents and (
+            (stored_model and stored_model != model)
+            or (stored_dimensions and int(stored_dimensions) != dimensions)
+        ):
+            raise RuntimeError(
+                f"This index was built with '{stored_model or 'unknown model'}' "
+                f"({stored_dimensions or '?'} dimensions) but '{model}' produces "
+                f"{dimensions}. Clear and reindex this knowledge base."
             )
+        if record and (stored_model != model or stored_dimensions != str(dimensions)):
+            self.set_meta("embedding_model", model)
+            self.set_meta("embedding_dimensions", str(dimensions))
+
+    @staticmethod
+    def _chunk_rows(result: dict) -> list[dict[str, Any]]:
+        embeddings = result.get("embeddings")
+        rows = [
+            {
+                "path": metadata["path"],
+                "chunk_index": int(metadata["chunk_index"]),
+                "content": content,
+                "embedding": [float(value) for value in embeddings[index]] if embeddings is not None else [],
+            }
+            for index, (content, metadata) in enumerate(zip(result["documents"], result["metadatas"]))
+        ]
+        rows.sort(key=lambda row: (row["path"], row["chunk_index"]))
+        return rows
 
     def list_chunks(self) -> list[dict[str, Any]]:
-        with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT path, chunk_index, content, embedding FROM chunks"
-            ).fetchall()
-        result = []
-        for row in rows:
-            result.append({
-                "path": row["path"],
-                "chunk_index": row["chunk_index"],
-                "content": row["content"],
-                "embedding": json.loads(row["embedding"]),
-            })
-        return result
+        with self.vectors(create=False) as collection:
+            if collection is None:
+                return []
+            return self._chunk_rows(collection.get(include=["documents", "metadatas", "embeddings"]))
 
     def get_document_chunks(self, path: str) -> list[dict[str, Any]]:
-        with self.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT path, chunk_index, content, embedding
-                FROM chunks WHERE path = ? ORDER BY chunk_index
-                """,
-                (path,),
-            ).fetchall()
+        with self.vectors(create=False) as collection:
+            if collection is None:
+                return []
+            return self._chunk_rows(collection.get(
+                where={"path": path}, include=["documents", "metadatas", "embeddings"]
+            ))
+
+    def query_chunks(self, vector: list[float], top_k: int, path: str | None = None) -> list[dict[str, Any]]:
+        """Return the ``top_k`` nearest chunks with a cosine similarity ``score``."""
+        with self.vectors(create=False) as collection:
+            if collection is None or not collection.count():
+                return []
+            result = collection.query(
+                query_embeddings=[vector],
+                n_results=int(top_k),
+                where={"path": path} if path else None,
+                include=["documents", "metadatas", "distances"],
+            )
         return [
             {
-                "path": row["path"],
-                "chunk_index": row["chunk_index"],
-                "content": row["content"],
-                "embedding": json.loads(row["embedding"]),
+                "path": metadata["path"],
+                "chunk_index": int(metadata["chunk_index"]),
+                "score": 1.0 - float(distance),
+                "content": content,
             }
-            for row in rows
+            for content, metadata, distance in zip(
+                result["documents"][0], result["metadatas"][0], result["distances"][0]
+            )
         ]
+
+
+class OllamaEmbedder:
+    """Local Ollama embeddings; ``OLLAMA_HOST`` selects a remote Ollama server."""
+
+    def __init__(self, model: str | None = None, batch_size: int | None = None):
+        self.model = model or _env("EMBEDDING_MODEL", "nomic-embed-text:latest")
+        self.batch_size = max(1, int(batch_size or _env("EMBEDDING_BATCH_SIZE", "16")))
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        vectors = []
+        for offset in range(0, len(texts), self.batch_size):
+            requested = texts[offset:offset + self.batch_size]
+            try:
+                response = ollama.embed(model=self.model, input=requested)
+            except ollama.ResponseError as exc:
+                if getattr(exc, "status_code", None) == 404:
+                    raise RuntimeError(
+                        f"Embedding model '{self.model}' is not installed. Run: ollama pull {self.model}"
+                    ) from exc
+                raise
+            batch = response.get("embeddings") if isinstance(response, dict) else response.embeddings
+            if len(batch) != len(requested):
+                raise RuntimeError("Embedding model returned a different number of vectors than requested.")
+            vectors.extend([[float(value) for value in vector] for vector in batch])
+        if vectors and any(len(vector) != len(vectors[0]) for vector in vectors):
+            raise RuntimeError("Embedding model returned vectors with inconsistent dimensions.")
+        return vectors
 
 
 class RagConfigStore:
     """Configuration and persistence for named RAG knowledge bases (``rag_config.json``)."""
 
-    CONFIG_PATH = COMPONENT_ROOT / "rag_config.json"
-    DATA_DIR = DATA_DIR
-
-    def __init__(self, database: RagDatabaseEngine):
+    def __init__(self, database: RagDatabaseEngine, home: Path = RAG_HOME):
         self.database = database
+        self.CONFIG_PATH = Path(home) / "rag_config.json"
+        self.DATA_DIR = Path(home) / "data"
 
     def _read_config(self) -> dict:
         if not self.CONFIG_PATH.is_file():
@@ -551,19 +765,19 @@ class RagConfigStore:
 
 
 class DocumentIndexer:
-    """Document discovery, parsing, chunking and local Ollama embedding generation."""
+    """Document discovery, parsing, chunking and embedding through ``OllamaEmbedder``."""
 
     LEGACY_PREFIX = "workspace/Knowledge Base"
     ROOT_META_KEY = "knowledge_root"
     MANUAL_PREFIX = "manual:"
-    EMBEDDING_MODEL = os.environ.get("NOVOUS_EMBEDDING_MODEL", "nomic-embed-text:latest")
     MAX_DOCUMENT_BYTES = 100_000_000
     CHUNK_CHARACTERS = 1400
     CHUNK_OVERLAP = 200
-    EMBEDDING_BATCH_SIZE = 16
-    SCAN_FILE_DELAY_SECONDS = max(
-        0.0, float(os.environ.get("NOVOUS_RAG_SCAN_DELAY_SECONDS", "0.15"))
-    )
+    SCAN_FILE_DELAY_SECONDS = max(0.0, float(
+        os.environ.get("RAG_SCAN_DELAY_SECONDS")
+        or os.environ.get("NOVOUS_RAG_SCAN_DELAY_SECONDS")
+        or "0.15"
+    ))
     TEXT_EXTENSIONS = {
         ".txt", ".md", ".markdown", ".rst", ".html", ".htm", ".csv",
         ".json", ".xml", ".yaml", ".yml", ".log",
@@ -571,9 +785,14 @@ class DocumentIndexer:
     }
     DOCLING_EXTENSIONS = {".pdf", ".docx", ".pptx", ".odt"}
 
-    def __init__(self, config: RagConfigStore, database: RagDatabaseEngine):
+    def __init__(self,
+        config: RagConfigStore,
+        database: RagDatabaseEngine,
+        embedder: OllamaEmbedder | None = None,
+    ):
         self.config = config
         self.database = database
+        self.embedder = embedder or OllamaEmbedder()
         self._doc_converter = None
         self.scan_lock = threading.RLock()
         # Set when the background scanner stops; also interrupts per-file throttling.
@@ -639,16 +858,14 @@ class DocumentIndexer:
             start = max(start + 1, end - self.CHUNK_OVERLAP)
         return chunks
 
+    @property
+    def EMBEDDING_MODEL(self) -> str:
+        return self.embedder.model
+
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        vectors = []
-        for offset in range(0, len(texts), self.EMBEDDING_BATCH_SIZE):
-            response = ollama.embed(model=self.EMBEDDING_MODEL, input=texts[offset:offset + self.EMBEDDING_BATCH_SIZE])
-            batch = response.get("embeddings") if isinstance(response, dict) else response.embeddings
-            if len(batch) != len(texts[offset:offset + self.EMBEDDING_BATCH_SIZE]):
-                raise RuntimeError("Embedding model returned a different number of vectors than requested.")
-            vectors.extend([[float(value) for value in vector] for vector in batch])
-        if vectors and any(len(vector) != len(vectors[0]) for vector in vectors):
-            raise RuntimeError("Embedding model returned vectors with inconsistent dimensions.")
+        vectors = self.embedder.embed(texts)
+        if vectors:
+            self.database.check_embedding_space(self.embedder.model, len(vectors[0]))
         return vectors
 
     def index_file(self, path: Path, relative_path: str | None = None, force: bool = False) -> dict:
@@ -803,12 +1020,12 @@ class DocumentIndexer:
 class DocumentScannerService:
     """Persistent, pausable background indexing job plus the periodic scanner loop."""
 
-    JOB_PATH = DATA_DIR / "rag_scan_job.json"
     SCAN_INTERVAL_SECONDS = 60
 
-    def __init__(self, config: "RagConfigStore", indexer: "DocumentIndexer"):
+    def __init__(self, config: "RagConfigStore", indexer: "DocumentIndexer", data_dir: Path = DATA_DIR):
         self.config = config
         self.indexer = indexer
+        self.JOB_PATH = Path(data_dir) / "rag_scan_job.json"
         self._job_lock = threading.RLock()
         self._job_thread: threading.Thread | None = None
         self._stop_requested = threading.Event()
@@ -1314,8 +1531,7 @@ class RagMemoryService:
             with self.config.database_context(base_id):
                 self.database.initialize()
                 documents = self.database.list_documents()
-                if database_file is None:
-                    self.database.clear_all()
+                self.database.clear_all()
 
             deleted = self.config.delete_knowledge_base(base_id)
             self.scanner._update_job(
@@ -1327,7 +1543,7 @@ class RagMemoryService:
             )
             index_file = database_file or legacy_database_file
             if index_file is not None:
-                for suffix in ("", "-wal", "-shm"):
+                for suffix in ("", "-wal", "-shm", ".pre-chroma.bak"):
                     Path(f"{index_file}{suffix}").unlink(missing_ok=True)
                 try:
                     index_file.parent.rmdir()
@@ -1402,23 +1618,17 @@ class RagMemoryService:
         """Scan Knowledge Base and index additions or changes."""
         return self.indexer.refresh_index(force=force)
 
-    @staticmethod
-    def _cosine_similarity(left: list[float], right: list[float]) -> float:
-        if len(left) != len(right):
-            raise RuntimeError("Query and document embedding dimensions do not match.")
-        left_norm = math.sqrt(sum(value * value for value in left))
-        right_norm = math.sqrt(sum(value * value for value in right))
-        if not left_norm or not right_norm:
-            return 0.0
-        return sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm)
-
     def search_knowledge_base(self,
         query: str,
         top_k: int = 5,
         relative_path: str = "",
         base_id: str | None = None,
     ) -> dict[str, Any]:
-        """Return semantically relevant document passages and their source paths."""
+        """Return semantically relevant document passages and their source paths.
+
+        ``relative_path`` limits the search to one file, indexing it first; a relative
+        value is resolved against the current directory.
+        """
         clean_query = str(query or "").strip()
         if not clean_query:
             raise ValueError("A search query is required.")
@@ -1427,70 +1637,41 @@ class RagMemoryService:
 
         selected_id = base_id or self.config.selected_knowledge_base_id()
         base = self.config.get_knowledge_base(selected_id)
+        selected_path = ""
         with self.config.database_context(selected_id):
             self.database.initialize()
-            chunks = self.database.list_chunks()
-        selected_path = ""
-        if relative_path.strip():
-            source_path = editor_files.resolve_project_path(relative_path)
-            if not source_path.is_file():
-                raise FileNotFoundError(f"Knowledge-base document not found: {source_path}")
-            selected_path = source_path.resolve().as_posix()
-            with self.config.database_context(selected_id):
+            if relative_path.strip():
+                source_path = Path(relative_path).expanduser().resolve()
+                if not source_path.is_file():
+                    raise FileNotFoundError(f"Knowledge-base document not found: {source_path}")
+                selected_path = source_path.as_posix()
                 self.indexer.index_file(source_path, selected_path)
-                chunks = self.database.list_chunks()
-        if selected_path:
-            chunks = [chunk for chunk in chunks if chunk["path"] == selected_path]
-        if not chunks:
-            return {
-                "query": clean_query,
-                "knowledge_base": base["name"],
-                "knowledge_base_id": selected_id,
-                "results": [],
-                "message": (
-                    "No documents are indexed yet. Place supported files in "
-                    f"'{self.indexer.knowledge_base_folder(selected_id)}' and wait for the automatic scan."
-                ),
-            }
+            if not self.database.list_documents():
+                return {
+                    "query": clean_query,
+                    "knowledge_base": base["name"],
+                    "knowledge_base_id": selected_id,
+                    "results": [],
+                    "message": (
+                        "No documents are indexed yet. Place supported files in "
+                        f"'{self.indexer.knowledge_base_folder(selected_id)}' and wait for the automatic scan."
+                    ),
+                }
 
-        try:
-            response = ollama.embed(model=self.indexer.EMBEDDING_MODEL, input=clean_query)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Could not create a query embedding with '{self.indexer.EMBEDDING_MODEL}': {exc}"
-            ) from exc
-        vectors = response.get("embeddings") if isinstance(response, dict) else response.embeddings
-        if not vectors:
-            raise RuntimeError(f"Embedding model '{self.indexer.EMBEDDING_MODEL}' returned no query vector.")
-        query_vector = [float(value) for value in vectors[0]]
-
-        compatible_chunks = [
-            chunk for chunk in chunks if len(chunk["embedding"]) == len(query_vector)
-        ]
-        skipped_chunks = len(chunks) - len(compatible_chunks)
-        if not compatible_chunks:
-            raise RuntimeError(
-                "No indexed chunks have embeddings compatible with the query embedding "
-                f"({len(query_vector)} dimensions). Reindex this knowledge base."
-            )
-
-        ranked = [
-            {
-                "path": chunk["path"],
-                "chunk_index": chunk["chunk_index"],
-                "score": self._cosine_similarity(query_vector, chunk["embedding"]),
-                "content": chunk["content"],
-            }
-            for chunk in compatible_chunks
-        ]
-        ranked.sort(key=lambda item: item["score"], reverse=True)
+            model = self.indexer.embedder.model
+            try:
+                query_vector = self.indexer.embedder.embed([clean_query])[0]
+            except Exception as exc:
+                raise RuntimeError(f"Could not create a query embedding with '{model}': {exc}") from exc
+            self.database.check_embedding_space(model, len(query_vector))
+            results = self.database.query_chunks(query_vector, int(top_k), selected_path or None)
         return {
             "query": clean_query,
             "knowledge_base": base["name"],
             "knowledge_base_id": selected_id,
-            "model": self.indexer.EMBEDDING_MODEL,
-            "skipped_incompatible_chunks": skipped_chunks,
-            "results": ranked[:int(top_k)],
+            "model": model,
+            "skipped_incompatible_chunks": 0,
+            "results": results,
         }
 
     def start_document_scanner(self) -> bool:
@@ -1501,9 +1682,26 @@ class RagMemoryService:
         return self.scanner.decide_scan_error(decision)
 
 
-migrate_legacy_layout()
-rag_database = RagDatabaseEngine()
-rag_config = RagConfigStore(rag_database)
-document_indexer = DocumentIndexer(rag_config, rag_database)
-document_scanner = DocumentScannerService(rag_config, document_indexer)
-rag_memory = RagMemoryService(rag_config, rag_database, document_indexer, document_scanner)
+def create_rag_memory(home: Path | str | None = None, embedder: OllamaEmbedder | None = None) -> RagMemoryService:
+    """Build an independent RAG service whose config and indexes live under ``home``.
+
+    ``home`` defaults to ``RAG_HOME`` (this folder inside Novous). It receives
+    ``rag_config.json`` and ``data/`` (``rag_indexes/*.sqlite3`` manifests, the
+    ``rag_indexes/chroma`` vectors and ``rag_scan_job.json``).
+    """
+    root = Path(home).expanduser().resolve() if home else RAG_HOME
+    data_dir = root / "data"
+    database = RagDatabaseEngine(data_dir)
+    config = RagConfigStore(database, root)
+    indexer = DocumentIndexer(config, database, embedder)
+    scanner = DocumentScannerService(config, indexer, data_dir)
+    return RagMemoryService(config, database, indexer, scanner)
+
+
+if RAG_HOME == COMPONENT_ROOT:
+    migrate_legacy_layout()
+rag_memory = create_rag_memory()
+rag_database = rag_memory.database
+rag_config = rag_memory.config
+document_indexer = rag_memory.indexer
+document_scanner = rag_memory.scanner

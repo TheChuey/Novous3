@@ -142,7 +142,7 @@ def test_rag_presenter_delegates_to_retriever_and_reads_scratchpad(tmp_path, mon
             chat_service.reset_session("test-rag-presenter-delegation")
 
     assert answer["reply"] == "The source says relevant evidence."
-    search.assert_called_once_with("What does the source say?", 5, base_id="branch-1")
+    search.assert_called_once_with("What does the source say?", 5, "", "branch-1")
     assert chat.call_count == 2
     assert [event["tool"] for event in answer["tool_events"]] == [
         "call_subagent",
