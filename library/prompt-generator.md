@@ -59,8 +59,13 @@ Your primary task is to generate prompts that meet the user's requirements while
 
 ### read_agent_scratchpad
 - Provider: scratchpadMemory
-- Signature: (memory_type: str = 'all') -> str
-Read recent file contents and/or the latest workspace map saved in agent scratchpad memory.
+- Signature: (memory_type: str = 'index', item: str = '', offset: str = '0', max_chars: str = '4000') -> str
+Recall what you have read or saved: call this when the user asks what you remember, to list or summarize saved files, or about earlier content; no arguments lists items, item=<path or id> reads one in pages.
+
+With no arguments, returns an index of saved items (id, kind, label, size, time, preview).
+With item set to a file path or id, returns one page of that item's text, at most max_chars
+long, starting at offset. Pass next_offset from the result as offset to read the next page.
+memory_type 'latest_read', 'latest_map' or 'latest_subagent_result' returns the newest of that kind.
 
 ### get_knowledge_catalog
 - Provider: ragMemory

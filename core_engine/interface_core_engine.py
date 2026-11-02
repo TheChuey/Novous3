@@ -118,7 +118,8 @@ def api_chat_stream(req: ChatRequest):
                 if item["type"] == "tool_event":
                     chat_service.publish_tool_event(item["event"], session_key)
                 elif item["type"] == "done":
-                    item.update(agent_id=req.agent_id, session_id=session_key, model=agent.model)
+                    item.update(agent_id=req.agent_id, session_id=session_key, model=agent.model,
+                                context=chat_service.context_summary(agent, profile))
                 yield sse(item)
         except Exception as exc:
             if agent.messages and agent.messages[-1].get("role") == "user":
@@ -134,6 +135,15 @@ def api_chat_stream(req: ChatRequest):
 @router.post("/api/chat/reset")
 def api_chat_reset(session_id: str):
     return {"reset": chat_service.reset_session(session_id)}
+
+
+@router.get("/api/chat/context")
+def api_chat_context(agent_id: str, session_id: str = "", model: str = "", environment: str = "workspace"):
+    """What the model is given for this session: segments, messages, usage and turns remaining."""
+    try:
+        return chat_service.get_context(agent_id, model or None, session_id or None, environment)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @router.get("/api/chat/pending-questions")

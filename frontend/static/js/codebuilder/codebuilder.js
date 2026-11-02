@@ -6,6 +6,8 @@ import { setupFileControls } from './files_ui.js';
 import { Api } from '../api.js?v=2';
 import { iconSvg } from '../icons.js';
 import { setupSidePanels } from '../side_panels.js';
+import { appendMarkdown } from '../markdown.js';
+import { setupScratchpadReader } from '../scratchpad_reader.js';
 
 const DEMO_CODE = `print("Hello from Novous CodeBuilder!")
 for i in range(3):
@@ -89,6 +91,8 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
   const scratchpadRefresh = document.getElementById('codebuilder-scratchpad-refresh');
   const scratchpadClear = document.getElementById('codebuilder-scratchpad-clear');
   const scratchpadAuthorFilter = document.getElementById('codebuilder-scratchpad-author');
+  const scratchpadKindFilter = document.getElementById('codebuilder-scratchpad-kind');
+  const scratchpadReaderBar = document.getElementById('codebuilder-scratchpad-reader');
   const agentRefresh = document.getElementById('codebuilder-agent-refresh');
   const modelSelect = document.getElementById('codebuilder-model');
   const chatForm = document.getElementById('codebuilder-chat-form');
@@ -116,6 +120,7 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
       !chatPanel || !chatExpand || !chatClear || !consoleCollapse || !shell || !layout ||
       !scratchpadDialog || !scratchpadContent || !scratchpadStatus ||
       !scratchpadRefresh || !scratchpadClear || !scratchpadAuthorFilter ||
+      !scratchpadKindFilter || !scratchpadReaderBar ||
       orchestrationButtons.length === 0 || !orchestrationStatus ||
       !workflowStop || !workflowRevert || !squadSteps ||
       !editorActivity || !changeCount || !changeViewToggle) {
@@ -693,8 +698,8 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
     const appendText = text => {
       if (!text) return;
       const paragraph = document.createElement('div');
-      paragraph.className = 'codebuilder-chat-text';
-      paragraph.textContent = text;
+      paragraph.className = 'codebuilder-chat-text prompt-rich-markdown';
+      appendMarkdown(paragraph, text);
       message.appendChild(paragraph);
     };
 
@@ -713,6 +718,30 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
       const actions = document.createElement('div');
       actions.className = 'codebuilder-code-actions';
       actions.append(createCopyCodeButton(code), createSendToEditorButton(code));
+
+      if (['html', 'htm', 'svg'].includes(language)) {
+        const previewButton = document.createElement('button');
+        previewButton.type = 'button';
+        previewButton.className = 'btn btn-sm';
+        previewButton.textContent = 'Preview page';
+        let frame = null;
+        previewButton.addEventListener('click', () => {
+          if (frame) {
+            frame.remove();
+            frame = null;
+            previewButton.textContent = 'Preview page';
+            return;
+          }
+          frame = document.createElement('iframe');
+          frame.className = 'md-html-preview';
+          frame.title = 'HTML preview';
+          frame.setAttribute('sandbox', 'allow-scripts');
+          frame.srcdoc = language === 'svg' ? `<!doctype html><body style="margin:0">${code}</body>` : code;
+          block.appendChild(frame);
+          previewButton.textContent = 'Hide preview';
+        });
+        actions.appendChild(previewButton);
+      }
 
       const expandButton = document.createElement('button');
       expandButton.type = 'button';
@@ -954,33 +983,90 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
     updateScratchpadTile();
   };
 
-  const renderScratchpadEntries = entries => {
-    scratchpadContent.replaceChildren();
-    if (!entries.length) {
-      const empty = document.createElement('p');
-      empty.className = 'text-muted small';
-      empty.textContent = 'The code scratchpad is empty. Squad runs and coding agents add entries here.';
-      scratchpadContent.appendChild(empty);
-      return;
-    }
+  // Entries by run (or "chat" for agents outside a squad run), in the order received.
+  const groupScratchpadEntries = entries => {
     const groups = new Map();
     entries.forEach(entry => {
       const key = entry.run_id || 'chat';
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(entry);
     });
-    groups.forEach((items, runId) => {
-      const section = document.createElement('section');
+    return groups;
+  };
+
+  const scratchpadRunHeading = (runId, items) => {
+    const when = new Date(items[0].created_at).toLocaleString();
+    return runId === 'chat' ? `Chat agents · ${when}` : `Squad run ${runId.slice(3, 11)} · ${when}`;
+  };
+
+  let shownScratchpadEntries = [];
+
+  const formatCodeScratchpadMarkdown = entries => {
+    const lines = ['# Code Scratchpad', '', `Exported: ${new Date().toLocaleString()}`];
+    const filters = [
+      scratchpadAuthorFilter.value && `agent ${scratchpadAuthorName(scratchpadAuthorFilter.value)}`,
+      scratchpadKindFilter.value && `type ${SCRATCHPAD_KIND_LABELS[scratchpadKindFilter.value]}`,
+    ].filter(Boolean);
+    if (filters.length) lines.push(`Filtered to: ${filters.join(', ')}`);
+    lines.push('');
+    if (!entries.length) lines.push('The code scratchpad is empty.', '');
+    groupScratchpadEntries(entries).forEach((items, runId) => {
+      lines.push(`## ${scratchpadRunHeading(runId, items)}`, '');
+      items.forEach(entry => {
+        lines.push(
+          `### ${SCRATCHPAD_KIND_LABELS[entry.kind] || entry.kind}: ${entry.title || '(untitled)'}`,
+          '',
+          `- **Agent:** ${scratchpadAuthorName(entry.author)}`,
+          `- **Time:** ${new Date(entry.created_at).toLocaleString()}`,
+          '',
+          String(entry.content || '') + (entry.truncated ? '\n\n(truncated)' : ''),
+          '',
+          '---',
+          ''
+        );
+      });
+    });
+    return lines.join('\n');
+  };
+
+  const scratchpadReader = setupScratchpadReader({
+    content: scratchpadContent,
+    toolbar: scratchpadReaderBar,
+    prefsKey: 'novous2.codebuilder.scratchpad.',
+    title: 'Code Scratchpad',
+    filenameBase: 'novous-code-scratchpad',
+    getMarkdown: () => formatCodeScratchpadMarkdown(shownScratchpadEntries),
+    onError: error => { scratchpadStatus.textContent = `Could not save or open: ${error.message}`; },
+  });
+
+  const renderScratchpadEntries = entries => {
+    shownScratchpadEntries = entries;
+    scratchpadContent.replaceChildren();
+    if (!entries.length) {
+      const empty = document.createElement('p');
+      empty.className = 'text-muted small';
+      empty.textContent = scratchpadAuthorFilter.value || scratchpadKindFilter.value
+        ? 'No entries match these filters.'
+        : 'The code scratchpad is empty. Squad runs and coding agents add entries here.';
+      scratchpadContent.appendChild(empty);
+      scratchpadReader.refresh();
+      return;
+    }
+    groupScratchpadEntries(entries).forEach((items, runId) => {
+      const section = document.createElement('details');
       section.className = 'codebuilder-scratchpad-run';
-      const heading = document.createElement('h3');
-      const when = new Date(items[0].created_at).toLocaleString();
-      heading.textContent = runId === 'chat' ? `Chat agents · ${when}` : `Squad run ${runId.slice(3, 11)} · ${when}`;
+      section.open = true;
+      const heading = document.createElement('summary');
+      heading.textContent = `${scratchpadRunHeading(runId, items)} · ${items.length} entr${items.length === 1 ? 'y' : 'ies'}`;
       section.appendChild(heading);
       items.forEach(entry => {
-        const card = document.createElement('article');
+        const card = document.createElement('details');
         card.className = 'codebuilder-scratchpad-entry';
         card.dataset.kind = entry.kind;
-        const meta = document.createElement('div');
+        card.dataset.readerItem = '';
+        card.open = true;
+        const summary = document.createElement('summary');
+        const meta = document.createElement('span');
         meta.className = 'codebuilder-scratchpad-entry-meta';
         const kind = document.createElement('span');
         kind.className = 'codebuilder-scratchpad-kind';
@@ -991,24 +1077,27 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
         time.className = 'text-muted';
         time.textContent = new Date(entry.created_at).toLocaleTimeString();
         meta.append(kind, author, time);
-        const title = document.createElement('div');
+        const title = document.createElement('span');
         title.className = 'codebuilder-scratchpad-entry-title';
         title.textContent = entry.title || '(untitled)';
+        summary.append(meta, title);
         const body = document.createElement('div');
         body.className = 'codebuilder-scratchpad-entry-body';
         appendAssistantMessage(body, entry.content + (entry.truncated ? '\n\n(truncated)' : ''));
-        card.append(meta, title, body);
+        card.append(summary, body);
         section.appendChild(card);
       });
       scratchpadContent.appendChild(section);
     });
+    scratchpadReader.refresh();
   };
 
   const loadScratchpad = async () => {
     scratchpadStatus.textContent = 'Loading code scratchpad…';
     try {
       const author = scratchpadAuthorFilter.value;
-      const result = await Api.getCodeScratchpad({ limit: 60, author });
+      const kind = scratchpadKindFilter.value;
+      const result = await Api.getCodeScratchpad({ limit: 60, author, kind });
       codeScratchpadCount = result.total || 0;
       updateScratchpadTile();
       const authors = new Set([...scratchpadAuthorFilter.options].map(option => option.value));
@@ -1019,9 +1108,11 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
         }
       });
       renderScratchpadEntries(result.entries || []);
+      const shown = (result.entries || []).length;
       scratchpadStatus.textContent = `${codeScratchpadCount} entr${codeScratchpadCount === 1 ? 'y' : 'ies'}` +
         (author ? ` · showing ${scratchpadAuthorName(author)}` : '') +
-        (codeScratchpadCount > 60 && !author ? ' · newest 60 shown' : '');
+        (kind ? ` · ${SCRATCHPAD_KIND_LABELS[kind]} only` : '') +
+        (shown === 60 ? ' · newest 60 shown' : '');
     } catch (error) {
       scratchpadContent.replaceChildren();
       scratchpadStatus.textContent = `Could not load the code scratchpad: ${error.message}`;
@@ -1054,6 +1145,7 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
   scratchpadRefresh.addEventListener('click', loadScratchpad);
   scratchpadClear.addEventListener('click', clearScratchpad);
   scratchpadAuthorFilter.addEventListener('change', loadScratchpad);
+  scratchpadKindFilter.addEventListener('change', loadScratchpad);
 
   // The agent picker and its buttons live in the chat panel heading.
   const renderAgents = () => {
@@ -1290,7 +1382,9 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
 
   const paintAgentBubble = bubble => {
     bubble.paintQueued = false;
-    bubble.body.textContent = bubble.text;
+    bubble.body.classList.add('prompt-rich-markdown');
+    bubble.body.replaceChildren();
+    appendMarkdown(bubble.body, bubble.text);
     chatMessages.scrollTop = chatMessages.scrollHeight;
     if (!EDITOR_WRITING_AGENTS.has(bubble.agentId)) return;
     const code = extractStreamingCode(bubble.text);
@@ -1623,7 +1717,9 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
       };
       const paint = () => {
         paintQueued = false;
-        bubble.textContent = text;
+        bubble.classList.add('prompt-rich-markdown');
+        bubble.replaceChildren();
+        appendMarkdown(bubble, text);
         chatMessages.scrollTop = chatMessages.scrollHeight;
         const code = latestCode();
         if (code !== null && code !== liveCode) {
@@ -1866,7 +1962,7 @@ export function renderCodeBuilderView(container) {
           </section>
         </aside>
       </main>
-      <dialog id="codebuilder-scratchpad-dialog" class="codebuilder-scratchpad-dialog">
+      <dialog id="codebuilder-scratchpad-dialog" class="codebuilder-scratchpad-dialog reader-dialog">
         <div class="codebuilder-scratchpad-heading">
           <div>
             <h2>Code scratchpad</h2>
@@ -1876,11 +1972,21 @@ export function renderCodeBuilderView(container) {
             <select id="codebuilder-scratchpad-author" class="cb-select" aria-label="Filter by agent">
               <option value="">All agents</option>
             </select>
+            <select id="codebuilder-scratchpad-kind" class="cb-select" aria-label="Filter by entry type">
+              <option value="">All types</option>
+              <option value="plan">Plans</option>
+              <option value="code">Code</option>
+              <option value="test">Tests</option>
+              <option value="fix">Fixes</option>
+              <option value="summary">Summaries</option>
+              <option value="note">Notes</option>
+            </select>
             <button id="codebuilder-scratchpad-refresh" class="cb-btn cb-btn-icon" type="button" title="Refresh" aria-label="Refresh">${iconSvg('refresh')}</button>
             <button id="codebuilder-scratchpad-clear" class="cb-btn cb-btn-danger" type="button">${iconSvg('trash-2')}<span>Clear</span></button>
             <button class="cb-btn" type="button" data-scratchpad-close>Close</button>
           </div>
         </div>
+        <div id="codebuilder-scratchpad-reader"></div>
         <div id="codebuilder-scratchpad-content" class="codebuilder-scratchpad-content" aria-live="polite"></div>
       </dialog>
     </div>

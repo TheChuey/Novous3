@@ -24,6 +24,8 @@ import uuid
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import datetime, timezone
+from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -66,6 +68,19 @@ def migrate_legacy_layout() -> list[str]:
             shutil.move(str(source), str(target))
             moved.append(str(target))
     return moved
+
+
+@lru_cache(maxsize=32)
+def _volume_label(anchor: str) -> str:
+    """The Windows volume label of a drive root such as ``G:\\``; empty elsewhere."""
+    if os.name != "nt" or not anchor:
+        return ""
+    import ctypes
+
+    label = ctypes.create_unicode_buffer(261)
+    if not ctypes.windll.kernel32.GetVolumeInformationW(anchor, label, 261, None, None, None, None, 0):
+        return ""
+    return label.value
 
 
 class _ScanStopped(Exception):
@@ -769,6 +784,7 @@ class DocumentIndexer:
 
     LEGACY_PREFIX = "workspace/Knowledge Base"
     ROOT_META_KEY = "knowledge_root"
+    WARNINGS_META_KEY = "scan_warnings"
     MANUAL_PREFIX = "manual:"
     MAX_DOCUMENT_BYTES = 100_000_000
     CHUNK_CHARACTERS = 1400
@@ -784,6 +800,22 @@ class DocumentIndexer:
         ".py", ".js", ".ts", ".css", ".toml", ".ini", ".sql", ".sh", ".ps1",
     }
     DOCLING_EXTENSIONS = {".pdf", ".docx", ".pptx", ".odt"}
+    # OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS: OneDrive/cloud files not on disk yet.
+    CLOUD_PLACEHOLDER_ATTRIBUTES = 0x1000 | 0x40000 | 0x400000
+    # HIDDEN | SYSTEM: desktop.ini, Thumbs.db and similar files are not documents.
+    HIDDEN_ATTRIBUTES = 0x2 | 0x4
+    CLOUD_DOWNLOAD_TIMEOUT_SECONDS = max(1.0, float(_env("CLOUD_DOWNLOAD_TIMEOUT", "120")))
+    GENERIC_CLOUD = "the cloud sync app"
+    CLOUD_OFFLINE_TIPS = {
+        "OneDrive": "right-click the folder in File Explorer and choose 'Always keep on this device'",
+        "Google Drive": "right-click the folder in File Explorer and choose 'Offline access' > 'Available offline'",
+    }
+    # Google Docs/Sheets/Slides etc.: link files whose content exists only on Google's servers.
+    GOOGLE_NATIVE_EXTENSIONS = {
+        ".gdoc", ".gsheet", ".gslides", ".gdraw", ".gform", ".gjam", ".gsite", ".gmap", ".gtable",
+    }
+    # "auto" parses PDFs without OCR and retries with OCR only when no text came out.
+    PDF_OCR = _env("PDF_OCR", "auto").strip().lower()
 
     def __init__(self,
         config: RagConfigStore,
@@ -794,34 +826,118 @@ class DocumentIndexer:
         self.database = database
         self.embedder = embedder or OllamaEmbedder()
         self._doc_converter = None
+        self._ocr_converter = None
         self.scan_lock = threading.RLock()
         # Set when the background scanner stops; also interrupts per-file throttling.
         self.stop_event = threading.Event()
 
-    def _document_text(self, path: Path) -> str:
-        if path.suffix.lower() in self.TEXT_EXTENSIONS:
-            return path.read_text(encoding="utf-8", errors="replace")
-        if path.suffix.lower() in self.DOCLING_EXTENSIONS:
+    def _is_cloud_placeholder(self, path: Path) -> bool:
+        return bool(getattr(path.stat(), "st_file_attributes", 0) & self.CLOUD_PLACEHOLDER_ATTRIBUTES)
+
+    def cloud_provider(self, path: Path) -> str | None:
+        """Name the sync service a file or folder lives in ("Google Drive", "OneDrive"), if any."""
+        if _volume_label(path.anchor) == "Google Drive":
+            return "Google Drive"
+        for variable in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+            root = os.environ.get(variable)
+            if root and path.is_relative_to(Path(root)):
+                return "OneDrive"
+        if path.exists() and self._is_cloud_placeholder(path):
+            return self.GENERIC_CLOUD
+        return None
+
+    def _read_source(self, path: Path, phase=None) -> bytes:
+        """Read a document's bytes; files in a cloud folder get a download time limit."""
+        provider = self.cloud_provider(path)
+        if provider is None:
+            return path.read_bytes()
+        if phase:
+            online_only = self._is_cloud_placeholder(path)
+            phase(f"{'downloading' if online_only else 'reading'} from {provider}")
+        outcome: dict[str, Any] = {}
+
+        def read() -> None:
+            try:
+                outcome["data"] = path.read_bytes()
+            except OSError as exc:
+                outcome["error"] = exc
+
+        # A read stuck inside the sync app cannot be cancelled, so it is left to finish on its own.
+        reader = threading.Thread(target=read, name="rag-cloud-read", daemon=True)
+        reader.start()
+        reader.join(self.CLOUD_DOWNLOAD_TIMEOUT_SECONDS)
+        advice = (
+            f"It is online-only (not stored on this PC). Check that {provider} is running, "
+            f"signed in and not paused, then choose Retry. To keep these files on this PC, "
+            f"{self.CLOUD_OFFLINE_TIPS.get(provider, 'make the folder available offline in the sync app')}."
+        )
+        if reader.is_alive():
+            raise RuntimeError(
+                f"File not downloaded: {provider} did not deliver it within "
+                f"{self.CLOUD_DOWNLOAD_TIMEOUT_SECONDS:g} seconds. {advice}"
+            )
+        if "error" in outcome:
+            exc = outcome["error"]
+            winerror = getattr(exc, "winerror", None)
+            code = f"WinError {winerror}" if winerror else f"error {exc.errno}"
+            raise RuntimeError(f"File not downloaded: {provider} could not deliver it ({code}). {advice}") from exc
+        return outcome["data"]
+
+    @staticmethod
+    def _build_converter(ocr: bool):
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+
+        return DocumentConverter(format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=PdfPipelineOptions(do_ocr=ocr)),
+        })
+
+    @staticmethod
+    def _convert(converter, path: Path, data: bytes) -> str:
+        from docling.datamodel.base_models import DocumentStream
+
+        result = converter.convert(DocumentStream(name=path.name, stream=BytesIO(data)))
+        return result.document.export_to_markdown()
+
+    @staticmethod
+    def _has_text(markdown: str) -> bool:
+        return bool(re.sub(r"<!--.*?-->", "", markdown, flags=re.S).strip())
+
+    def _document_text(self, path: Path, data: bytes | None = None, phase=None) -> str:
+        suffix = path.suffix.lower()
+        if suffix not in self.TEXT_EXTENSIONS | self.DOCLING_EXTENSIONS:
+            raise ValueError(f"Unsupported knowledge-base file type: {path.suffix or '(no extension)'}")
+        if data is None:
+            data = self._read_source(path, phase)
+        if suffix in self.TEXT_EXTENSIONS:
+            return data.decode("utf-8", errors="replace")
+        if phase:
+            phase("parsing")
+        try:
             if self._doc_converter is None:
                 try:
-                    from docling.document_converter import DocumentConverter
+                    self._doc_converter = self._build_converter(ocr=self.PDF_OCR == "always")
                 except ImportError as exc:
-                    if path.suffix.lower() == ".pdf":
-                        return self._pdf_text_fallback(path, exc)
+                    if suffix == ".pdf":
+                        return self._pdf_text_fallback(path, exc, data)
                     raise RuntimeError(
                         "Docling is required to index PDF, DOCX, PPTX, and ODT files."
                     ) from exc
-                self._doc_converter = DocumentConverter()
-            try:
-                result = self._doc_converter.convert(str(path))
-            except ImportError as exc:
-                if path.suffix.lower() == ".pdf":
-                    return self._pdf_text_fallback(path, exc)
-                raise
-            return result.document.export_to_markdown()
-        raise ValueError(f"Unsupported knowledge-base file type: {path.suffix or '(no extension)'}")
+            text = self._convert(self._doc_converter, path, data)
+            if suffix == ".pdf" and self.PDF_OCR == "auto" and not self._has_text(text):
+                if phase:
+                    phase("parsing with OCR")
+                if self._ocr_converter is None:
+                    self._ocr_converter = self._build_converter(ocr=True)
+                text = self._convert(self._ocr_converter, path, data)
+        except ImportError as exc:
+            if suffix == ".pdf":
+                return self._pdf_text_fallback(path, exc, data)
+            raise
+        return text
 
-    def _pdf_text_fallback(self, path: Path, docling_error: ImportError) -> str:
+    def _pdf_text_fallback(self, path: Path, docling_error: ImportError, data: bytes) -> str:
         try:
             import fitz
         except ImportError as exc:
@@ -830,7 +946,7 @@ class DocumentIndexer:
             ) from exc
 
         LOGGER.warning("Docling PDF parser unavailable; using PyMuPDF for %s: %s", path, docling_error)
-        with fitz.open(path) as document:
+        with fitz.open(stream=data, filetype="pdf") as document:
             text = "\n\n".join(page.get_text("text") for page in document)
         if not text.strip():
             raise RuntimeError(
@@ -868,8 +984,10 @@ class DocumentIndexer:
             self.database.check_embedding_space(self.embedder.model, len(vectors[0]))
         return vectors
 
-    def index_file(self, path: Path, relative_path: str | None = None, force: bool = False) -> dict:
-        """Extract, embed, and persist one supported document."""
+    def index_file(self,
+        path: Path, relative_path: str | None = None, force: bool = False, phase=None
+    ) -> dict:
+        """Extract, embed, and persist one supported document; ``phase`` reports each step."""
         resolved = path.resolve()
         if not resolved.is_file():
             raise FileNotFoundError(f"Knowledge-base document not found: {resolved}")
@@ -883,7 +1001,9 @@ class DocumentIndexer:
         ):
             return {"path": path_key, "status": "unchanged", "chunks": 0}
 
-        chunks = self._chunk_text(self._document_text(resolved))
+        chunks = self._chunk_text(self._document_text(resolved, phase=phase))
+        if phase:
+            phase("embedding")
         embeddings = self._embed(chunks)
         self.database.replace_document(
             path_key,
@@ -953,26 +1073,52 @@ class DocumentIndexer:
         self.database.initialize()
         removed = self._purge_previous_folder(root)
         files = []
+        skipped = []
+        google_native = []
         for path in root.rglob("*"):
             if not path.is_file() or path.is_symlink() or any(part.startswith(".") for part in path.relative_to(root).parts):
                 continue
+            if getattr(path.stat(), "st_file_attributes", 0) & self.HIDDEN_ATTRIBUTES:
+                continue
+            if path.suffix.lower() in self.GOOGLE_NATIVE_EXTENSIONS:
+                google_native.append(path.resolve().as_posix())
+                continue
             if path.suffix.lower() not in self.TEXT_EXTENSIONS | self.DOCLING_EXTENSIONS:
+                continue
+            if path.stat().st_size > self.MAX_DOCUMENT_BYTES:
+                skipped.append({
+                    "path": path.resolve().as_posix(),
+                    "status": "skipped",
+                    "error": f"Document exceeds the {self.MAX_DOCUMENT_BYTES}-byte indexing limit.",
+                })
                 continue
             files.append(path)
 
+        warnings = []
+        if google_native:
+            warnings.append({
+                "message": (
+                    f"{len(google_native)} Google Docs/Sheets/Slides file(s) cannot be indexed: they are "
+                    "links to documents stored only on Google's servers, with no content on this PC. "
+                    "To index them, open each in Google Drive, choose File > Download (.docx or .pdf) "
+                    "and save the download into this folder."
+                ),
+                "paths": google_native,
+            })
+
         results = []
-        skipped = []
         if progress:
-            progress(discovered=len(files), current="")
+            progress(discovered=len(files), current="", phase="", skipped=skipped, warnings=warnings)
+        report_phase = (lambda name: progress(phase=name)) if progress else None
         for index, path in enumerate(files, start=1):
             if pause_point:
                 pause_point()
             if progress:
-                progress(current=str(path), completed=index - 1)
+                progress(current=str(path), completed=index - 1, phase="")
             key = path.resolve().as_posix()
             while True:
                 try:
-                    results.append(self.index_file(path, key, force=force))
+                    results.append(self.index_file(path, key, force=force, phase=report_phase))
                     break
                 except Exception as exc:
                     LOGGER.exception("Could not index knowledge-base document %s", path)
@@ -994,6 +1140,7 @@ class DocumentIndexer:
                     errors=[item for item in results if item["status"] == "error"],
                     skipped=skipped,
                     current="",
+                    phase="",
                 )
             if self.SCAN_FILE_DELAY_SECONDS:
                 self.stop_event.wait(self.SCAN_FILE_DELAY_SECONDS)
@@ -1002,6 +1149,8 @@ class DocumentIndexer:
             pause_point()
         keep = {path.resolve().as_posix() for path in files}
         stale = self.database.delete_documents_under(root.as_posix(), keep)
+        # Kept with the source so its views can show them after other sources are scanned.
+        self.database.set_meta(self.WARNINGS_META_KEY, json.dumps(warnings))
         return {
             "folder": str(root),
             "discovered": len(files),
@@ -1009,6 +1158,7 @@ class DocumentIndexer:
             "unchanged": sum(result["status"] == "unchanged" for result in results),
             "errors": [result for result in results if result["status"] == "error"],
             "skipped": skipped,
+            "warnings": warnings,
             "removed": removed + stale,
         }
 
@@ -1087,6 +1237,7 @@ class DocumentScannerService:
             self._job.update(
                 status="stopped",
                 current="",
+                phase="",
                 pending_error=None,
                 resume_at=None,
                 finished_at=datetime.now(timezone.utc).isoformat(),
@@ -1152,12 +1303,14 @@ class DocumentScannerService:
                 base_id=base_id,
                 status="stopping" if self._stop_requested.is_set() else "running",
                 current="",
+                phase="",
                 discovered=0,
                 completed=0,
                 indexed=0,
                 unchanged=0,
                 errors=[],
                 skipped=[],
+                warnings=[],
                 pending_error=None,
                 started_at=datetime.now(timezone.utc).isoformat(),
                 finished_at=None,
@@ -1181,9 +1334,11 @@ class DocumentScannerService:
             self._update_job(
                 status=status,
                 current="",
+                phase="",
                 removed=result["removed"],
                 errors=result["errors"],
                 skipped=result.get("skipped", []),
+                warnings=result.get("warnings", []),
                 pending_error=None,
                 finished_at=datetime.now(timezone.utc).isoformat(),
             )
@@ -1439,6 +1594,7 @@ class RagMemoryService:
             self.database.initialize()
             folder = self.indexer.knowledge_base_folder(selected_id)
             documents = self.database.list_documents()
+            warnings = self._scan_warnings()
         base = self.config.get_knowledge_base(selected_id)
         return {
             "base_id": base["id"],
@@ -1446,9 +1602,19 @@ class RagMemoryService:
             "path": str(folder),
             "configured_path": str(base["path"]),
             "exists": folder.is_dir(),
+            "cloud_provider": self.indexer.cloud_provider(folder),
             "documents": len(documents),
             "chunks": sum(item["chunks"] for item in documents),
+            "warnings": warnings,
         }
+
+    def _scan_warnings(self) -> list[dict[str, Any]]:
+        """Warnings from the active source's last completed scan (call inside its database context)."""
+        try:
+            warnings = json.loads(self.database.get_meta(self.indexer.WARNINGS_META_KEY) or "[]")
+        except json.JSONDecodeError:
+            return []
+        return warnings if isinstance(warnings, list) else []
 
     def get_rag_overview(self, base_id: str | None = None) -> dict[str, Any]:
         """Status plus every indexed document with its type, for the Chat Console dialog."""
@@ -1477,9 +1643,11 @@ class RagMemoryService:
         bases = self.config.list_knowledge_bases()
         for base in bases:
             base["exists"] = Path(base["path"]).is_dir()
+            base["cloud_provider"] = self.indexer.cloud_provider(Path(base["path"]))
             with self.config.database_context(str(base["id"])):
                 self.database.initialize()
                 documents = self.database.list_documents()
+                base["warnings"] = self._scan_warnings()
             base["documents"] = len(documents)
             base["chunks"] = sum(item["chunks"] for item in documents)
         return bases

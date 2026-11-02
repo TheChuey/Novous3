@@ -9,6 +9,7 @@ import { renderSquadsView } from './squads/squads_view.js';
 import { renderAgentsView } from './squads/agents_view.js';
 import { renderToolsView } from './squads/tools_view.js';
 import { renderRunsView, stopRunStream } from './squads/runs_view.js';
+import { renderModelsView } from './views/models_view.js';
 
 export { AppState };
 
@@ -16,6 +17,7 @@ const views = {
   squads: renderSquadsView,
   agents: renderAgentsView,
   tools: renderToolsView,
+  models: renderModelsView,
   runs: renderRunsView,
   dashboard: renderWorkspaceView,
   editor: renderEditorView,

@@ -4,6 +4,7 @@
  */
 import { Api } from '../api.js';
 import { renderTree } from '../tree.js';
+import { ragWarningNodes } from '../rag_warnings.js';
 import { AppState, esc, navigate, refreshProject } from '../shell.js';
 import { renderAgentLibrary } from './agent_library.js';
 
@@ -260,7 +261,7 @@ export function renderWorkspaceView(container) {
       });
       const detail = document.createElement('span');
       detail.className = 'small text-muted';
-      detail.textContent = `${base.selected ? 'Selected · ' : ''}${base.exists ? 'Folder available' : 'Folder unavailable'} · ${base.documents} document(s) · ${base.chunks} chunks`;
+      detail.textContent = `${base.selected ? 'Selected · ' : ''}${base.exists ? 'Folder available' : 'Folder unavailable'}${base.cloud_provider ? ` · ${base.cloud_provider}` : ''} · ${base.documents} document(s) · ${base.chunks} chunks`;
       const actions = document.createElement('div');
       actions.className = 'root-management-actions';
       const select = document.createElement('button');
@@ -337,7 +338,7 @@ export function renderWorkspaceView(container) {
       remove.disabled = AppState.ragScanJob?.base_id === base.id &&
         ['queued', 'running', 'pausing', 'stopping', 'awaiting_decision'].includes(AppState.ragScanJob.status);
       actions.appendChild(remove);
-      item.append(heading, path, detail, actions);
+      item.append(heading, path, detail, ...ragWarningNodes(base.warnings), actions);
       if (base.selected) item.classList.add('rag-base-selected');
       ragBaseList.appendChild(item);
     });
@@ -357,7 +358,8 @@ export function renderWorkspaceView(container) {
     renderRagBases();
     const selected = ragBases.find(base => base.id === selectedRagBaseId);
     if (selected) {
-      showRagStatus(`Selected source: ${selected.name} — ${selected.path}${selected.exists ? '' : ' (folder unavailable)'}`);
+      showRagStatus(`Selected source: ${selected.name} — ${selected.path}${selected.exists ? '' : ' (folder unavailable)'}` +
+        (selected.cloud_provider ? ` · ${selected.cloud_provider} folder: online-only files are downloaded before indexing` : ''));
     } else {
       showRagStatus('No knowledge sources yet. Save a named source to create the first branch.');
     }
@@ -370,7 +372,7 @@ export function renderWorkspaceView(container) {
     const progress = `${job.completed || 0}/${job.discovered || 0} file(s) checked · ` +
       `${job.indexed || 0} indexed · ${job.unchanged || 0} unchanged · ` +
       `${job.skipped?.length || 0} skipped · ${job.errors?.length || 0} errors`;
-    const current = job.current ? ` — ${job.current}` : '';
+    const current = job.current ? ` — ${job.current}${job.phase ? ` (${job.phase})` : ''}` : '';
     const firstError = job.errors?.[0];
     const errors = job.errors?.length
       ? `; ${job.errors.length} error(s), e.g. ${firstError.path || ''} — ${firstError.error || 'see server log'}`
@@ -381,6 +383,7 @@ export function renderWorkspaceView(container) {
     const schedule = job.resume_at
       ? `; scheduled resume ${new Date(job.resume_at).toLocaleString()}`
       : '';
+    const warning = job.warnings?.length ? ` ⚠ ${job.warnings.map(item => item.message).join(' ')}` : '';
     const state = {
       queued: 'Starting',
       running: 'Indexing',
@@ -396,9 +399,10 @@ export function renderWorkspaceView(container) {
     }[job.status] || job.status;
     ragJobStatus.textContent = job.status === 'idle'
       ? 'Index status: Waiting to start.'
-      : `${baseName}: ${state} — ${progress}${pending ? ` — ${pending}` : errors}${schedule}${current}`;
+      : `${baseName}: ${state} — ${progress}${pending ? ` — ${pending}` : errors}${schedule}${current}${warning}`;
     ragJobStatus.className = `small ${
-      ['completed', 'completed_with_skips', 'running', 'queued'].includes(job.status) ? 'text-success'
+      warning && ['completed', 'completed_with_skips'].includes(job.status) ? 'text-warning'
+      : ['completed', 'completed_with_skips', 'running', 'queued'].includes(job.status) ? 'text-success'
         : ['paused', 'pausing', 'awaiting_decision'].includes(job.status) ? 'text-warning'
           : ['failed', 'completed_with_errors', 'unavailable'].includes(job.status) ? 'text-danger'
             : 'text-muted'

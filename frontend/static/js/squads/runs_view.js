@@ -4,11 +4,19 @@
  */
 import { Api } from '../api.js';
 import { esc, navigate } from '../shell.js';
+import { appendMarkdown } from '../markdown.js';
+import { createAgentMeters, runHealthHtml } from '../agent_meters.js';
 import { PATTERN_INFO, codeChangeFromEvent, describeEvent, startSquadRun } from './run_client.js';
 
 let activeRun = null;
 const recentRuns = [];
 let lastSquadId = null;
+let markdownTexts = [];
+
+function markdownSlot(text, className = '') {
+  markdownTexts.push(String(text ?? ''));
+  return `<div class="sq-md prompt-rich-markdown ${className}" data-md="${markdownTexts.length - 1}"></div>`;
+}
 
 export function stopRunStream() {
   activeRun?.close();
@@ -36,7 +44,7 @@ function payloadSections(payload) {
   const outputs = payload.fanout_results || payload.member_results;
   if (outputs && Object.keys(outputs).length) {
     parts.push(`<h4>Member outputs</h4>${Object.entries(outputs).map(([id, text]) => `
-      <details class="sq-output"><summary>${esc(id)}</summary><pre class="sq-pre">${esc(text)}</pre></details>`).join('')}`);
+      <details class="sq-output"><summary>${esc(id)}</summary>${markdownSlot(text)}</details>`).join('')}`);
   }
   if (payload.fanout_errors && Object.keys(payload.fanout_errors).length) {
     parts.push(`<h4>Member errors</h4>${Object.entries(payload.fanout_errors).map(([id, error]) =>
@@ -78,6 +86,7 @@ export function renderRunsView(container, payload = null) {
             <h3>Live trace</h3>
             <span class="text-muted small">Prompts, tool arguments and document text are never streamed.</span>
           </div>
+          <div class="agent-meters" data-role="agents"></div>
           <ol class="sq-timeline" data-role="timeline"><li class="text-muted small">Start a run to see its trace.</li></ol>
         </section>
         <section class="card sq-result" data-role="result">
@@ -95,6 +104,8 @@ export function renderRunsView(container, payload = null) {
   const query = container.querySelector('[data-role="query"]');
   const status = container.querySelector('[data-role="status"]');
   const timeline = container.querySelector('[data-role="timeline"]');
+  const meters = createAgentMeters(container.querySelector('[data-role="agents"]'));
+  meters.reset();
   const resultBox = container.querySelector('[data-role="result"]');
   const recent = container.querySelector('[data-role="recent"]');
   const runButton = container.querySelector('[data-act="run"]');
@@ -138,6 +149,7 @@ export function renderRunsView(container, payload = null) {
   }
 
   function addTimelineEvent(event) {
+    meters.onEvent(event);
     if (timeline.querySelector('.text-muted')) timeline.replaceChildren();
     const line = describeEvent(event);
     const item = document.createElement('li');
@@ -161,14 +173,16 @@ export function renderRunsView(container, payload = null) {
       resultBox.innerHTML = `<h3>Result</h3><p class="text-danger small">${esc(err.message)}</p>`;
       return;
     }
+    markdownTexts = [];
     resultBox.innerHTML = `
       <div class="card-head">
         <h3>Result</h3>
         <span class="badge ${result.status === 'error' ? 'badge-danger' : 'badge-success'}">${esc(result.status)}</span>
       </div>
       <p class="text-muted small">${esc(PATTERN_INFO[result.pattern]?.label || result.pattern)} · trace ${esc(result.trace_id)}</p>
+      ${runHealthHtml(result.agent_stats)}
       <h4>Final answer</h4>
-      <div class="sq-answer">${esc(result.final_answer || '(No final answer returned.)')}</div>
+      ${markdownSlot(result.final_answer || '(No final answer returned.)', 'sq-answer')}
       ${payloadSections(result.result_payload)}
       <h4>Execution steps</h4>
       <table class="sq-steps"><thead><tr><th>#</th><th>Agent</th><th>Phase</th><th>Status</th><th>Details</th></tr></thead>
@@ -182,7 +196,11 @@ export function renderRunsView(container, payload = null) {
       </div>
       <pre class="sq-pre hidden" data-role="scratchpad"></pre>`;
     resultBox.dataset.squad = result.squad_id || '';
+    resultBox.querySelectorAll('[data-md]').forEach(slot => {
+      appendMarkdown(slot, markdownTexts[Number(slot.dataset.md)]);
+    });
     resultBox.dataset.trace = traceId;
+    meters.setFromStats(result.agent_stats);
   }
 
   resultBox.addEventListener('click', async event => {
@@ -217,6 +235,7 @@ export function renderRunsView(container, payload = null) {
     stopRunStream();
     codeChange = null;
     timeline.replaceChildren();
+    meters.reset();
     runButton.disabled = true;
     setStatus('Starting run…');
     const pattern = patternSelect.value || null;

@@ -16,7 +16,7 @@ from scratchpadMemory.logic_scratchpadMemory import scratchpad
 from server import app
 from editor.logic_editor import editor_files
 from file_manager.logic_file_manager import file_backend
-from tools.logic_tools import tool_registry, workspace_files
+from tools.logic_tools import read_agent_scratchpad, tool_registry, workspace_files
 
 
 class TestToolsInterface(unittest.TestCase):
@@ -522,6 +522,26 @@ class TestToolsInterface(unittest.TestCase):
                 # GET after delete -> 404
                 get_after = client.get("/api/tools/custom_api_test")
                 self.assertEqual(get_after.status_code, 404)
+
+    def test_scratchpad_recall_schema_tells_the_model_when_to_use_it(self):
+        agent = Agent(model="test-model", tools=[], profile=AgentProfile(mode="agent"))
+        schema = agent._ollama_schema(read_agent_scratchpad)["function"]
+
+        self.assertIn("remember", schema["description"])
+        self.assertIn("summarize", schema["description"])
+        for name in ("memory_type", "item", "offset", "max_chars"):
+            self.assertNotEqual(schema["parameters"]["properties"][name]["description"], f"Parameter {name}")
+
+    def test_workbench_tool_source_includes_undecorated_test_source(self):
+        response = TestClient(app).get("/api/testing/tool-workbench/tools/read_agent_scratchpad")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        tool = response.json()
+        self.assertEqual(tool["path"], "tools/logic_tools.py")
+        self.assertIn("@tool(", tool["source"])
+        self.assertNotIn("@tool", tool["test_source"])
+        self.assertIn("def read_agent_scratchpad(", tool["test_source"])
+        compile(tool["test_source"], "test_source", "exec")
 
 
 if __name__ == "__main__":

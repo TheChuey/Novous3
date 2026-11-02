@@ -8,6 +8,7 @@ const TEST_FUNCTIONS = [
   { id: 'benchmark', label: 'Benchmark', icon: 'gauge', group: 'Testing', action: null },
   { id: 'apiLogs', label: 'API Logs', icon: 'file-code', group: 'Testing', action: null },
   { id: 'diagnostics', label: 'Diagnostics', icon: 'activity', group: 'Testing', action: null },
+  { id: 'viewContext', label: 'Context Window', icon: 'activity', group: 'Conversation', action: null },
   { id: 'wipeChat', label: 'Wipe Chat', icon: 'trash-2', group: 'Conversation', action: null },
   { id: 'viewScratchpad', label: 'View Scratchpad', icon: 'file-code', group: 'Scratchpad', action: null },
   { id: 'saveScratchpad', label: 'Save Scratchpad', icon: 'save', group: 'Scratchpad', action: null },

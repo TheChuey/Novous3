@@ -2,6 +2,7 @@
 maps and sub-agent results (operational short-term memory), plus the separate code
 scratchpad the coding agents and the Code Development Squad share."""
 
+import hashlib
 import json
 import shutil
 import tempfile
@@ -52,6 +53,13 @@ class ScratchpadService:
     SCRATCHPAD_PATH = DATA_DIR / "scratchpad.json"
     RELATIVE_PATH = "scratchpadMemory/data/scratchpad.json"
     MAX_READ_HISTORY = 20
+    RECALL_DEFAULT_CHARS = 4000
+    RECALL_MIN_CHARS = 500
+    RECALL_MAX_CHARS = 20000
+    INDEX_MAX_ITEMS = 15
+    PREVIEW_CHARS = 80
+    PAGE_BREAK_WINDOW = 200
+    RECALL_TYPES = {"index", "all", "latest_read", "latest_map", "latest_subagent_result", "latest_rag_result"}
     SUBAGENT_STATUSES = {status.value for status in SubAgentStatus}
     MEMORY_TYPES = {memory_type.value for memory_type in MemoryType}
 
@@ -100,7 +108,7 @@ class ScratchpadService:
             data["read_history"] = history[-self.MAX_READ_HISTORY:]
             data["latest_read"] = entry
             self._write(data)
-        return {"path": self.RELATIVE_PATH, "updated_at": entry["updated_at"]}
+        return {"path": self.RELATIVE_PATH, "updated_at": entry["updated_at"], "id": self.entry_id("read", entry)}
 
     def store_map(self, tree: dict[str, Any], requested_path: str = "") -> dict[str, Any]:
         """Store the latest workspace tree snapshot."""
@@ -113,7 +121,7 @@ class ScratchpadService:
             data = self._read()
             data["latest_map"] = entry
             self._write(data)
-        return {"path": self.RELATIVE_PATH, "updated_at": entry["updated_at"]}
+        return {"path": self.RELATIVE_PATH, "updated_at": entry["updated_at"], "id": self.entry_id("map", entry)}
 
     def store_subagent_result(self,
         subagent_id: str, task_type: str, status: str, payload: Any
@@ -140,7 +148,8 @@ class ScratchpadService:
             data["subagent_history"] = history[-self.MAX_READ_HISTORY:]
             data["latest_subagent_result"] = entry
             self._write(data)
-        return {"path": self.RELATIVE_PATH, "updated_at": entry["updated_at"]}
+        return {"path": self.RELATIVE_PATH, "updated_at": entry["updated_at"],
+                "id": self.entry_id("subagent", entry)}
 
     def read_memory(self, memory_type: str = "all") -> dict[str, Any]:
         """Read saved scratchpad entries with backward compatibility for legacy keys."""
@@ -158,6 +167,171 @@ class ScratchpadService:
                 )
             }
         return {memory_type: data[memory_type]} if memory_type in data else {}
+
+    @staticmethod
+    def _body(kind: str, entry: dict[str, Any]) -> str:
+        """The text a recall pages through: file content, compact tree, or compact payload."""
+        if kind == "read":
+            return str(entry.get("content", ""))
+        if kind == "map":
+            return json.dumps(entry.get("tree", {}), ensure_ascii=False, separators=(",", ":"))
+        return json.dumps(entry.get("payload", {}), ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _label(kind: str, entry: dict[str, Any]) -> str:
+        if kind == "read":
+            return str(entry.get("path", ""))
+        if kind == "map":
+            return str(entry.get("requested_path", "")) or "workspace"
+        return str(entry.get("subagent_id", ""))
+
+    @classmethod
+    def entry_id(cls, kind: str, entry: dict[str, Any]) -> str:
+        """Stable short id from kind, time and label, so stored entries need no migration."""
+        seed = f"{kind}|{entry.get('updated_at', '')}|{cls._label(kind, entry)}"
+        return f"{kind}-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:8]}"
+
+    def _items(self, data: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+        """Every saved entry as (kind, entry), newest first, with the latest copies de-duplicated."""
+        found: dict[str, tuple[str, dict[str, Any]]] = {}
+
+        def add(kind: str, entry: Any) -> None:
+            if isinstance(entry, dict) and entry.get("updated_at"):
+                found.setdefault(f"{kind}|{entry['updated_at']}", (kind, entry))
+
+        for entry in data.get("read_history") or []:
+            add("read", entry)
+        add("read", data.get("latest_read"))
+        add("map", data.get("latest_map"))
+        for entry in data.get("subagent_history") or []:
+            add("subagent", entry)
+        add("subagent", data.get("latest_subagent_result") or data.get("latest_rag_result"))
+        return sorted(found.values(), key=lambda pair: pair[1]["updated_at"], reverse=True)
+
+    def _find(self, items: list[tuple[str, dict[str, Any]]], key: str) -> tuple[str, dict[str, Any]]:
+        """Resolve an id exactly, else a label to its newest entry."""
+        for kind, entry in items:
+            if self.entry_id(kind, entry) == key:
+                return kind, entry
+        for kind, entry in items:
+            if self._label(kind, entry) == key:
+                return kind, entry
+        raise ValueError(
+            f"No saved item matches '{key}'. Call read_agent_scratchpad with no arguments to list saved items."
+        )
+
+    def window(self, text: str, offset: int = 0, max_chars: int = RECALL_DEFAULT_CHARS) -> dict[str, Any]:
+        """Return one page of text. Pages end on a newline near the limit when possible."""
+        total = len(text)
+        start = min(max(offset, 0), total)
+        end = min(start + max_chars, total)
+        if end < total:
+            newline = text.rfind("\n", max(start, end - self.PAGE_BREAK_WINDOW), end)
+            if newline > start:
+                end = newline + 1
+        return {
+            "content": text[start:end],
+            "total_chars": total,
+            "offset": start,
+            "returned_chars": end - start,
+            "truncated": end < total,
+            "next_offset": end if end < total else None,
+            "remaining": total - end,
+        }
+
+    @staticmethod
+    def _number(value: str, name: str, default: int) -> int:
+        text = str(value or "").strip()
+        if not text:
+            return default
+        try:
+            return int(text)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a whole number.") from exc
+
+    def recall(self, memory_type: str = "index", item: str = "", offset: str = "0",
+               max_chars: str = "4000") -> dict[str, Any]:
+        """Agent-facing recall: list saved items, or return one item as a page of text."""
+        if memory_type not in self.RECALL_TYPES:
+            raise ValueError(
+                f"memory_type must be one of {sorted(self.RECALL_TYPES)}. "
+                "Call with no arguments to list saved items."
+            )
+        start = self._number(offset, "offset", 0)
+        if start < 0:
+            raise ValueError("offset must be 0 or greater.")
+        size = min(max(self._number(max_chars, "max_chars", self.RECALL_DEFAULT_CHARS), self.RECALL_MIN_CHARS),
+                   self.RECALL_MAX_CHARS)
+        with self._lock:
+            data = self._read()
+        items = self._items(data)
+
+        if item.strip():
+            return self._fetch(*self._find(items, item.strip()), start, size)
+        if memory_type in ("index", "all"):
+            return self._index(items)
+        if memory_type in ("latest_subagent_result", "latest_rag_result"):
+            return self._latest_subagent(data, start, size)
+        kind = "read" if memory_type == "latest_read" else "map"
+        match = next(((k, e) for k, e in items if k == kind), None)
+        if match is None:
+            return {"kind": kind, "item": None,
+                    "message": f"Nothing saved as {kind} yet. Call read_agent_scratchpad with no arguments to list saved items."}
+        return self._fetch(*match, start, size)
+
+    def _index(self, items: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+        rows = []
+        for kind, entry in items[: self.INDEX_MAX_ITEMS]:
+            body = self._body(kind, entry)
+            row = {
+                "id": self.entry_id(kind, entry),
+                "kind": kind,
+                "label": self._label(kind, entry),
+                "chars": len(body),
+                "updated_at": entry.get("updated_at"),
+                "preview": " ".join(body[: self.PREVIEW_CHARS * 2].split())[: self.PREVIEW_CHARS],
+            }
+            if kind == "read":
+                row["request"] = entry.get("request", "")
+            if kind == "subagent":
+                row["status"] = entry.get("status", "")
+            rows.append(row)
+        hint = ("Call read_agent_scratchpad(item=<id>) to read one item in pages."
+                if items else "Nothing is saved yet.")
+        return {"items": rows, "total_items": len(items), "showing": len(rows), "hint": hint}
+
+    def _fetch(self, kind: str, entry: dict[str, Any], offset: int, size: int) -> dict[str, Any]:
+        item_id = self.entry_id(kind, entry)
+        header = {"id": item_id, "kind": kind, "label": self._label(kind, entry),
+                  "updated_at": entry.get("updated_at")}
+        if kind == "read":
+            header["request"] = entry.get("request", "")
+        if kind == "subagent":
+            header.update(task_type=entry.get("task_type", ""), status=entry.get("status", ""))
+        page = self.window(self._body(kind, entry), offset, size)
+        if page["truncated"]:
+            page["hint"] = f"Continue with read_agent_scratchpad(item='{item_id}', offset='{page['next_offset']}')."
+        return {**header, **page}
+
+    def _latest_subagent(self, data: dict[str, Any], offset: int, size: int) -> dict[str, Any]:
+        """Keep the legacy shape the rag-presenter handoff relies on; page it only when too large."""
+        entry = data.get("latest_subagent_result", data.get("latest_rag_result", {}))
+        if not isinstance(entry, dict) or not entry:
+            return {"latest_subagent_result": {}}
+        if offset == 0 and len(json.dumps(entry, ensure_ascii=False)) <= size:
+            return {"latest_subagent_result": entry}
+        page = self.window(self._body("subagent", entry), offset, size)
+        windowed = {
+            **{key: entry[key] for key in ("subagent_id", "task_type", "status", "updated_at") if key in entry},
+            "id": self.entry_id("subagent", entry),
+            "payload_format": "json_text",
+            "payload": page.pop("content"),
+            **page,
+        }
+        if windowed["truncated"]:
+            windowed["hint"] = (f"Continue with read_agent_scratchpad(item='{windowed['id']}', "
+                                f"offset='{windowed['next_offset']}').")
+        return {"latest_subagent_result": windowed}
 
     def clear_memory(self) -> dict[str, Any]:
         """Clear saved reads and maps while retaining the scratchpad file."""

@@ -1,4 +1,5 @@
 import json
+import os
 from contextlib import nullcontext
 import threading
 import tempfile
@@ -86,6 +87,76 @@ class TestAgentMemory(unittest.TestCase):
 
         self.assertTrue(scratchpad.clear_memory()["cleared"])
         self.assertEqual(scratchpad.read_memory(), {})
+
+    def test_recall_index_lists_newest_first_with_ids_and_previews(self):
+        self.assertEqual(scratchpad.recall(), {"items": [], "total_items": 0, "showing": 0,
+                                               "hint": "Nothing is saved yet."})
+        scratchpad.store_read("notes.txt", "remember this", "summarize")
+        scratchpad.store_map({"name": "workspace"}, "workspace")
+        scratchpad.store_read("second.txt", "also remember this", "compare")
+
+        index = scratchpad.recall()
+        self.assertEqual(index["total_items"], 3)
+        self.assertEqual([row["label"] for row in index["items"]], ["second.txt", "workspace", "notes.txt"])
+        self.assertEqual(index["items"][0]["request"], "compare")
+        self.assertEqual(index["items"][0]["preview"], "also remember this")
+        self.assertTrue(all(row["id"].startswith(f"{row['kind']}-") for row in index["items"]))
+        self.assertEqual(scratchpad.recall("all"), index)
+
+    def test_recall_pages_reassemble_the_exact_text(self):
+        text = "\n".join(f"line {number} " + "x" * 60 for number in range(600))
+        scratchpad.store_read("long.txt", text, "summarize")
+
+        pages, offset = [], "0"
+        while True:
+            page = scratchpad.recall(item="long.txt", offset=offset, max_chars="4000")
+            self.assertLessEqual(len(page["content"]), 4000)
+            pages.append(page["content"])
+            if not page["truncated"]:
+                break
+            offset = str(page["next_offset"])
+
+        self.assertGreater(len(pages), 1)
+        self.assertEqual("".join(pages), text)
+        self.assertEqual(page["total_chars"], len(text))
+        self.assertIsNone(page["next_offset"])
+
+    def test_recall_item_by_path_is_newest_and_by_id_is_exact(self):
+        first = scratchpad.store_read("notes.txt", "first version", "")
+        scratchpad.store_read("notes.txt", "second version", "")
+
+        self.assertEqual(scratchpad.recall(item="notes.txt")["content"], "second version")
+        self.assertEqual(scratchpad.recall(item=first["id"])["content"], "first version")
+
+    def test_recall_latest_subagent_keeps_legacy_shape_and_pages_when_large(self):
+        scratchpad.store_subagent_result("rag-retriever", "retrieval", "success",
+                                         {"results": [{"content": "small"}]})
+        small = scratchpad.recall(memory_type="latest_subagent_result")["latest_subagent_result"]
+        self.assertEqual(small["payload"], {"results": [{"content": "small"}]})
+
+        big_payload = {"results": [{"content": "evidence " * 800}]}
+        scratchpad.store_subagent_result("rag-retriever", "retrieval", "success", big_payload)
+        paged = scratchpad.recall(memory_type="latest_subagent_result", max_chars="1000")["latest_subagent_result"]
+        self.assertEqual(paged["subagent_id"], "rag-retriever")
+        self.assertEqual(paged["payload_format"], "json_text")
+        self.assertTrue(paged["truncated"])
+        self.assertLessEqual(len(paged["payload"]), 1000)
+        self.assertEqual(paged["total_chars"],
+                         len(json.dumps(big_payload, ensure_ascii=False, separators=(",", ":"))))
+
+    def test_recall_clamps_page_size_and_rejects_bad_arguments(self):
+        scratchpad.store_read("notes.txt", "x" * 30000, "")
+        self.assertEqual(len(scratchpad.recall(item="notes.txt", max_chars="10")["content"]), 500)
+        self.assertEqual(len(scratchpad.recall(item="notes.txt", max_chars="99999")["content"]), 20000)
+
+        with self.assertRaisesRegex(ValueError, "memory_type must be one of"):
+            scratchpad.recall(memory_type="everything")
+        with self.assertRaisesRegex(ValueError, "whole number"):
+            scratchpad.recall(offset="abc")
+        with self.assertRaisesRegex(ValueError, "offset must be 0 or greater"):
+            scratchpad.recall(offset="-1")
+        with self.assertRaisesRegex(ValueError, "No saved item matches"):
+            scratchpad.recall(item="missing.txt")
 
     def test_document_crud_and_semantic_search(self):
         rag_database.replace_document(
@@ -436,6 +507,95 @@ class TestAgentMemory(unittest.TestCase):
         self.assertEqual(index_file.call_count, 2)
         self.assertEqual(result["indexed"], 1)
         self.assertEqual(result["errors"], [])
+
+    def test_oversized_files_are_skipped_without_asking(self):
+        folder = self.temp_path / "oversized"
+        folder.mkdir()
+        (folder / "big.md").write_text("x" * 20, encoding="utf-8")
+        (folder / "small.md").write_text("small", encoding="utf-8")
+        decider = Mock()
+        with patch.object(indexer, "MAX_DOCUMENT_BYTES", 10), \
+                patch.object(indexer, "knowledge_base_folder", return_value=folder), \
+                patch.object(rag_config, "database_context", return_value=nullcontext()), \
+                patch.object(rag_database, "initialize"), \
+                patch.object(indexer, "_purge_previous_folder", return_value=[]), \
+                patch.object(rag_database, "delete_documents_under", return_value=[]), \
+                patch.object(indexer, "index_file", return_value={"status": "indexed"}) as index_file:
+            result = indexer._scan_knowledge_base(False, "test", None, None, decider)
+
+        decider.assert_not_called()
+        self.assertEqual(index_file.call_count, 1)
+        self.assertEqual(result["discovered"], 1)
+        self.assertEqual([Path(item["path"]).name for item in result["skipped"]], ["big.md"])
+        self.assertIn("indexing limit", result["skipped"][0]["error"])
+
+    def test_google_docs_links_produce_a_warning_not_an_error(self):
+        folder = self.temp_path / "google"
+        folder.mkdir()
+        (folder / "About me.gdoc").write_text('{"doc_id": "abc"}', encoding="utf-8")
+        (folder / "Budget.gsheet").write_text('{"doc_id": "def"}', encoding="utf-8")
+        (folder / "notes.md").write_text("notes", encoding="utf-8")
+        with patch.object(indexer, "knowledge_base_folder", return_value=folder), \
+                patch.object(rag_config, "database_context", return_value=nullcontext()), \
+                patch.object(rag_database, "initialize"), \
+                patch.object(indexer, "_purge_previous_folder", return_value=[]), \
+                patch.object(rag_database, "delete_documents_under", return_value=[]), \
+                patch.object(indexer, "index_file", return_value={"status": "indexed"}) as index_file:
+            result = indexer._scan_knowledge_base(False, "test", None, None, None)
+
+        self.assertEqual(index_file.call_count, 1)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["skipped"], [])
+        [warning] = result["warnings"]
+        self.assertIn("2 Google Docs/Sheets/Slides file(s) cannot be indexed", warning["message"])
+        self.assertIn("File > Download", warning["message"])
+        self.assertEqual(sorted(Path(path).name for path in warning["paths"]), ["About me.gdoc", "Budget.gsheet"])
+        # Saved with the source, so its views show it after other sources are scanned.
+        self.assertEqual(rag_memory.get_rag_status("test")["warnings"], result["warnings"])
+        [base] = rag_memory.list_rag_bases()
+        self.assertEqual(base["warnings"], result["warnings"])
+
+    @unittest.skipUnless(os.name == "nt", "hidden file attributes are Windows-only")
+    def test_hidden_system_files_are_not_indexed(self):
+        import subprocess
+
+        folder = self.temp_path / "hidden"
+        folder.mkdir()
+        (folder / "desktop.ini").write_text("[.ShellClassInfo]", encoding="utf-8")
+        (folder / "notes.md").write_text("notes", encoding="utf-8")
+        subprocess.run(["attrib", "+h", str(folder / "desktop.ini")], check=True)
+        with patch.object(indexer, "knowledge_base_folder", return_value=folder), \
+                patch.object(rag_config, "database_context", return_value=nullcontext()), \
+                patch.object(rag_database, "initialize"), \
+                patch.object(indexer, "_purge_previous_folder", return_value=[]), \
+                patch.object(rag_database, "delete_documents_under", return_value=[]), \
+                patch.object(indexer, "index_file", return_value={"status": "indexed"}) as index_file:
+            result = indexer._scan_knowledge_base(False, "test", None, None, None)
+
+        self.assertEqual(result["discovered"], 1)
+        self.assertEqual(index_file.call_args.args[0].name, "notes.md")
+
+    def test_scan_progress_reports_each_file_phase(self):
+        folder = self.temp_path / "phases"
+        folder.mkdir()
+        (folder / "notes.md").write_text("phase text", encoding="utf-8")
+        updates = []
+        with patch.object(indexer, "knowledge_base_folder", return_value=folder), \
+                patch.object(rag_config, "database_context", return_value=nullcontext()), \
+                patch.object(rag_database, "initialize"), \
+                patch.object(indexer, "_purge_previous_folder", return_value=[]), \
+                patch.object(rag_database, "delete_documents_under", return_value=[]), \
+                patch.object(rag_database, "document_metadata", return_value=None), \
+                patch.object(rag_database, "replace_document"), \
+                patch.object(indexer, "_embed", return_value=[[0.1, 0.2]]):
+            result = indexer._scan_knowledge_base(
+                False, "test", lambda **changes: updates.append(changes), None, None
+            )
+
+        self.assertEqual(result["indexed"], 1)
+        phases = [update["phase"] for update in updates if update.get("phase")]
+        self.assertEqual(phases, ["embedding"])
+        self.assertEqual(updates[-1]["phase"], "")
 
     def test_scan_error_decision_endpoint_state_can_skip_all(self):
         decision_event = threading.Event()

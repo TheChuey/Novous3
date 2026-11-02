@@ -20,24 +20,32 @@ function send(method, url, body) {
   }).then(jsonOrThrow);
 }
 
+const SAVE_TYPES = {
+  md: { description: 'Markdown file', mime: 'text/markdown' },
+  html: { description: 'Web page', mime: 'text/html' },
+};
+
 export const Api = {
   async saveMarkdown(content, filename) {
+    return this.saveTextFile(content, filename, 'md');
+  },
+
+  /** Save text through the browser's save dialog, or download it where that is unavailable. */
+  async saveTextFile(content, filename, kind = 'md') {
+    const { description, mime } = SAVE_TYPES[kind] || SAVE_TYPES.md;
     if (typeof window.showSaveFilePicker === 'function') {
       const handle = await window.showSaveFilePicker({
         suggestedName: filename,
-        types: [{
-          description: 'Markdown file',
-          accept: { 'text/markdown': ['.md'] }
-        }]
+        types: [{ description, accept: { [mime]: [`.${kind}`] } }]
       });
       const writable = await handle.createWritable();
-      await writable.write(new Blob([content], { type: 'text/markdown;charset=utf-8' }));
+      await writable.write(new Blob([content], { type: `${mime};charset=utf-8` }));
       await writable.close();
       return { filename, locationChosen: true };
     }
 
     const objectUrl = URL.createObjectURL(
-      new Blob([content], { type: 'text/markdown;charset=utf-8' })
+      new Blob([content], { type: `${mime};charset=utf-8` })
     );
     const link = document.createElement('a');
     link.href = objectUrl;
@@ -336,6 +344,24 @@ export const Api = {
 
   async getModels() {
     return get('/api/models');
+  },
+
+  async getChatContext(agentId, sessionId, model, environment) {
+    const params = new URLSearchParams({ agent_id: agentId, session_id: sessionId, environment });
+    if (model) params.set('model', model);
+    return get(`/api/chat/context?${params}`);
+  },
+
+  async getModelProfiles() {
+    return get('/api/model-profiles');
+  },
+
+  async saveModelProfile(model, values) {
+    return send('PUT', `/api/model-profiles/${encodeURIComponent(model)}`, values);
+  },
+
+  async resetModelProfile(model) {
+    return send('DELETE', `/api/model-profiles/${encodeURIComponent(model)}`);
   },
 
   // --- Filesystem & Editor ---

@@ -9,6 +9,7 @@ from codebuilder.interface_codebuilder import router as codebuilder_router
 from core_engine.interface_core_engine import router as core_router
 from editor.interface_editor import router as editor_router
 from file_manager.interface_file_manager import router as file_manager_router
+from modelProfiles.interface_modelProfiles import router as model_profiles_router
 from orchestration.interface_orchestration import router as orchestration_router
 from ragMemory.interface_ragMemory import router as rag_router
 from scratchpadMemory.interface_scratchpadMemory import router as scratchpad_router
@@ -45,6 +46,7 @@ app.include_router(workspace_router)
 app.include_router(test_router)
 app.include_router(codebuilder_router)
 app.include_router(file_manager_router)
+app.include_router(model_profiles_router)
 app.include_router(orchestration_router)
 app.include_router(rag_router)
 app.include_router(scratchpad_router)

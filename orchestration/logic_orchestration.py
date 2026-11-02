@@ -30,7 +30,9 @@ from typing import Any, Callable, Dict, Iterator, Tuple, Type
 
 import yaml
 
-from core_engine.logic_core_engine import MAX_NUM_CTX, Agent, agent_library, tool_catalog
+from core_engine import logic_context_window as context_window
+from core_engine.logic_core_engine import Agent, agent_library, apply_model_limits, tool_catalog
+from modelProfiles.logic_modelProfiles import model_profiles
 from core_engine.schemas_core_engine import AgentProfile
 from orchestration.schemas_orchestration import (
     CodeSquadRunContext,
@@ -94,7 +96,13 @@ def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
 _EVENT_DATA_KEYS = {
     "AGENT_MESSAGE": {"summary", "status"},
     "TOOL_CALL_START": {"tool_name"},
-    "TOOL_CALL_END": {"tool_name", "status", "duration_ms"},
+    "TOOL_CALL_END": {"tool_name", "status", "duration_ms", "error_kind"},
+    # Counts and codes only: no prompt, reply or error text crosses the telemetry boundary.
+    "AGENT_USAGE": {
+        "agent_id", "model", "num_ctx", "prompt_tokens", "peak_prompt_tokens", "completion_tokens",
+        "calls", "tool_calls", "tool_errors", "tools_active", "tools_total", "fail_unknown_tool",
+        "fail_bad_arguments", "fail_tool_error", "fail_model_error", "rounds_exhausted", "level", "flags",
+    },
     "SCRATCHPAD_HANDOFF": {"status", "subagent_id", "result_count", "direction"},
     "ERROR": {"error", "status"},
     "RUN_STARTED": {"squad_id", "pattern"},
@@ -121,6 +129,14 @@ _MULTILINE_LIMITS = {
     "text": 20_000,
     "content": 1_000_000,
 }
+_COUNT_KEYS = {
+    "duration_ms", "result_count", "attempt", "num_ctx", "prompt_tokens", "peak_prompt_tokens",
+    "completion_tokens", "calls", "tool_calls", "tool_errors", "tools_active", "tools_total",
+    "fail_unknown_tool", "fail_bad_arguments", "fail_tool_error", "fail_model_error", "rounds_exhausted",
+}
+_ERROR_KINDS = {"unknown_tool", "bad_arguments", "tool_error", "model_error"}
+# Handoff tools a squad agent always keeps, however small its model's tool limit is.
+SQUAD_PINNED_TOOLS = ("read_agent_scratchpad", "write_agent_scratchpad", "call_subagent")
 _TRACE_CONTEXT: ContextVar[tuple[str, str] | None] = ContextVar(
     "orchestration_trace_context", default=None
 )
@@ -199,8 +215,17 @@ class TelemetryBus:
 
     @staticmethod
     def _sanitize(key: str, value: Any) -> Any:
-        if key in {"duration_ms", "result_count", "attempt"}:
-            return max(0, int(value))
+        if key in _COUNT_KEYS:
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                return 0
+        if key == "level":
+            return value if value in {"ok", "warn", "crit"} else "unknown"
+        if key == "error_kind":
+            return value if value in _ERROR_KINDS else ""
+        if key == "flags":
+            return ",".join(_safe_identifier(flag) for flag in value[:12]) if isinstance(value, list) else ""
         if key in {"tool_name", "subagent_id", "squad_id", "agent_id", "step"}:
             return _safe_identifier(value)
         if key == "path":
@@ -377,6 +402,101 @@ class TelemetryBus:
 
     def current_context(self) -> tuple[str, str] | None:
         return _TRACE_CONTEXT.get()
+
+
+_LEVEL_RANK = {"ok": 0, "warn": 1, "crit": 2}
+_FAILURE_KEYS = ("unknown_tool", "bad_arguments", "tool_error", "model_error")
+
+
+def usage_event_data(agent_id: str, stats: dict[str, Any]) -> dict[str, Any]:
+    """The AGENT_USAGE payload for one agent turn, from Agent.run_stats()."""
+    failures = stats["failures"]
+    data = {
+        "agent_id": agent_id,
+        "model": stats["model"],
+        "num_ctx": stats["num_ctx"],
+        "prompt_tokens": stats["prompt_tokens_last"] or 0,
+        "peak_prompt_tokens": stats["peak_prompt_tokens"],
+        "completion_tokens": stats["completion_tokens"],
+        "calls": stats["llm_calls"],
+        "tool_calls": stats["tool_calls"],
+        "tool_errors": stats["tool_errors"],
+        "tools_active": stats["tools_active"],
+        "tools_total": stats["tools_total"],
+        "rounds_exhausted": failures.get("rounds_exhausted", 0),
+        "level": stats["level"],
+        "flags": stats["flags"],
+    }
+    for kind in _FAILURE_KEYS:
+        data[f"fail_{kind}"] = failures.get(kind, 0)
+    return data
+
+
+def stream_usage_data(agent_id: str, model: str, num_ctx: int, prompt: int | None,
+                      completion: int | None) -> dict[str, Any]:
+    """AGENT_USAGE for a text-only streamed turn, which has no Agent object to ask."""
+    percent = round(prompt / num_ctx * 100, 1) if prompt and num_ctx else 0.0
+    level, flags = context_window.window_status(percent)
+    return usage_event_data(agent_id, {
+        "model": model, "num_ctx": num_ctx, "prompt_tokens_last": prompt,
+        "peak_prompt_tokens": prompt or 0, "completion_tokens": completion or 0, "llm_calls": 1,
+        "tool_calls": 0, "tool_errors": 0, "tools_active": 0, "tools_total": 0,
+        "failures": {}, "level": level, "flags": flags,
+    })
+
+
+def summarize_agent_usage(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-agent and whole-run figures from one trace's AGENT_USAGE and handoff events."""
+    agents: dict[str, dict[str, Any]] = {}
+    scratchpad = {"read": 0, "write": 0}
+    for event in events:
+        event_type = event.get("event_type")
+        data = event.get("data") or {}
+        if event_type == "SCRATCHPAD_HANDOFF" and data.get("direction") in scratchpad:
+            scratchpad[data["direction"]] += 1
+        if event_type != "AGENT_USAGE":
+            continue
+        agent_id = str(data.get("agent_id") or event.get("sender") or "unknown")
+        entry = agents.setdefault(agent_id, {
+            "agent_id": agent_id, "model": "", "num_ctx": 0, "turns": 0, "llm_calls": 0,
+            "prompt_tokens": 0, "peak_prompt_tokens": 0, "completion_tokens": 0,
+            "tool_calls": 0, "tool_errors": 0, "failures": {kind: 0 for kind in _FAILURE_KEYS},
+            "rounds_exhausted": 0, "level": "ok", "flags": [], "tools_active": 0, "tools_total": 0,
+        })
+        entry["turns"] += 1
+        entry["tools_active"] = int(data.get("tools_active") or 0)
+        entry["tools_total"] = int(data.get("tools_total") or 0)
+        entry["model"] = str(data.get("model") or entry["model"])
+        entry["num_ctx"] = int(data.get("num_ctx") or entry["num_ctx"])
+        entry["llm_calls"] += int(data.get("calls") or 0)
+        entry["prompt_tokens"] += int(data.get("prompt_tokens") or 0)
+        entry["peak_prompt_tokens"] = max(entry["peak_prompt_tokens"], int(data.get("peak_prompt_tokens") or 0))
+        entry["completion_tokens"] += int(data.get("completion_tokens") or 0)
+        entry["tool_calls"] += int(data.get("tool_calls") or 0)
+        entry["tool_errors"] += int(data.get("tool_errors") or 0)
+        for kind in _FAILURE_KEYS:
+            entry["failures"][kind] += int(data.get(f"fail_{kind}") or 0)
+        entry["rounds_exhausted"] += int(data.get("rounds_exhausted") or 0)
+        if _LEVEL_RANK.get(data.get("level"), 0) > _LEVEL_RANK[entry["level"]]:
+            entry["level"] = data["level"]
+        entry["flags"] = sorted(set(entry["flags"]) | {f for f in str(data.get("flags") or "").split(",") if f})
+    for entry in agents.values():
+        entry["percent_peak"] = (
+            round(entry["peak_prompt_tokens"] / entry["num_ctx"] * 100, 1) if entry["num_ctx"] else 0.0
+        )
+    values = list(agents.values())
+    worst = max(values, key=lambda entry: _LEVEL_RANK[entry["level"]], default=None)
+    return {
+        "agents": values,
+        "summary": {
+            "level": worst["level"] if worst else "ok",
+            "percent_peak": max((entry["percent_peak"] for entry in values), default=0.0),
+            "tool_calls": sum(entry["tool_calls"] for entry in values),
+            "tool_errors": sum(entry["tool_errors"] for entry in values),
+            "scratchpad_reads": scratchpad["read"],
+            "scratchpad_writes": scratchpad["write"],
+        },
+    }
 
 
 # --- Run results ---------------------------------------------------------------------
@@ -1163,6 +1283,7 @@ class SubAgentRunner:
                 "role": profile.role,
                 "purpose": profile.purpose,
                 "boundaries": profile.boundaries,
+                "max_tool_rounds": profile.extras.get("max_tool_rounds"),
             }
             return meta, profile.system_prompt
 
@@ -1196,6 +1317,7 @@ class SubAgentRunner:
             boundaries=str(meta.get("boundaries") or ""),
             model=str(meta.get("model") or ""),
             tools=[str(tool) for tool in tools],
+            extras={"max_tool_rounds": meta["max_tool_rounds"]} if meta.get("max_tool_rounds") else {},
         )
 
     def run_agent_turn_stream(
@@ -1221,12 +1343,15 @@ class SubAgentRunner:
         ]
         text = ""
         pending = ""
+        usage_chunk = None
         last_flush = time.monotonic()
+        resolved_model = model or profile.model or "qwen2.5-coder:latest"
+        num_ctx = model_profiles.effective(resolved_model)["num_ctx"]
         stream = ollama.chat(
-            model=model or profile.model or "qwen2.5-coder:latest",
+            model=resolved_model,
             messages=messages,
             stream=True,
-            options={"num_ctx": MAX_NUM_CTX},
+            options={"num_ctx": num_ctx},
         )
 
         def flush() -> None:
@@ -1239,6 +1364,8 @@ class SubAgentRunner:
             for chunk in stream:
                 if should_stop and should_stop():
                     raise AgentTurnCancelled(agent_id)
+                if context_window.read_field(chunk, "prompt_eval_count") is not None:
+                    usage_chunk = chunk
                 piece = (chunk.get("message") or {}).get("content") or ""
                 if not piece:
                     continue
@@ -1254,7 +1381,24 @@ class SubAgentRunner:
                 close()
         if pending:
             flush()
+        if trace_id and usage_chunk is not None:
+            telemetry_bus.log_event(
+                trace_id, "AGENT_USAGE", agent_id, "orchestrator",
+                stream_usage_data(
+                    agent_id, resolved_model, num_ctx,
+                    context_window.read_field(usage_chunk, "prompt_eval_count"),
+                    context_window.read_field(usage_chunk, "eval_count"),
+                ),
+            )
         return text
+
+    @staticmethod
+    def _emit_usage(trace_id: str | None, agent_id: str, agent_instance: Agent) -> None:
+        if trace_id:
+            telemetry_bus.log_event(
+                trace_id, "AGENT_USAGE", agent_id, "orchestrator",
+                usage_event_data(agent_id, agent_instance.run_stats()),
+            )
 
     def run_agent_turn(
         self,
@@ -1263,6 +1407,10 @@ class SubAgentRunner:
         parameters: dict[str, Any] | None = None,
         trace_id: str | None = None,
     ) -> str:
+        if trace_id is None:
+            # A sub-agent called from a running turn belongs to that run's trace.
+            inherited = telemetry_bus.current_context()
+            trace_id = inherited[0] if inherited else None
         context = telemetry_bus.agent_context(trace_id, agent_id) if trace_id else nullcontext()
         with context:
             if agent_library.normalize_agent_id(agent_id) == RAG_RETRIEVER_ID:
@@ -1270,17 +1418,20 @@ class SubAgentRunner:
 
             meta, body = self.load_agent(agent_id)
             profile = self._build_profile(agent_id, meta, body)
-            tools = (
-                tool_catalog.get_tools(profile.tools)
-                if profile.mode == "agent" and profile.tools
-                else []
-            )
-            agent_instance = Agent(
-                model=profile.model or None,
-                tools=tools,
-                profile=profile,
-            )
-            return str(agent_instance.think(prompt_input))
+            model = profile.model or "qwen2.5-coder:latest"
+            agent_instance = Agent(model=model, tools=[], profile=profile)
+            if profile.mode == "agent" and profile.tools:
+                apply_model_limits(agent_instance, profile, model, SQUAD_PINNED_TOOLS)
+            else:
+                agent_instance.num_ctx = model_profiles.effective(model)["num_ctx"]
+            try:
+                reply = str(agent_instance.think(prompt_input))
+            except Exception as exc:
+                agent_instance.note_failure("model_error", "", str(exc))
+                self._emit_usage(trace_id, agent_id, agent_instance)
+                raise
+            self._emit_usage(trace_id, agent_id, agent_instance)
+            return reply
 
 
 class RagRetriever:
@@ -1549,7 +1700,12 @@ class BasePattern(ABC):
         # Save before RUN_COMPLETE so the client's result fetch never races a 404.
         run_results.save(
             run.trace_id,
-            {**response.model_dump(), "squad_id": run.squad_id, "scratchpad_snapshot": scratchpad_snapshot},
+            {
+                **response.model_dump(),
+                "squad_id": run.squad_id,
+                "scratchpad_snapshot": scratchpad_snapshot,
+                "agent_stats": summarize_agent_usage(telemetry_bus.get_trace_history(run.trace_id)),
+            },
         )
         telemetry_bus.log_event(
             run.trace_id, "RUN_COMPLETE", "orchestrator", run.squad_id or run.primary_id,
@@ -2140,6 +2296,7 @@ class CodeSquadPipeline:
             {
                 **response.model_dump(),
                 "squad_id": CODE_SQUAD_ID,
+                "agent_stats": summarize_agent_usage(telemetry_bus.get_trace_history(trace_id)),
                 "scratchpad_snapshot": {
                     "latest_subagent_result": handoffs[-1] if handoffs else {},
                     "subagent_history": handoffs,

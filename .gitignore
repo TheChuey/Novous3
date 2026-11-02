@@ -16,3 +16,4 @@ scratchpadMemory/data/
 workspace/sandbox/
 tools/allowed_paths.json
 orchestration/data/
+modelProfiles/data/

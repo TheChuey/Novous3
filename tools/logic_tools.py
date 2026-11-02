@@ -590,9 +590,15 @@ tool_registry = ToolRegistryService()
 # --- Agent-facing tools ----------------------------------------------------------------
 
 @tool(provider="scratchpadMemory")
-def read_agent_scratchpad(memory_type: str = "all") -> str:
-    """Read scratchpad entries ('latest_subagent_result', 'latest_read', 'latest_map', or 'all')."""
-    return json.dumps(scratchpad.read_memory(memory_type), ensure_ascii=False, indent=2)
+def read_agent_scratchpad(memory_type: str = "index", item: str = "", offset: str = "0", max_chars: str = "4000") -> str:
+    """Recall what you have read or saved: call this when the user asks what you remember, to list or summarize saved files, or about earlier content; no arguments lists items, item=<path or id> reads one in pages.
+
+    With no arguments, returns an index of saved items (id, kind, label, size, time, preview).
+    With item set to a file path or id, returns one page of that item's text, at most max_chars
+    long, starting at offset. Pass next_offset from the result as offset to read the next page.
+    memory_type 'latest_read', 'latest_map' or 'latest_subagent_result' returns the newest of that kind.
+    """
+    return json.dumps(scratchpad.recall(memory_type, item, offset, max_chars), ensure_ascii=False)
 
 
 @tool(provider="orchestration")
@@ -813,8 +819,9 @@ def read_file(path: str, request: str = "") -> str:
 
     PDF, DOCX, PPTX, and ODT documents are text-extracted with Docling; OCR is enabled
     for PDFs to support scanned pages. Text files are limited to 1 MB; documents to
-    25 MB and 1 MB of extracted text. Successful reads are mirrored to agent memory.
-    Returns JSON with the request, path, content, and scratchpad context.
+    25 MB and 1 MB of extracted text. Successful reads are saved to agent memory in full.
+    Returns JSON with the request, path, the first page of content (with next_offset
+    when the file is longer), and scratchpad context for fetching the rest.
     """
     if not path or not path.strip():
         raise ValueError("A file path is required.")
@@ -825,16 +832,32 @@ def read_file(path: str, request: str = "") -> str:
         raise RuntimeError(f"Could not read '{path}': {exc}") from exc
 
     scratchpad_result = scratchpad.store_read(result["path"], content, request)
+    page = scratchpad.window(content, 0, scratchpad.RECALL_DEFAULT_CHARS)
+    if page["truncated"]:
+        context = (
+            f"Showing the first {page['returned_chars']} of {page['total_chars']} characters. "
+            f"The full text is saved in the scratchpad. Call read_agent_scratchpad(item='{result['path']}', "
+            f"offset='{page['next_offset']}') for the next page. Do not call read_file again for this file."
+        )
+    else:
+        context = (
+            f"Full text returned. Also saved in the scratchpad for later recall: "
+            f"read_agent_scratchpad(item='{result['path']}')."
+        )
     payload = {
         "request": request,
         "path": result["path"],
         "size_bytes": result["size_bytes"],
         "content_type": "document_text" if Path(path).suffix.lower() in workspace_files.DOCLING_EXTENSIONS else "text",
-        "content": content,
+        "content": page["content"],
+        "truncated": page["truncated"],
+        "total_chars": page["total_chars"],
+        "next_offset": page["next_offset"],
+        "remaining": page["remaining"],
         "scratchpad": {
             "path": scratchpad_result["path"],
             "updated_at": scratchpad_result["updated_at"],
-            "context": "Latest read mirrored to agent scratchpad. Use read_agent_scratchpad to retrieve it.",
+            "context": context,
         },
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)

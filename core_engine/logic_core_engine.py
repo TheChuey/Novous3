@@ -25,11 +25,16 @@ from typing import Any, Callable, List
 import ollama
 import yaml
 
+from core_engine import logic_context_window as context_window
 from core_engine.schemas_core_engine import AgentProfile
 from editor.logic_editor import editor_files, session_manager
 from editor.schemas_editor import EditorEventType
+from modelProfiles.logic_modelProfiles import model_profiles
 
 MAX_NUM_CTX = 32768
+DEFAULT_MODEL = "qwen2.5-coder:latest"
+# Tools a profile must keep when its tool cap is smaller than its tool list.
+PINNED_TOOLS = {"rag-presenter": ("call_subagent", "read_agent_scratchpad")}
 
 # The agent whose tool call is running, so shared tools can record who wrote what.
 _CURRENT_AGENT_ID: ContextVar[str] = ContextVar("current_agent_id", default="")
@@ -643,6 +648,8 @@ class AgentLibrary:
 
 class Agent:
     MAX_TOOL_ROUNDS = 6
+    MAX_TOOL_STATS = 20
+    TOOL_FAILURE_KINDS = ("unknown_tool", "bad_arguments", "tool_error")
     PARAMETER_DESCRIPTIONS = {
         "payload": (
             "JSON object string containing the structured handoff fields. "
@@ -652,6 +659,10 @@ class Agent:
         "subagent_id": "The canonical sub-agent ID.",
         "task_type": "The task type requested by orchestration.",
         "proposed_content": "The complete proposed file or editor content.",
+        "memory_type": "Leave empty to list saved items, or one of: latest_read, latest_map, latest_subagent_result.",
+        "item": "A saved file path, or an id from the list, to read in pages.",
+        "offset": "Character position to start the page at; use next_offset from the previous page. Default 0.",
+        "max_chars": "Page size in characters, 500 to 20000. Default 4000.",
     }
 
     def __init__(self, model: str | None, tools: List[Callable], profile: AgentProfile, session=None):
@@ -667,6 +678,82 @@ class Agent:
             self.max_tool_rounds = self.MAX_TOOL_ROUNDS
         self.tool_events: List[dict] = []
         self.tool_stats: dict[str, dict] = {}
+        # Context budget, set from the model profile by ChatService; usage measured from Ollama.
+        self.num_ctx = MAX_NUM_CTX
+        self.tools_available = len(self.tools)
+        self.calibration = 1.0
+        self.last_usage: dict | None = None
+        self.usage_totals = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        self.peak_prompt_tokens = 0
+        self.llm_calls = 0
+        self.failures: dict[str, int] = {}
+        self.recent_failures: List[dict] = []
+
+    def run_stats(self) -> dict[str, Any]:
+        """What a run reports for this agent: window use, tool calls and failures, and a level."""
+        window = self.num_ctx or 1
+        estimated = round(context_window.estimate_request(self.messages, self.tool_schema_text()) * self.calibration)
+        peak_tokens = self.peak_prompt_tokens or estimated
+        percent_peak = round(peak_tokens / window * 100, 1)
+        tool_failures = sum(self.failures.get(kind, 0) for kind in self.TOOL_FAILURE_KINDS)
+        rounds_exhausted = self.failures.get("rounds_exhausted", 0) > 0
+        model_error = self.failures.get("model_error", 0) > 0
+
+        window_level, flags = context_window.window_status(percent_peak)
+        if tool_failures:
+            flags.append("tool_failures")
+        if self.failures.get("unknown_tool", 0):
+            flags.append("unknown_tool")
+        if rounds_exhausted:
+            flags.append("rounds_exhausted")
+        if model_error:
+            flags.append("model_error")
+
+        if window_level == "crit" or rounds_exhausted or model_error:
+            level = "crit"
+        elif window_level == "warn" or tool_failures:
+            level = "warn"
+        else:
+            level = "ok"
+        return {
+            "model": self.model,
+            "num_ctx": self.num_ctx,
+            "tools_active": len(self.tools),
+            "tools_total": self.tools_available,
+            "llm_calls": self.llm_calls,
+            "prompt_tokens_last": (self.last_usage or {}).get("prompt_tokens"),
+            "peak_prompt_tokens": peak_tokens,
+            "completion_tokens": self.usage_totals["completion_tokens"],
+            "percent_peak": percent_peak,
+            "tool_calls": sum(s["calls"] for s in self.tool_stats.values()),
+            "tool_errors": sum(s["errors"] for s in self.tool_stats.values()),
+            "failures": dict(self.failures),
+            "rounds_exhausted": rounds_exhausted,
+            "level": level,
+            "flags": flags,
+        }
+
+    def tool_schema_text(self) -> str:
+        """The tool schemas as sent with each request (empty when no tools are sent)."""
+        if self.profile.mode == "chat" or not self.tools:
+            return ""
+        return json.dumps([self._ollama_schema(t) for t in self.tools.values()], ensure_ascii=False)
+
+    def _record_usage(self, response: Any, estimate: int) -> None:
+        """Keep Ollama's measured prompt and completion sizes; calibrate the estimate to the prompt."""
+        self.llm_calls += 1
+        prompt = context_window.read_field(response, "prompt_eval_count")
+        completion = context_window.read_field(response, "eval_count")
+        if prompt is None and completion is None:
+            return
+        self.usage_totals["calls"] += 1
+        self.usage_totals["prompt_tokens"] += prompt or 0
+        self.usage_totals["completion_tokens"] += completion or 0
+        self.peak_prompt_tokens = max(self.peak_prompt_tokens, prompt or 0)
+        self.last_usage = {"prompt_tokens": prompt, "completion_tokens": completion}
+        if prompt and estimate:
+            low, high = context_window.CALIBRATION_RANGE
+            self.calibration = min(high, max(low, prompt / estimate))
 
     def _text_tool_call(self, item: dict) -> dict | None:
         """Accept both flat and function-wrapped text tool-call objects."""
@@ -674,6 +761,10 @@ class Agent:
         source = function if isinstance(function, dict) else item
         tool_name = source.get("name")
         if tool_name not in self.tools:
+            # Text that looks like a call to a missing tool still ends the turn as a plain answer;
+            # it is counted here so the failure is visible.
+            if isinstance(tool_name, str) and ("arguments" in source or "parameters" in source):
+                self.note_failure("unknown_tool", tool_name[:60], f"Text call to unavailable tool '{tool_name[:60]}'.")
             return None
         if source is function:
             args = source.get("arguments") or source.get("parameters") or source.get("args") or {}
@@ -783,6 +874,33 @@ class Agent:
                     break
         return handoff
 
+    def note_failure(self, kind: str, tool_name: str, message: str) -> None:
+        """Count a failure by kind and keep the last few with their messages (measurement only)."""
+        self.failures[kind] = self.failures.get(kind, 0) + 1
+        self.recent_failures.append({"tool": tool_name, "kind": kind, "message": str(message)[:200]})
+        del self.recent_failures[:-10]
+
+    def _stats_for(self, tool_name: str) -> dict:
+        """Per-tool stats; names beyond MAX_TOOL_STATS share one bucket so model output can't grow it."""
+        key = tool_name if tool_name in self.tool_stats or len(self.tool_stats) < self.MAX_TOOL_STATS else "(other)"
+        return self.tool_stats.setdefault(key, {"calls": 0, "successes": 0, "errors": 0, "success_rate": 0.0})
+
+    @staticmethod
+    def _bind_error(tool_func: Callable, args: Any) -> str | None:
+        """Why the arguments don't fit the tool's signature, or None when they do (or can't be checked)."""
+        try:
+            signature = inspect.signature(tool_func)
+        except (TypeError, ValueError):
+            return None
+        try:
+            if isinstance(args, dict):
+                signature.bind(**args)
+            else:
+                signature.bind(args)
+        except TypeError as exc:
+            return str(exc)
+        return None
+
     def act(self, tool_call: dict, origin: str) -> Any:
         from orchestration.logic_orchestration import telemetry_bus
 
@@ -791,72 +909,86 @@ class Agent:
         args = fn_info.get("arguments", {})
         trace_context = telemetry_bus.current_context()
         trace_id, agent_id = trace_context or ("", "")
+        tool_name = str(name or "unknown")[:60]
 
-        def log_tool_end(status: str, duration_ms: int) -> None:
-            telemetry_bus.log_event(
-                trace_id, "TOOL_CALL_END", agent_id, name or "unknown",
-                {"tool_name": name or "unknown", "status": status, "duration_ms": duration_ms},
-            )
+        def log_tool_end(status: str, duration_ms: int, error_kind: str = "") -> None:
+            data = {"tool_name": tool_name, "status": status, "duration_ms": duration_ms}
+            if error_kind:
+                data["error_kind"] = error_kind
+            telemetry_bus.log_event(trace_id, "TOOL_CALL_END", agent_id, tool_name, data)
+
+        stats = self._stats_for(tool_name)
+        stats["calls"] += 1
+        started = time.perf_counter()
+
+        def elapsed() -> int:
+            return int((time.perf_counter() - started) * 1000)
+
+        def fail(kind: str, message: str, reply: str, arguments: Any) -> str:
+            stats["errors"] += 1
+            stats["success_rate"] = stats["successes"] / stats["calls"]
+            self.note_failure(kind, tool_name, message)
+            self.tool_events.append({"tool": tool_name, "args": arguments, "status": "error",
+                                     "error": message, "error_kind": kind, "origin": origin})
+            if trace_context:
+                log_tool_end("error", elapsed(), kind)
+            return reply
 
         if name not in self.tools:
-            if trace_context:
-                log_tool_end("error", 0)
-            return f"Error: Tool '{name}' not found."
-
-        stats = self.tool_stats.setdefault(
-            name, {"calls": 0, "successes": 0, "errors": 0, "success_rate": 0.0}
-        )
-        stats["calls"] += 1
+            return fail("unknown_tool", f"Tool '{tool_name}' is not available to this agent.",
+                        f"Error: Tool '{name}' not found.", args)
 
         tool_func = self.tools[name]
-        started = time.perf_counter()
         if trace_context:
-            telemetry_bus.log_event(trace_id, "TOOL_CALL_START", agent_id, name, {"tool_name": name})
+            telemetry_bus.log_event(trace_id, "TOOL_CALL_START", agent_id, tool_name, {"tool_name": tool_name})
         try:
             if isinstance(args, str):
                 args = json.loads(args)
+        except json.JSONDecodeError as exc:
+            message = f"Arguments are not valid JSON: {exc}"
+            return fail("bad_arguments", message, f"Error executing tool '{name}': {message}", args)
+        bind_error = self._bind_error(tool_func, args)
+        if bind_error:
+            return fail("bad_arguments", bind_error, f"Error executing tool '{name}': {bind_error}", args)
+
+        try:
             agent_token = _CURRENT_AGENT_ID.set(self.profile.id)
             try:
                 result = tool_func(**args) if isinstance(args, dict) else tool_func(args)
             finally:
                 _CURRENT_AGENT_ID.reset(agent_token)
-            stats["successes"] += 1
-            stats["success_rate"] = stats["successes"] / stats["calls"]
-            event = {"tool": name, "args": args, "status": "success", "origin": origin}
-            result_text = result if isinstance(result, str) else json.dumps(
-                result, ensure_ascii=False, default=str
-            )
-            event["result"] = result_text[:3000]
-            if len(result_text) > 3000:
-                event["result_truncated"] = True
-            if getattr(tool_func, "display_output", False) and isinstance(result, str):
-                event["display"] = result
-            self.tool_events.append(event)
-            if trace_context:
-                log_tool_end("success", int((time.perf_counter() - started) * 1000))
-                if name in {"write_agent_scratchpad", "read_agent_scratchpad"}:
-                    telemetry_bus.log_event(
-                        trace_id, "SCRATCHPAD_HANDOFF", agent_id, "scratchpad",
-                        self._scratchpad_handoff(name, args, result),
-                    )
-            return result
         except Exception as exc:
-            stats["errors"] += 1
-            stats["success_rate"] = stats["successes"] / stats["calls"]
-            err_msg = f"Error executing tool '{name}': {str(exc)}"
-            self.tool_events.append({"tool": name, "args": args, "status": "error", "error": str(exc), "origin": origin})
-            if trace_context:
-                log_tool_end("error", int((time.perf_counter() - started) * 1000))
-                if name == "write_agent_scratchpad":
-                    telemetry_bus.log_event(
-                        trace_id, "SCRATCHPAD_HANDOFF", agent_id, "scratchpad",
-                        {
-                            "status": "error",
-                            "subagent_id": args.get("subagent_id", "") if isinstance(args, dict) else "",
-                            "direction": "write",
-                        },
-                    )
-            return err_msg
+            if trace_context and name == "write_agent_scratchpad":
+                telemetry_bus.log_event(
+                    trace_id, "SCRATCHPAD_HANDOFF", agent_id, "scratchpad",
+                    {
+                        "status": "error",
+                        "subagent_id": args.get("subagent_id", "") if isinstance(args, dict) else "",
+                        "direction": "write",
+                    },
+                )
+            return fail("tool_error", str(exc), f"Error executing tool '{name}': {str(exc)}", args)
+
+        stats["successes"] += 1
+        stats["success_rate"] = stats["successes"] / stats["calls"]
+        event = {"tool": name, "args": args, "status": "success", "origin": origin}
+        result_text = result if isinstance(result, str) else json.dumps(
+            result, ensure_ascii=False, default=str
+        )
+        event["result"] = result_text[:3000]
+        if len(result_text) > 3000:
+            event["result_truncated"] = True
+        if getattr(tool_func, "display_output", False) and isinstance(result, str):
+            event["display"] = result
+        self.tool_events.append(event)
+        if trace_context:
+            log_tool_end("success", elapsed())
+            if name in {"write_agent_scratchpad", "read_agent_scratchpad"}:
+                telemetry_bus.log_event(
+                    trace_id, "SCRATCHPAD_HANDOFF", agent_id, "scratchpad",
+                    self._scratchpad_handoff(name, args, result),
+                )
+        return result
 
     def observe(self, tool_name: str, result: Any) -> None:
         content = json.dumps(result) if not isinstance(result, str) else result
@@ -869,18 +1001,22 @@ class Agent:
         self.messages.append({"role": "user", "content": user_input})
 
         if self.profile.mode == "chat" or not self.tools:
-            res = ollama.chat(model=self.model, messages=self.messages, options={"num_ctx": MAX_NUM_CTX})
+            estimate = context_window.estimate_request(self.messages, "")
+            res = ollama.chat(model=self.model, messages=self.messages, options={"num_ctx": self.num_ctx})
+            self._record_usage(res, estimate)
             reply = self._format_rag_presenter_reply(res["message"]["content"])
             self.messages.append({"role": "assistant", "content": reply})
             return reply
 
         for _ in range(self.max_tool_rounds):
+            estimate = context_window.estimate_request(self.messages, self.tool_schema_text())
             res = ollama.chat(
                 model=self.model,
                 messages=self.messages,
                 tools=[self._ollama_schema(t) for t in self.tools.values()],
-                options={"num_ctx": MAX_NUM_CTX}
+                options={"num_ctx": self.num_ctx}
             )
+            self._record_usage(res, estimate)
             msg = res["message"]
             self.messages.append(msg)
 
@@ -897,6 +1033,7 @@ class Agent:
                 result = self.act(call, origin)
                 self.observe(tool_name, result)
 
+        self.note_failure("rounds_exhausted", "", "Maximum tool rounds reached without a final answer.")
         return "(Executed maximum tool rounds without final text summary.)"
 
     def think_stream(self, user_input: str):
@@ -912,14 +1049,19 @@ class Agent:
         for _ in range(self.max_tool_rounds if use_tools else 1):
             content = ""
             native_calls: List[dict] = []
+            estimate = context_window.estimate_request(self.messages, self.tool_schema_text())
+            usage_chunk = None
             for chunk in ollama.chat(model=self.model, messages=self.messages, stream=True,
-                                     options={"num_ctx": MAX_NUM_CTX}, **extra):
+                                     options={"num_ctx": self.num_ctx}, **extra):
+                if context_window.read_field(chunk, "prompt_eval_count") is not None:
+                    usage_chunk = chunk
                 msg = chunk["message"]
                 piece = msg.get("content") or ""
                 if piece:
                     content += piece
                 for call in msg.get("tool_calls") or []:
                     native_calls.append(call)
+            self._record_usage(usage_chunk, estimate)
 
             assistant = {"role": "assistant", "content": content}
             if native_calls:
@@ -947,6 +1089,7 @@ class Agent:
                     yield {"type": "tool_event", "event": event}
         else:
             final_text = "(Executed maximum tool rounds without final text summary.)"
+            self.note_failure("rounds_exhausted", "", "Maximum tool rounds reached without a final answer.")
 
         yield {"type": "done", "reply": final_text}
 
@@ -1285,6 +1428,29 @@ class SessionNotFoundError(LookupError):
     pass
 
 
+def apply_model_limits(agent: Agent, profile: AgentProfile, model: str, pinned: tuple = ()) -> None:
+    """Set an agent's model, context size and tool cap from its model profile.
+
+    When the cap is smaller than the tool list, the pinned tools are always kept and the rest
+    fill the remaining places in the list's own order. History is left untouched.
+    """
+    limits = model_profiles.effective(model)
+    available = tool_catalog.get_tools(profile.tools) if profile.mode == "agent" else []
+    total = len(available)
+    cap = limits["max_tools"]
+    if cap is not None:
+        keep = {id(f) for f in available if (getattr(f, "name", None) or f.__name__) in pinned}
+        for func in available:
+            if len(keep) >= cap:
+                break
+            keep.add(id(func))
+        available = [func for func in available if id(func) in keep]
+    agent.model = model
+    agent.num_ctx = limits["num_ctx"]
+    agent.tools = {getattr(f, "name", None) or f.__name__: f for f in available}
+    agent.tools_available = total
+
+
 class ChatService:
     """Owns in-memory conversation sessions (keyed by session id) and runs agent turns."""
 
@@ -1307,11 +1473,42 @@ class ChatService:
             self.sessions.pop(session_key, None)
             agent = None
         if agent is None:
-            tools = tool_catalog.get_tools(profile.tools) if profile.mode == "agent" else []
-            agent = Agent(model=model or profile.model or None, tools=tools, profile=profile,
-                          session=session_key)
+            agent = Agent(model=None, tools=[], profile=profile, session=session_key)
             self.sessions[session_key] = agent
+        # Model, context size and tool cap are applied to every turn, so changing the model
+        # mid-chat takes effect while the history is kept.
+        self._apply_model_limits(agent, profile, model or profile.model or DEFAULT_MODEL)
         return agent, session_key, profile
+
+    def _apply_model_limits(self, agent: Agent, profile: AgentProfile, model: str) -> None:
+        apply_model_limits(agent, profile, model, PINNED_TOOLS.get(profile.id, ()))
+
+    def _context_report(self, agent: Agent, profile: AgentProfile) -> dict:
+        limits = model_profiles.effective(agent.model)
+        return context_window.build_report(
+            model=agent.model,
+            messages=agent.messages,
+            system_prompt=profile.system_prompt,
+            schema_text=agent.tool_schema_text(),
+            tools_total=agent.tools_available,
+            tools_active=len(agent.tools) if agent.profile.mode != "chat" else 0,
+            num_ctx=agent.num_ctx,
+            reply_reserve=limits["reply_reserve"],
+            native_context=limits["native_context"],
+            capabilities=limits["capabilities"],
+            calibration=agent.calibration,
+            measured_prompt_tokens=(agent.last_usage or {}).get("prompt_tokens"),
+        )
+
+    def context_summary(self, agent: Agent, profile: AgentProfile) -> dict:
+        return context_window.summarize(self._context_report(agent, profile))
+
+    def get_context(self, agent_id: str, model: str | None, session_id: str | None,
+                    environment: str) -> dict:
+        """Full context report for a session (created empty if it does not exist yet)."""
+        agent, session_key, profile = self.get_agent(agent_id, model, session_id, environment)
+        return {"session_id": session_key, "agent_id": agent_id, **self._context_report(agent, profile),
+                "tool_health": self.agent_health(agent)}
 
     def prepare_agent_message(self, agent: Agent, profile: AgentProfile, message: str) -> str:
         if profile.id != "rag-presenter":
@@ -1340,7 +1537,7 @@ class ChatService:
                 {
                     "function": {
                         "name": "read_agent_scratchpad",
-                        "arguments": {"memory_type": "latest_subagent_result"},
+                        "arguments": {"memory_type": "latest_subagent_result", "max_chars": "20000"},
                     }
                 },
                 origin="orchestrator",
@@ -1371,8 +1568,10 @@ class ChatService:
                 "model": model or "unknown",
                 "tool_events": [],
                 "tool_stats": {},
+                "usage": {},
+                "context": None,
+                "health": None,
             }
-
 
         agent.tool_events = []
         try:
@@ -1381,6 +1580,7 @@ class ChatService:
         except RequiredDelegationError as exc:
             reply = f"[engine] Could not complete required agent setup: {exc}"
         except Exception as exc:  # Ollama down / model missing -> graceful error reply
+            agent.note_failure("model_error", "", str(exc))
             reply = (f"[engine] Could not reach the model runtime: {exc}\n"
                      f"Start Ollama (e.g. `ollama serve`) and pull the model "
                      f"`{model or profile.model or 'qwen2.5-coder:latest'}`, then retry.")
@@ -1394,6 +1594,23 @@ class ChatService:
             "model": agent.model,
             "tool_events": list(agent.tool_events),
             "tool_stats": agent.tool_stats,
+            "usage": {"last": agent.last_usage, **agent.usage_totals},
+            "context": self.context_summary(agent, profile),
+            "health": self.agent_health(agent),
+        }
+
+    @staticmethod
+    def agent_health(agent: Agent) -> dict:
+        """Tool and run health for one agent: level, flags, failure counts and the latest failures."""
+        stats = agent.run_stats()
+        return {
+            "level": stats["level"],
+            "flags": stats["flags"],
+            "tool_calls": stats["tool_calls"],
+            "tool_errors": stats["tool_errors"],
+            "failures": stats["failures"],
+            "rounds_exhausted": stats["rounds_exhausted"],
+            "recent_failures": list(agent.recent_failures),
         }
 
     def list_agents(self) -> list[dict]:

@@ -158,11 +158,6 @@ body.is-resizing .editor-surface { pointer-events: none; }
 }
 .codebuilder-scratchpad-toolbar .cb-select { min-width: 9rem; }
 .codebuilder-scratchpad-run + .codebuilder-scratchpad-run { margin-top: 1rem; }
-.codebuilder-scratchpad-run h3 {
-  margin: 0 0 0.5rem;
-  font-size: 0.78rem;
-  color: var(--text-muted);
-}
 .codebuilder-scratchpad-entry {
   margin-bottom: 0.5rem;
   padding: 0.5rem 0.65rem;
@@ -427,11 +422,11 @@ button.diagnostic-item {
 .codebuilder-chat-message {
   align-self: flex-start;
   max-width: 85%;
-  padding: 0.3rem 0.5rem;
-  border-radius: 5px;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
   background: var(--bg-elev);
-  font-size: 0.78rem;
-  line-height: 1.35;
+  font-size: 0.9rem;
+  line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -439,10 +434,18 @@ button.diagnostic-item {
 .codebuilder-chat-message.assistant {
   max-width: min(95%, 900px);
   min-width: 0;
+  white-space: normal;
 }
 
+.codebuilder-chat-message.assistant .prompt-rich-markdown { font-size: inherit; }
+.codebuilder-chat-message.assistant h1 { font-size: 1.3em; }
+.codebuilder-chat-message.assistant h2 { font-size: 1.15em; }
+.codebuilder-chat-message.assistant h3,
+.codebuilder-chat-message.assistant h4 { font-size: 1.05em; }
+.codebuilder-chat-message.assistant .md-code-block pre { font-size: 0.82rem; }
+
 .codebuilder-chat-text {
-  white-space: pre-wrap;
+  min-width: 0;
 }
 
 .codebuilder-code-block {
@@ -827,8 +830,7 @@ body.codebuilder-modal-open {
 .codebuilder-agent-body.is-streaming {
   max-height: 14rem;
   overflow-y: auto;
-  white-space: pre-wrap;
-  font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
-  font-size: 0.75rem;
+  white-space: normal;
 }
+.codebuilder-agent-body { white-space: normal; }
 .codebuilder-workflow-stop { border-color: var(--danger); color: var(--danger); }

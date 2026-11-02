@@ -103,6 +103,24 @@ function renderToolWorkbench(container, toolPayload = null) {
         <div id="tw-library" class="text-muted small">Loading tools…</div>
       </div>
       <p class="text-muted small">Promoted code is trusted application code and will run in the Novous backend when an agent invokes it.</p>
+      <dialog id="tw-tool-dialog" class="scratchpad-dialog tool-workbench-dialog" aria-labelledby="tw-tool-dialog-title">
+        <div class="scratchpad-dialog-head">
+          <div>
+            <h2 id="tw-tool-dialog-title">Tool</h2>
+            <p id="tw-tool-dialog-meta" class="text-muted small"></p>
+          </div>
+          <div class="root-management-actions">
+            <button type="button" class="btn btn-sm" id="tw-tool-dialog-copy">Copy</button>
+            <button type="button" class="btn btn-sm btn-primary" id="tw-tool-dialog-use">Add to Python Function Code</button>
+            <button type="button" class="btn btn-sm" id="tw-tool-dialog-close" aria-label="Close">Close</button>
+          </div>
+        </div>
+        <div class="code-editor">
+          <div class="code-editor-bar"><span class="code-editor-file" id="tw-tool-dialog-file"></span></div>
+          <div class="code-view" id="tw-tool-dialog-code" tabindex="0" aria-label="Tool function source"></div>
+        </div>
+        <p class="text-muted small">Built-in tools that rely on module-level imports or objects may fail on Direct Python Test, but Stage 2 (asking the LLM to use the tool) works for every tool.</p>
+      </dialog>
     </section>`);
 
   const codeField = container.querySelector('#tw-code');
@@ -125,6 +143,7 @@ function renderToolWorkbench(container, toolPayload = null) {
 
   let lastPassed = null;
   let lastTestReport = null;
+  let libraryTools = [];
   let busy = false;
   const codeView = container.querySelector('#tw-code-view');
   const editButton = container.querySelector('#tw-edit-code');
@@ -163,12 +182,15 @@ function renderToolWorkbench(container, toolPayload = null) {
   }
 
   const HARNESS_START = '# --- Novous test call';
+  function renderLines(source) {
+    return highlightPython(source).split('\n').map((line, index) =>
+      `<div class="code-line"><span class="code-ln">${index + 1}</span><span class="code-text">${line || ' '}</span></div>`
+    ).join('');
+  }
   function renderCodeView() {
     const source = codeField.value.replace(/\r\n?/g, '\n');
     codeView.innerHTML = source
-      ? highlightPython(source).split('\n').map((line, index) =>
-        `<div class="code-line"><span class="code-ln">${index + 1}</span><span class="code-text">${line || ' '}</span></div>`
-      ).join('')
+      ? renderLines(source)
       : '<div class="code-empty">No code yet. Generate a function in Stage 1, or click Edit to paste your own.</div>';
   }
   async function setEditing(editing) {
@@ -211,21 +233,65 @@ function renderToolWorkbench(container, toolPayload = null) {
     window.open('/codebuilder', '_blank');
   });
 
-  container.querySelector('#tw-copy-code').addEventListener('click', async event => {
-    const button = event.currentTarget;
+  async function copyText(text, button) {
     try {
-      await navigator.clipboard.writeText(codeField.value);
+      await navigator.clipboard.writeText(text);
       button.textContent = 'Copied!';
     } catch (_) {
-      const wasHidden = codeField.hidden;
-      codeField.hidden = false;
-      codeField.select();
+      const scratch = document.createElement('textarea');
+      scratch.value = text;
+      scratch.style.position = 'fixed';
+      scratch.style.opacity = '0';
+      (button.closest('dialog') || document.body).appendChild(scratch);
+      scratch.select();
       const ok = document.execCommand('copy');
-      codeField.hidden = wasHidden;
+      scratch.remove();
       button.textContent = ok ? 'Copied!' : 'Copy failed';
     }
     setTimeout(() => { button.textContent = 'Copy'; }, 1500);
+  }
+  container.querySelector('#tw-copy-code').addEventListener('click', event =>
+    copyText(codeField.value, event.currentTarget));
+
+  const toolDialog = container.querySelector('#tw-tool-dialog');
+  let viewedTool = null;
+  async function openToolDialog(name) {
+    try {
+      const tool = await Api.getWorkbenchTool(name);
+      const meta = libraryTools.find(item => item.name === name);
+      viewedTool = tool;
+      container.querySelector('#tw-tool-dialog-title').textContent = tool.name;
+      container.querySelector('#tw-tool-dialog-meta').textContent =
+        `${tool.path}${meta?.signature ? ` · ${tool.name}${meta.signature}` : ''}`;
+      container.querySelector('#tw-tool-dialog-file').textContent = tool.path;
+      container.querySelector('#tw-tool-dialog-code').innerHTML = renderLines(tool.source.replace(/\r\n?/g, '\n'));
+      toolDialog.showModal();
+    } catch (err) {
+      status.textContent = `Could not open tool: ${err.message}`;
+      status.className = 'text-danger small';
+    }
+  }
+  function useTool(tool) {
+    if (codeField.value.trim() && !confirm(`Replace the current Python Function Code with ${tool.name}?`)) {
+      return false;
+    }
+    setCode(tool.test_source ?? tool.source);
+    lastPassed = null;
+    updatePromotion();
+    status.textContent = `Loaded ${tool.name} from ${tool.path}. Next: write a request in Stage 2.`;
+    status.className = 'text-muted small';
+    return true;
+  }
+  container.querySelector('#tw-tool-dialog-copy').addEventListener('click', event => {
+    if (viewedTool) copyText(viewedTool.source, event.currentTarget);
   });
+  container.querySelector('#tw-tool-dialog-use').addEventListener('click', () => {
+    if (!viewedTool || !useTool(viewedTool)) return;
+    toolDialog.close();
+    promptField.scrollIntoView({ block: 'center' });
+    promptField.focus();
+  });
+  container.querySelector('#tw-tool-dialog-close').addEventListener('click', () => toolDialog.close());
   function enableTabIndent(field) {
     field.addEventListener('keydown', event => {
       if (event.key !== 'Tab') return;
@@ -426,12 +492,13 @@ function renderToolWorkbench(container, toolPayload = null) {
   async function loadToolLibrary() {
     try {
       const data = await Api.getToolLibrary();
-      const tools = data.tools || [];
+      const tools = libraryTools = data.tools || [];
       library.innerHTML = tools.length
         ? tools.map(tool => `
           <div class="tool-workbench-library-item">
             <code>${esc(tool.name)}</code>
             <span>${esc(tool.signature)}</span>
+            <button type="button" class="btn btn-sm" data-tool-view="${esc(tool.name)}">View</button>
             ${tool.custom ? `
               <button type="button" class="btn btn-sm" data-tool-load="${esc(tool.name)}">Load</button>
               <button type="button" class="btn btn-sm" data-tool-delete="${esc(tool.name)}">Remove</button>
@@ -590,16 +657,13 @@ function renderToolWorkbench(container, toolPayload = null) {
   });
   container.querySelector('#tw-refresh-models').addEventListener('click', loadModels);
   library.addEventListener('click', async event => {
+    const viewButton = event.target.closest('[data-tool-view]');
     const loadButton = event.target.closest('[data-tool-load]');
     const deleteButton = event.target.closest('[data-tool-delete]');
+    if (viewButton) await openToolDialog(viewButton.dataset.toolView);
     if (loadButton) {
       try {
-        const tool = await Api.getWorkbenchTool(loadButton.dataset.toolLoad);
-        setCode(tool.source);
-        lastPassed = null;
-        updatePromotion();
-        status.textContent = `Loaded ${tool.name} from ${tool.path} for testing`;
-        status.className = 'text-muted small';
+        useTool(await Api.getWorkbenchTool(loadButton.dataset.toolLoad));
       } catch (err) {
         status.textContent = `Could not load tool: ${err.message}`;
         status.className = 'text-danger small';

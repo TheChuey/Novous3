@@ -126,6 +126,27 @@ class TestReadTool(unittest.TestCase):
         self.assertEqual(result["content_type"], "document_text")
         store_read.assert_called_once_with("manual.pdf", "# Manual", "summarize")
 
+    def test_long_read_returns_first_page_and_stores_full_text(self):
+        long_text = "line\n" * 2000
+        read_content = Mock(return_value=(self._source("long.md"), long_text))
+        store_read = Mock(return_value={
+            "path": "scratchpadMemory/data/scratchpad.json",
+            "updated_at": "2026-10-21T00:00:00+00:00",
+        })
+
+        with (
+            patch.object(workspace_files, "read_document", read_content),
+            patch.object(logic_tools.scratchpad, "store_read", store_read),
+        ):
+            result = json.loads(logic_tools.read_file("long.md", "summarize"))
+
+        store_read.assert_called_once_with("long.md", long_text, "summarize")
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(len(result["content"]), 4000)
+        self.assertEqual(result["total_chars"], len(long_text))
+        self.assertEqual(result["next_offset"], len(result["content"]))
+        self.assertIn("read_agent_scratchpad(item='long.md', offset='", result["scratchpad"]["context"])
+
 
 if __name__ == "__main__":
     unittest.main()

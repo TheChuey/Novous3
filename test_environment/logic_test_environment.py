@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -677,7 +678,26 @@ class ToolWorkbench:
             raise ValueError("The tool name is not valid.")
         from tools.logic_tools import tool_registry
 
-        return tool_registry.get_tool_source(name)
+        tool = tool_registry.get_tool_source(name)
+        return {**tool, "test_source": self.strip_tool_decorator(tool["source"])}
+
+    def strip_tool_decorator(self, source: str) -> str:
+        """Drop @tool decorators so the code runs in the bare test interpreter."""
+        source = textwrap.dedent(source)
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return source
+        drop = set()
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                if isinstance(target, ast.Name) and target.id == "tool":
+                    drop.update(range(decorator.lineno, decorator.end_lineno + 1))
+        lines = source.splitlines()
+        return "\n".join(line for number, line in enumerate(lines, 1) if number not in drop).rstrip() + "\n"
 
     def delete_custom_tool(self, name: str) -> dict:
         if not self._FUNCTION_NAME.fullmatch(name):

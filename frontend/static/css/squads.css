@@ -348,7 +348,6 @@
   border-radius: 6px;
   background: var(--bg-elev);
   border-left: 3px solid var(--success);
-  white-space: pre-wrap;
   line-height: 1.5;
 }
 .sq-output { margin-bottom: 0.4rem; }

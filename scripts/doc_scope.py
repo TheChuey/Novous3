@@ -50,7 +50,7 @@ INCLUDE_EXT = {
 EXTENSIONLESS_INCLUDE = {"Dockerfile", "Procfile"}
 
 # Local runtime state, regenerated on demand.
-PRIVATE_DIRS = ("ragMemory/data", "scratchpadMemory/data")
+PRIVATE_DIRS = ("ragMemory/data", "scratchpadMemory/data", "modelProfiles/data")
 
 # Configuration files whose values point at the author's private folders.
 PRIVATE_CONTENT_FILES = (

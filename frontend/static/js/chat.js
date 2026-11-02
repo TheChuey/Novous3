@@ -1,22 +1,34 @@
 import { Api } from './api.js';
 import { createIcon, iconSvg } from './icons.js';
+import { appendMarkdown } from './markdown.js';
+import { ragWarningNodes } from './rag_warnings.js';
+import { setupScratchpadReader } from './scratchpad_reader.js';
 import { setupSidePanels } from './side_panels.js';
 import { buildTestPanel } from './test_panel.js';
+import { contextChipText, contextLevel, renderContextReport, summarizeReport } from './context_window.js';
 import { openTestSuiteRunner } from './test_suite_runner.js';
 import { renderTree } from './tree.js';
 
-export function formatScratchpadMarkdown(memory) {
-  const lines = ['# Agent Scratchpad', '', `Exported: ${new Date().toLocaleString()}`, ''];
+/** Saved sub-agent results, oldest first, including the latest one if history lacks it. */
+function scratchpadSubagentHistory(memory) {
   const subagentHistory = Array.isArray(memory.subagent_history)
     ? [...memory.subagent_history]
     : [];
   const latestSubagent = memory.latest_subagent_result;
   if (
     latestSubagent
+    && typeof latestSubagent === 'object'
+    && Object.keys(latestSubagent).length
     && !subagentHistory.some(entry => entry.updated_at === latestSubagent.updated_at)
   ) {
     subagentHistory.push(latestSubagent);
   }
+  return subagentHistory;
+}
+
+export function formatScratchpadMarkdown(memory) {
+  const lines = ['# Agent Scratchpad', '', `Exported: ${new Date().toLocaleString()}`, ''];
+  const subagentHistory = scratchpadSubagentHistory(memory);
 
   lines.push('## Sub-agent Results', '');
   if (!subagentHistory.length) {
@@ -148,6 +160,10 @@ export function renderChatView(container) {
       <section class="chat-main" aria-label="Conversation">
         <div class="chat-main-head">
           <h3>Conversation</h3>
+          <button type="button" class="ctx-chip" id="chat-context-chip" hidden
+            title="Open the context window"></button>
+          <button type="button" class="ctx-chip" id="chat-tools-chip" hidden
+            title="Tool calls and failures for this chat"></button>
           <div class="chat-font-controls cb-group" role="group" aria-label="Chat text size">
             <button type="button" class="cb-btn" id="chat-font-smaller"
               title="Smaller text" aria-label="Decrease chat text size">A−</button>
@@ -210,14 +226,19 @@ export function renderChatView(container) {
         </div>
       </aside>
     </div>
-    <dialog id="chat-scratchpad-dialog" class="scratchpad-dialog">
+    <dialog id="chat-scratchpad-dialog" class="scratchpad-dialog reader-dialog">
       <div class="scratchpad-dialog-head">
         <div>
           <h2>Agent Scratchpad</h2>
-          <p class="text-muted small">Sub-agent results, retrieved evidence, recent file reads, and the latest workspace map.</p>
+          <p class="text-muted small">Sub-agent results, retrieved evidence, recent file reads, and the latest workspace map. Drag the bottom-right corner to resize.</p>
         </div>
-        <button type="button" class="btn btn-sm" data-scratchpad-close aria-label="Close">Close</button>
+        <div class="root-management-actions">
+          <button type="button" class="btn btn-sm" data-scratchpad-refresh>Refresh</button>
+          <button type="button" class="btn btn-sm" data-scratchpad-close aria-label="Close">Close</button>
+        </div>
       </div>
+      <div id="chat-scratchpad-toolbar"></div>
+      <p id="chat-scratchpad-status" class="small text-danger" role="status" hidden></p>
       <div id="chat-scratchpad-content" class="scratchpad-content"></div>
     </dialog>
     <dialog id="chat-knowledge-catalog-dialog" class="scratchpad-dialog">
@@ -285,6 +306,20 @@ export function renderChatView(container) {
         </div>
         <p class="small" id="chat-rag-status" role="status" aria-live="polite"></p>
       </form>
+    </dialog>
+    <dialog id="chat-context-dialog" class="scratchpad-dialog context-dialog">
+      <div class="scratchpad-dialog-head">
+        <div>
+          <h2>Context window</h2>
+          <p class="text-muted small">What the model receives for this chat: the system prompt, the tool schemas and each message. Ollama's measured prompt size is shown after each reply.</p>
+        </div>
+        <div class="root-management-actions">
+          <button type="button" class="btn btn-sm" data-context-refresh>Refresh</button>
+          <button type="button" class="btn btn-sm" data-context-close aria-label="Close">Close</button>
+        </div>
+      </div>
+      <p id="chat-context-status" class="small text-danger" role="status" hidden></p>
+      <div id="chat-context-content" class="scratchpad-content" aria-live="polite"></div>
     </dialog>`;
 
   const agentSelect = container.querySelector('#chat-agent-select');
@@ -303,6 +338,19 @@ export function renderChatView(container) {
   const modelCount = container.querySelector('#model-count');
   const scratchpadDialog = container.querySelector('#chat-scratchpad-dialog');
   const scratchpadContent = container.querySelector('#chat-scratchpad-content');
+  const scratchpadStatus = container.querySelector('#chat-scratchpad-status');
+  const scratchpadReader = setupScratchpadReader({
+    content: scratchpadContent,
+    toolbar: container.querySelector('#chat-scratchpad-toolbar'),
+    prefsKey: 'novous2.chat.scratchpad.',
+    title: 'Agent Scratchpad',
+    filenameBase: 'novous-agent-scratchpad',
+    getMarkdown: async () => formatScratchpadMarkdown(await Api.getAgentScratchpad()),
+    onError: error => {
+      scratchpadStatus.textContent = error.message;
+      scratchpadStatus.hidden = false;
+    },
+  });
   const chatMain = container.querySelector('.chat-main');
   const chatLayout = container.querySelector('.chat-layout');
   setupSidePanels({
@@ -324,105 +372,107 @@ export function renderChatView(container) {
     },
   });
 
+  function scratchpadSection(title, count) {
+    const section = document.createElement('section');
+    section.className = 'scratchpad-section';
+    const heading = document.createElement('h3');
+    heading.textContent = count === undefined ? title : `${title} (${count})`;
+    section.appendChild(heading);
+    return section;
+  }
+
+  function emptyNote(text) {
+    const empty = document.createElement('p');
+    empty.className = 'text-muted';
+    empty.textContent = text;
+    return empty;
+  }
+
+  function renderSubagentEntry(entry, open) {
+    const payload = entry.payload && typeof entry.payload === 'object' ? entry.payload : {};
+    const details = document.createElement('details');
+    details.className = 'scratchpad-read';
+    details.dataset.readerItem = '';
+    details.open = open;
+    const summary = document.createElement('summary');
+    const statusValue = String(entry.status || 'unknown');
+    const status = document.createElement('span');
+    status.className = `badge ${statusValue === 'success' ? 'badge-success' : statusValue === 'error' ? 'badge-danger' : 'badge-warning'}`;
+    status.textContent = statusValue;
+    const timestamp = entry.updated_at ? new Date(entry.updated_at).toLocaleString() : '';
+    const label = document.createElement('span');
+    label.textContent = [entry.subagent_id || 'Unknown sub-agent', entry.task_type || '', timestamp]
+      .filter(Boolean).join(' · ');
+    summary.append(status, ' ', label);
+    details.appendChild(summary);
+
+    if (payload.query) {
+      const query = document.createElement('p');
+      query.className = 'scratchpad-result-query';
+      query.textContent = `Query: ${payload.query}`;
+      details.appendChild(query);
+    }
+    if (payload.knowledge_branch_name) {
+      const branch = document.createElement('p');
+      branch.className = 'text-muted small';
+      branch.textContent = `Knowledge branch: ${payload.knowledge_branch_name}`;
+      details.appendChild(branch);
+    }
+    if (payload.error) {
+      const error = document.createElement('p');
+      error.className = 'text-danger';
+      error.textContent = payload.error;
+      details.appendChild(error);
+    }
+
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    if (!results.length) {
+      details.appendChild(emptyNote(statusValue === 'nothing_found'
+        ? 'Retrieval completed; no relevant passages were found.'
+        : statusValue === 'error'
+          ? 'Retrieval failed. See the error above.'
+          : 'No retrieved passages were saved.'));
+      return details;
+    }
+    const count = document.createElement('p');
+    count.className = 'text-muted small';
+    count.textContent = `${results.length} retrieved passage${results.length === 1 ? '' : 's'}`;
+    details.appendChild(count);
+    results.forEach((result, index) => {
+      const passage = document.createElement('details');
+      passage.className = 'scratchpad-read scratchpad-result';
+      passage.open = open && index === 0;
+      const passageSummary = document.createElement('summary');
+      const score = Number.isFinite(Number(result.score))
+        ? ` · relevance ${Number(result.score).toFixed(3)}`
+        : '';
+      passageSummary.textContent = `${index + 1}. ${result.path || 'Retrieved passage'}${score}`;
+      const excerpt = document.createElement('pre');
+      excerpt.textContent = result.content || '';
+      passage.append(passageSummary, excerpt);
+      details.appendChild(passage);
+    });
+    return details;
+  }
+
   function renderScratchpad(memory) {
     scratchpadContent.replaceChildren();
-    const subagent = memory.latest_subagent_result;
-    const subagentSection = document.createElement('section');
-    subagentSection.className = 'scratchpad-section';
-    const subagentTitle = document.createElement('h3');
-    subagentTitle.textContent = 'Latest sub-agent result';
-    subagentSection.appendChild(subagentTitle);
-    if (subagent && typeof subagent === 'object' && Object.keys(subagent).length) {
-      const payload = subagent.payload && typeof subagent.payload === 'object'
-        ? subagent.payload
-        : {};
-      const status = document.createElement('span');
-      const statusValue = String(subagent.status || 'unknown');
-      status.className = `badge ${statusValue === 'success' ? 'badge-success' : statusValue === 'error' ? 'badge-danger' : 'badge-warning'}`;
-      status.textContent = statusValue;
-      const meta = document.createElement('p');
-      meta.className = 'text-muted small';
-      const timestamp = subagent.updated_at ? new Date(subagent.updated_at).toLocaleString() : '';
-      meta.textContent = [subagent.subagent_id || 'Unknown sub-agent', subagent.task_type || '', timestamp]
-        .filter(Boolean).join(' · ');
-      subagentSection.append(status, meta);
-
-      if (payload.query) {
-        const query = document.createElement('p');
-        query.className = 'scratchpad-result-query';
-        query.textContent = `Query: ${payload.query}`;
-        subagentSection.appendChild(query);
-      }
-      if (payload.knowledge_branch_name) {
-        const branch = document.createElement('p');
-        branch.className = 'text-muted small';
-        branch.textContent = `Knowledge branch: ${payload.knowledge_branch_name}`;
-        subagentSection.appendChild(branch);
-      }
-      if (payload.error) {
-        const error = document.createElement('p');
-        error.className = 'text-danger';
-        error.textContent = payload.error;
-        subagentSection.appendChild(error);
-      }
-
-      const results = Array.isArray(payload.results) ? payload.results : [];
-      if (results.length) {
-        const count = document.createElement('p');
-        count.className = 'text-muted small';
-        count.textContent = `${results.length} retrieved passage${results.length === 1 ? '' : 's'}`;
-        subagentSection.appendChild(count);
-        results.forEach((result, index) => {
-          const details = document.createElement('details');
-          details.className = 'scratchpad-read scratchpad-result';
-          if (index === 0) details.open = true;
-          const summary = document.createElement('summary');
-          const score = Number.isFinite(Number(result.score))
-            ? ` · relevance ${Number(result.score).toFixed(3)}`
-            : '';
-          summary.textContent = `${result.path || 'Retrieved passage'}${score}`;
-          const excerpt = document.createElement('pre');
-          excerpt.textContent = result.content || '';
-          details.append(summary, excerpt);
-          subagentSection.appendChild(details);
-        });
-      } else {
-        const empty = document.createElement('p');
-        empty.className = 'text-muted';
-        empty.textContent = statusValue === 'nothing_found'
-          ? 'Retrieval completed; no relevant passages were found.'
-          : statusValue === 'error'
-            ? 'Retrieval failed. See the error above.'
-            : 'No retrieved passages were saved.';
-        subagentSection.appendChild(empty);
-      }
-    } else {
-      const empty = document.createElement('p');
-      empty.className = 'text-muted';
-      empty.textContent = 'No sub-agent results are saved.';
-      subagentSection.appendChild(empty);
-    }
-    scratchpadContent.appendChild(subagentSection);
-
+    const subagents = scratchpadSubagentHistory(memory).reverse();
     const reads = Array.isArray(memory.read_history)
       ? memory.read_history
       : (memory.latest_read ? [memory.latest_read] : []);
 
-    const readsSection = document.createElement('section');
-    readsSection.className = 'scratchpad-section';
-    const readsTitle = document.createElement('h3');
-    readsTitle.textContent = `Recent reads (${reads.length})`;
-    readsSection.appendChild(readsTitle);
-    if (!reads.length) {
-      const empty = document.createElement('p');
-      empty.className = 'text-muted';
-      empty.textContent = 'No file reads are saved.';
-      readsSection.appendChild(empty);
-    }
+    const subagentSection = scratchpadSection('Sub-agent results', subagents.length);
+    if (!subagents.length) subagentSection.appendChild(emptyNote('No sub-agent results are saved.'));
+    subagents.forEach((entry, index) => subagentSection.appendChild(renderSubagentEntry(entry, index === 0)));
+
+    const readsSection = scratchpadSection('Recent file reads', reads.length);
+    if (!reads.length) readsSection.appendChild(emptyNote('No file reads are saved.'));
     [...reads].reverse().forEach((entry, index) => {
       const details = document.createElement('details');
       details.className = 'scratchpad-read';
-      if (index === 0) details.open = true;
+      details.dataset.readerItem = '';
+      details.open = index === 0;
       const summary = document.createElement('summary');
       const timestamp = entry.updated_at ? new Date(entry.updated_at).toLocaleString() : '';
       summary.textContent = [entry.path || 'Unknown file', timestamp].filter(Boolean).join(' · ');
@@ -434,28 +484,37 @@ export function renderChatView(container) {
       details.append(summary, request, content);
       readsSection.appendChild(details);
     });
-    scratchpadContent.appendChild(readsSection);
 
-    const mapSection = document.createElement('section');
-    mapSection.className = 'scratchpad-section';
-    const mapTitle = document.createElement('h3');
-    mapTitle.textContent = 'Latest workspace map';
-    mapSection.appendChild(mapTitle);
+    const mapSection = scratchpadSection('Latest workspace map');
     if (memory.latest_map?.tree) {
       const path = document.createElement('p');
       path.className = 'text-muted small';
       path.textContent = memory.latest_map.requested_path || 'Workspace root';
       const tree = document.createElement('div');
       tree.className = 'scratchpad-tree';
+      tree.dataset.readerItem = '';
       tree.appendChild(createScratchpadTreeNode(memory.latest_map.tree, true));
       mapSection.append(path, tree);
     } else {
-      const empty = document.createElement('p');
-      empty.className = 'text-muted';
-      empty.textContent = 'No workspace map is saved.';
-      mapSection.appendChild(empty);
+      mapSection.appendChild(emptyNote('No workspace map is saved.'));
     }
-    scratchpadContent.appendChild(mapSection);
+
+    const nav = document.createElement('nav');
+    nav.className = 'reader-nav';
+    nav.setAttribute('aria-label', 'Scratchpad sections');
+    [
+      [`Sub-agent results (${subagents.length})`, subagentSection],
+      [`File reads (${reads.length})`, readsSection],
+      ['Workspace map', mapSection],
+    ].forEach(([label, section]) => {
+      const jump = document.createElement('button');
+      jump.type = 'button';
+      jump.textContent = label;
+      jump.addEventListener('click', () => section.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+      nav.appendChild(jump);
+    });
+    scratchpadContent.append(nav, subagentSection, readsSection, mapSection);
+    scratchpadReader.refresh();
   }
 
   function createScratchpadTreeNode(node, isRoot = false) {
@@ -502,6 +561,7 @@ export function renderChatView(container) {
   }
 
   async function loadScratchpad() {
+    scratchpadStatus.hidden = true;
     scratchpadContent.textContent = 'Loading scratchpad…';
     try {
       renderScratchpad(await Api.getAgentScratchpad());
@@ -518,6 +578,7 @@ export function renderChatView(container) {
   container.querySelector('[data-scratchpad-close]').addEventListener('click', () => {
     scratchpadDialog.close();
   });
+  container.querySelector('[data-scratchpad-refresh]').addEventListener('click', loadScratchpad);
 
   const knowledgeCatalogDialog = container.querySelector('#chat-knowledge-catalog-dialog');
   const knowledgeCatalogContent = container.querySelector('#chat-knowledge-catalog-content');
@@ -582,7 +643,7 @@ export function renderChatView(container) {
             documents.appendChild(failure);
           }
         });
-        branch.append(summary, metadata, id, documents);
+        branch.append(summary, metadata, ...ragWarningNodes(base.warnings), id, documents);
         list.appendChild(branch);
       });
       knowledgeCatalogContent.appendChild(list);
@@ -626,8 +687,9 @@ export function renderChatView(container) {
     summary.textContent = `${overview.name || 'Selected source'} — ${overview.documents} document(s), ${overview.chunks} chunks. Types: ${typeText}.`;
     const folder = document.createElement('p');
     folder.className = 'text-muted small';
-    folder.textContent = `${overview.path}${overview.exists ? '' : ' (folder unavailable)'}`;
-    ragContent.append(summary, folder);
+    folder.textContent = `${overview.path}${overview.exists ? '' : ' (folder unavailable)'}` +
+      (overview.cloud_provider ? ` · ${overview.cloud_provider} folder: online-only files are downloaded before indexing` : '');
+    ragContent.append(summary, folder, ...ragWarningNodes(overview.warnings));
 
     const files = overview.files || [];
     if (!files.length) {
@@ -724,7 +786,7 @@ export function renderChatView(container) {
       const progress = `${job.completed || 0}/${job.discovered || 0} checked · ` +
         `${job.indexed || 0} indexed · ${job.unchanged || 0} unchanged · ` +
         `${job.skipped?.length || 0} skipped · ${job.errors?.length || 0} errors`;
-      const current = job.current ? ` — ${job.current}` : '';
+      const current = job.current ? ` — ${job.current}${job.phase ? ` (${job.phase})` : ''}` : '';
       const firstError = job.errors?.[0];
       const errorSummary = job.errors?.length
         ? `; ${job.errors.length} error(s), e.g. ${firstError.path || ''} — ${firstError.error || 'see server log'}`
@@ -735,6 +797,7 @@ export function renderChatView(container) {
       const schedule = job.resume_at
         ? `; scheduled to resume ${new Date(job.resume_at).toLocaleString()}`
         : '';
+      const warning = job.warnings?.length ? ` ⚠ ${job.warnings.map(item => item.message).join(' ')}` : '';
       const state = {
         queued: 'Starting',
         running: 'Indexing',
@@ -751,9 +814,10 @@ export function renderChatView(container) {
       }[job.status] || job.status;
       ragJobStatus.textContent = job.status === 'idle'
         ? 'Index status: Waiting to start.'
-        : `${job.base_name || 'Source'}: ${state} — ${progress}${pending || errorSummary}${schedule}${current}`;
+        : `${job.base_name || 'Source'}: ${state} — ${progress}${pending || errorSummary}${schedule}${current}${warning}`;
       ragJobStatus.className = `small ${
-        ['completed', 'completed_with_skips', 'running', 'queued'].includes(job.status) ? 'text-success'
+        warning && ['completed', 'completed_with_skips'].includes(job.status) ? 'text-warning'
+        : ['completed', 'completed_with_skips', 'running', 'queued'].includes(job.status) ? 'text-success'
           : ['paused', 'pausing', 'awaiting_decision'].includes(job.status) ? 'text-warning'
             : ['failed', 'completed_with_errors', 'unavailable'].includes(job.status) ? 'text-danger'
               : 'text-muted'
@@ -1117,6 +1181,7 @@ export function renderChatView(container) {
   modelSelect.addEventListener('change', () => {
     currentModel = modelSelect.value;
     syncActionButtons();
+    refreshContextChip();
   });
 
   const agentEnvironments = ['workspace', 'codebuilder', 'prompt-creation'];
@@ -1141,6 +1206,7 @@ export function renderChatView(container) {
       if (last && agents.some(a => a.id === last)) agentSelect.value = last;
       updateAgentMeta(agentSelect.value);
       syncModelSelect();
+      refreshContextChip();
     }
     syncActionButtons();
     syncTodoRunButton();
@@ -1150,7 +1216,8 @@ export function renderChatView(container) {
 
   agentSelect.addEventListener('change', (e) => {
     try { localStorage.setItem('novous2.chat.lastAgent', e.target.value); } catch { /* storage unavailable */ }
-    updateAgentMeta(e.target.value); syncModelSelect(); syncActionButtons(); syncTodoRunButton(); });
+    updateAgentMeta(e.target.value); syncModelSelect(); syncActionButtons(); syncTodoRunButton();
+    refreshContextChip(); });
 
   chatInput.addEventListener('input', syncActionButtons);
 
@@ -1385,9 +1452,88 @@ export function renderChatView(container) {
       syncActionButtons();
     }
   });
+  const contextDialog = container.querySelector('#chat-context-dialog');
+  const contextChip = container.querySelector('#chat-context-chip');
+  const toolsChip = container.querySelector('#chat-tools-chip');
+  const contextContent = container.querySelector('#chat-context-content');
+  const contextStatus = container.querySelector('#chat-context-status');
+
+  function contextQuery() {
+    const agent = agents.find(a => a.id === agentSelect.value);
+    return {
+      agentId: agentSelect.value,
+      sessionId: `chat-${agentSelect.value}`,
+      model: currentModel,
+      environment: agent?.environment || 'workspace'
+    };
+  }
+  function fetchContext() {
+    const query = contextQuery();
+    return Api.getChatContext(query.agentId, query.sessionId, query.model, query.environment);
+  }
+  function updateContextChip(summary) {
+    contextChip.hidden = false;
+    contextChip.textContent = contextChipText(summary);
+    contextChip.dataset.level = contextLevel(summary.percent);
+    contextChip.title = summary.sentence;
+  }
+  function updateToolsChip(health) {
+    if (!health) return;
+    const calls = health.tool_calls || 0;
+    const failed = health.tool_errors || 0;
+    toolsChip.hidden = false;
+    toolsChip.textContent = calls ? `Tools ${calls - failed}/${calls} OK` : 'Tools: no calls yet';
+    toolsChip.dataset.level = health.level === 'crit' || health.level === 'warn' ? health.level : 'ok';
+    toolsChip.title = failed
+      ? `${failed} failed tool call(s). Open the context window for details.`
+      : 'Tool calls for this chat';
+  }
+  async function refreshContextChip() {
+    if (!agentSelect.value) {
+      contextChip.hidden = true;
+      toolsChip.hidden = true;
+      return;
+    }
+    try {
+      const report = await fetchContext();
+      updateContextChip(summarizeReport(report));
+      updateToolsChip(report.tool_health);
+    } catch (_) {
+      contextChip.hidden = true;
+      toolsChip.hidden = true;
+    }
+  }
+  async function loadContext() {
+    contextStatus.hidden = true;
+    contextContent.textContent = 'Loading…';
+    if (!agentSelect.value) {
+      contextContent.textContent = 'Select an agent to see its context.';
+      return;
+    }
+    try {
+      const report = await fetchContext();
+      contextContent.replaceChildren(renderContextReport(report));
+      updateContextChip(summarizeReport(report));
+      updateToolsChip(report.tool_health);
+    } catch (err) {
+      contextContent.replaceChildren();
+      contextStatus.textContent = `Could not load the context: ${err.message}`;
+      contextStatus.hidden = false;
+    }
+  }
+  function openContext() {
+    contextDialog.showModal();
+    return loadContext();
+  }
+  contextChip.addEventListener('click', openContext);
+  toolsChip.addEventListener('click', openContext);
+  container.querySelector('[data-context-refresh]').addEventListener('click', loadContext);
+  container.querySelector('[data-context-close]').addEventListener('click', () => contextDialog.close());
+
   buildTestPanel('testPanelButtons', {
     diagnostics: openDiagnostics,
     wipeChat,
+    viewContext: openContext,
     runTestSuite: openTodoSuite,
     viewScratchpad: openScratchpad,
     viewKnowledgeCatalog: openKnowledgeCatalog,
@@ -1455,11 +1601,14 @@ export function renderChatView(container) {
       removeMessage(thinkingId);
 
       if (res.tool_events && res.tool_events.length > 0) {
-        res.tool_events.forEach(evt => appendToolBadge(evt.tool, evt.status, evt.args, evt.display));
+        res.tool_events.forEach(evt => appendToolBadge(evt.tool, evt.status, evt.args, evt.display, evt.error, evt.error_kind));
       }
 
       appendMessage('assistant', res.reply);
+      if (res.context) updateContextChip(res.context);
+      if (res.health) updateToolsChip(res.health);
       if (scratchpadDialog.open) await loadScratchpad();
+      if (contextDialog.open) await loadContext();
     } catch (err) {
       removeMessage(thinkingId);
       appendMessage('system', 'Error communicating with engine: ' + err.message);
@@ -1477,7 +1626,8 @@ export function renderChatView(container) {
     const body = document.createElement('div');
     body.className = 'msg-body';
     if (role === 'assistant' && !isTemporary) {
-      renderAssistantMarkdown(body, content);
+      body.classList.add('prompt-rich-markdown');
+      appendMarkdown(body, content);
     } else {
       body.innerText = content;
     }
@@ -1507,75 +1657,18 @@ export function renderChatView(container) {
     return id;
   }
 
-  function renderAssistantMarkdown(container, markdown) {
-    container.replaceChildren();
-    const lines = String(markdown || '').split(/\r?\n/);
-    let paragraph = [];
-    let list = null;
-    const flushParagraph = () => {
-      if (!paragraph.length) return;
-      const element = document.createElement('p');
-      appendInlineMarkdown(element, paragraph.join(' '));
-      container.appendChild(element);
-      paragraph = [];
-    };
-    const closeList = () => {
-      if (!list) return;
-      container.appendChild(list);
-      list = null;
-    };
-
-    lines.forEach(line => {
-      const heading = line.match(/^#{1,3}\s+(.+)$/);
-      const bullet = line.match(/^\s*[-*]\s+(.+)$/);
-      if (!line.trim()) {
-        flushParagraph();
-        closeList();
-      } else if (heading) {
-        flushParagraph();
-        closeList();
-        const element = document.createElement('h3');
-        appendInlineMarkdown(element, heading[1]);
-        container.appendChild(element);
-      } else if (bullet) {
-        flushParagraph();
-        if (!list) list = document.createElement('ul');
-        const item = document.createElement('li');
-        appendInlineMarkdown(item, bullet[1]);
-        list.appendChild(item);
-      } else {
-        closeList();
-        paragraph.push(line.trim());
-      }
-    });
-    flushParagraph();
-    closeList();
-  }
-
-  function appendInlineMarkdown(container, text) {
-    const pieces = String(text).split(/(\*\*[^*]+\*\*)/g);
-    pieces.forEach(piece => {
-      if (piece.startsWith('**') && piece.endsWith('**')) {
-        const strong = document.createElement('strong');
-        strong.textContent = piece.slice(2, -2);
-        container.appendChild(strong);
-      } else if (piece) {
-        container.appendChild(document.createTextNode(piece));
-      }
-    });
-  }
-
   function removeMessage(id) {
     const el = document.getElementById(id);
     if (el) el.remove();
   }
 
-  function appendToolBadge(toolName, status, args, display) {
+  function appendToolBadge(toolName, status, args, display, error = '', errorKind = '') {
     const badgeDiv = document.createElement('div');
     badgeDiv.className = `tool-badge ${status}`;
     const argText = args ? JSON.stringify(args) : '';
     badgeDiv.innerHTML = `🛠️ <strong>${esc(toolName)}</strong> executed (${esc(status)})
-      ${argText ? `<span class="text-muted small"> ${esc(argText.slice(0, 120))}</span>` : ''}`;
+      ${argText ? `<span class="text-muted small"> ${esc(argText.slice(0, 120))}</span>` : ''}
+      ${error ? `<span class="tool-badge-error small">${esc(errorKind || 'error')}: ${esc(String(error).slice(0, 200))}</span>` : ''}`;
     if (display && toolName === 'map_files') {
       try {
         appendMapTree(badgeDiv, JSON.parse(display));
