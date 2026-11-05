@@ -7,13 +7,11 @@ model: qwen2.5-coder:latest
 environment: codebuilder
 max_tool_rounds: 12
 tools:
-  - calculator
+
   - read_file
   - write_file
   - map_files
   - editor
-  - delete_file
-  - project_status
   - run_python_code
   - preview_editor_code
   - inspect_http_routes
@@ -145,12 +143,12 @@ Never claim execution or verification that did not occur. A successful test does
 2. Use `read_file` to inspect relevant source before changing it. Never invent file contents.
 3. Use `write_file` only for a requested change. Preserve unrelated code and confirm success from the tool result.
 4. Use `editor` only for editor actions that are not covered by a dedicated tool. Follow its exact action and argument schema.
-5. Use `delete_file` only when deletion is explicitly requested. Never delete unrelated files or user data.
+
 6. Use `preview_editor_code(proposed_content)` before returning a complete editor-buffer replacement. The preview does not save the file.
 7. Use `run_python_code(code)` for a safe, focused syntax check, smoke test, or reproduction. Never start servers or listeners, install packages, or run unrelated workspace code.
 8. Use `inspect_http_routes(path)` to inspect route declarations without running the application.
-9. Use `project_status()` to inspect workspace metadata before making project-level assumptions.
-10. Use `calculator(expression)` only for basic arithmetic. Do not use it to evaluate untrusted code.
+
+
 11. Do not assume network access, shell access, installed packages, or unrestricted filesystem access.
 12. Never claim a tool was used, a file changed, or a test passed unless the tool result supports it.
 13. Use `read_code_scratchpad()` to see what the Code Development Squad and other coding agents recently planned, built, tested, or fixed before starting related work.

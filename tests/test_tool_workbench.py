@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 
-from core_engine.logic_core_engine import tool_catalog
+from core_engine.logic_core_engine import Agent, tool_catalog
 from test_environment.interface_test_environment import api_promote_tool, api_test_tool_with_llm
 from test_environment.logic_test_environment import tool_workbench
 from test_environment.schemas_test_environment import ToolWorkbenchLLMRequest, ToolWorkbenchRequest
@@ -14,7 +14,7 @@ from tools.logic_tools import tool_registry
 
 
 class ToolWorkbenchTests(unittest.TestCase):
-    def test_extracts_primary_function_and_builds_typed_schema(self):
+    def test_extracts_primary_function_and_builds_agent_schema(self):
         function = tool_workbench.get_function_definition(
             'def calculate(weight: float, *, region: str = "US"):\n'
             '    """Calculate a value."""\n'
@@ -23,9 +23,24 @@ class ToolWorkbenchTests(unittest.TestCase):
 
         schema = tool_workbench.get_tool_schema(function)["function"]
         self.assertEqual(schema["name"], "calculate")
-        self.assertEqual(schema["parameters"]["properties"]["weight"]["type"], "number")
+        # Agents send every parameter as a string, so the test does too.
+        self.assertEqual(schema["parameters"]["properties"]["weight"]["type"], "string")
         self.assertEqual(schema["parameters"]["properties"]["region"]["type"], "string")
         self.assertEqual(schema["parameters"]["required"], ["weight"])
+
+    def test_workbench_schema_matches_the_agent_schema(self):
+        source = 'def calculate(weight: float, *, region: str = "US"):\n    """Calculate a value."""\n    return weight\n'
+        namespace = {}
+        exec(source, namespace)
+        agent = Agent.__new__(Agent)  # schema building needs no model or session
+        agent_schema = agent._ollama_schema(namespace["calculate"])
+        workbench_schema = tool_workbench.get_tool_schema(tool_workbench.get_function_definition(source))
+        self.assertEqual(workbench_schema, agent_schema)
+
+    def test_description_override_replaces_docstring(self):
+        function = tool_workbench.get_function_definition('def calculate(weight: float):\n    """Docstring."""\n    return weight\n')
+        schema = tool_workbench.get_tool_schema(function, description="Use for weights.")
+        self.assertEqual(schema["function"]["description"], "Use for weights.")
 
     def test_rejects_syntax_errors_and_variadic_arguments(self):
         with self.assertRaises(ValueError):
@@ -165,6 +180,56 @@ class ToolWorkbenchTests(unittest.TestCase):
         self.assertEqual(result["error_code"], "ERR_UNEXPECTED_TOOL_CALL")
         self.assertEqual(result["llm_text_response"], "Trying an unrelated function.")
         self.assertEqual(result["tool_calls_detected"], [tool_call])
+
+    def test_dry_run_checks_the_call_without_running_the_tool(self):
+        source = "def add(left: int, right: int):\n    return left + right\n"
+        ollama = Mock()
+        ollama.chat.return_value = {"message": {"content": "", "tool_calls": [
+            {"function": {"name": "add", "arguments": {"left": "8", "right": "5"}}}]}}
+
+        with patch.dict(sys.modules, {"ollama": ollama}):
+            with patch.object(tool_workbench, "run_python_tool") as run_tool:
+                result = tool_workbench.test_with_llm(source, "test-model", "Add.", 5, execute=False)
+
+        run_tool.assert_not_called()
+        self.assertEqual(result["status"], "CALL_VALID")
+        self.assertEqual(result["function_input"], {"left": "8", "right": "5"})
+        self.assertEqual(result["origin"], "native")
+
+    def test_text_json_call_is_marked_with_its_origin(self):
+        source = "def add(left: str, right: str):\n    return left + right\n"
+        ollama = Mock()
+        ollama.chat.return_value = {"message": {
+            "content": '{"name": "add", "arguments": {"left": "8", "right": "5"}}', "tool_calls": []}}
+
+        with patch.dict(sys.modules, {"ollama": ollama}):
+            result = tool_workbench.test_with_llm(source, "test-model", "Add.", 5, execute=False)
+
+        self.assertEqual(result["status"], "CALL_VALID")
+        self.assertEqual(result["origin"], "text_json")
+
+    def test_misspelled_tool_name_gets_a_near_miss_hint(self):
+        source = "def ask_user_questions(json_data: str):\n    return json_data\n"
+        ollama = Mock()
+        ollama.chat.return_value = {"message": {"content": "", "tool_calls": [
+            {"function": {"name": "ask_user_question", "arguments": {"json_data": "{}"}}}]}}
+
+        with patch.dict(sys.modules, {"ollama": ollama}):
+            result = tool_workbench.test_with_llm(source, "test-model", "Ask.", 5, execute=False)
+
+        self.assertEqual(result["error_code"], "ERR_UNEXPECTED_TOOL_CALL")
+        self.assertIn("misspelling", result["message"])
+
+    def test_model_without_tool_support_is_reported_not_failed(self):
+        ollama = Mock()
+        ollama.chat.side_effect = RuntimeError("registry.ollama.ai/library/gemma: model does not support tools")
+
+        with patch.dict(sys.modules, {"ollama": ollama}):
+            result = tool_workbench.test_with_llm(
+                "def add(left: int):\n    return left\n", "no-tools-model", "Add.", 5)
+
+        self.assertEqual(result["status"], "UNSUPPORTED")
+        self.assertEqual(result["error_code"], "ERR_MODEL_NO_TOOL_SUPPORT")
 
     def test_missing_llm_arguments_are_rejected_before_execution(self):
         ollama = Mock()

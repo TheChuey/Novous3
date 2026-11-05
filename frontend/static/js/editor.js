@@ -56,6 +56,7 @@ export function renderEditorView(container, initialPath = null) {
         <div id="editor-monaco" class="editor-monaco"></div>
         <div class="editor-status">
           <span id="editor-pos">Ln 1, Col 1</span>
+          <span id="editor-tool-fit" class="small"></span>
           <span class="spacer"></span>
           <span id="editor-bytes">0 bytes</span>
         </div>
@@ -165,6 +166,7 @@ export function renderEditorView(container, initialPath = null) {
   const pathLabel = container.querySelector('#editor-path');
   const dirtyBadge = container.querySelector('#editor-dirty');
   const bytesLabel = container.querySelector('#editor-bytes');
+  const toolFitLabel = container.querySelector('#editor-tool-fit');
   const posLabel = container.querySelector('#editor-pos');
   const libraryList = container.querySelector('#editor-library-list');
   const libraryStatus = container.querySelector('#editor-library-status');
@@ -863,11 +865,29 @@ export function renderEditorView(container, initialPath = null) {
       workspaceTree.reload();
       if (!managedSave && targetPath.startsWith('library/')) loadPromptLibrary();
       if (!managedSave && targetPath.startsWith('subAgentLibrary/')) loadSubagentLibrary();
+      if (!managedSave && targetPath.startsWith('library/') && targetPath.endsWith('.md')) {
+        await showToolFit(targetPath);
+      }
     } catch (err) {
       saveError.textContent = `Save failed: ${err.message}`;
       saveError.classList.remove('hidden');
     } finally {
       saveConfirm.disabled = false;
+    }
+  }
+
+  // After saving an agent, say whether its tools fit the installed models.
+  async function showToolFit(path) {
+    const agentId = path.split('/').pop().replace(/\.md$/, '');
+    try {
+      const report = await Api.getAgentToolFit(agentId);
+      if (report.warnings.length) {
+        setStatus(toolFitLabel, report.warnings.join(' '), 'warning');
+      } else {
+        setStatus(toolFitLabel, 'All tools fit the installed models.', 'success');
+      }
+    } catch (err) {
+      setStatus(toolFitLabel, `Could not check tools: ${err.message}`, 'danger');
     }
   }
 

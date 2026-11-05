@@ -35,6 +35,10 @@ class ToolConflictError(RuntimeError):
     """Raised when promoting a tool whose name is already registered."""
 
 
+class ToolReadOnlyError(PermissionError):
+    """Raised when code edits target a built-in tool, which only promoted tools may change."""
+
+
 class WorkspaceFileTools:
     """File operations used by the agent tools, plus Docling-backed document reading."""
 
@@ -539,6 +543,92 @@ class ToolRegistryService:
 
         raise ToolNotFoundError(f"Custom tool '{name}' was not found.")
 
+    def update_tool(self, name: str, source: str) -> dict:
+        """Replace a promoted tool's function in promoted_tools.py and re-register it in place."""
+        if not self._FUNCTION_NAME.fullmatch(name):
+            raise ValueError("The tool name is not valid.")
+        if name not in self.list_promoted_tool_names():
+            raise ToolReadOnlyError(f"Tool '{name}' is built in; only custom tools can be edited.")
+
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            raise ValueError(f"Python syntax error: {exc}") from exc
+        fn_node = next(
+            (node for node in tree.body if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")),
+            None,
+        )
+        if fn_node is None:
+            raise ValueError("Define at least one public top-level function.")
+        if fn_node.name != name:
+            raise ValueError(f"The function must stay named '{name}'.")
+
+        previous_content = self.PROMOTED_MODULE_PATH.read_text(encoding="utf-8")
+        start, end, _ = self._function_span(previous_content, name)
+        block = self._decorated_source(source, fn_node)
+        lines = previous_content.splitlines(keepends=True)
+        self.PROMOTED_MODULE_PATH.write_text(
+            "".join(lines[:start]) + block + "".join(lines[end:]),
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        previous_meta = tool_catalog.registry.pop(name, None)
+        try:
+            promoted_module = sys.modules.get("tools.promoted_tools")
+            namespace = (
+                promoted_module.__dict__
+                if promoted_module is not None
+                else {"tool": tool_catalog.tool, "__name__": "tools.promoted_tools"}
+            )
+            exec(block, namespace)
+        except Exception as exc:
+            self.PROMOTED_MODULE_PATH.write_text(previous_content, encoding="utf-8", newline="\n")
+            if previous_meta is not None:
+                tool_catalog.registry[name] = previous_meta
+            raise ValueError(f"Failed to execute tool '{name}': {exc}") from exc
+
+        fn = tool_catalog.registry[name]["function"]
+        tool_catalog.registry[name]["custom"] = True
+        return {
+            "name": name,
+            "path": "tools/promoted_tools.py",
+            "description": ast.get_docstring(fn_node) or "",
+            "signature": str(inspect.signature(fn)),
+        }
+
+    def get_tool_details(self, name: str) -> dict:
+        """Source, docstring and the saved prompt wording for one tool, for the Tool Library editor."""
+        tool_catalog.load_tools()
+        meta = tool_catalog.registry.get(name)
+        if meta is None:
+            raise ToolNotFoundError(f"Tool '{name}' not found.")
+        source = self.get_tool_source(name)
+        docstring = " ".join(meta["description"]) if isinstance(meta["description"], list) else meta["description"]
+        return {
+            "name": name,
+            "provider": meta["provider"],
+            "signature": meta["signature"],
+            "custom": name in self.list_promoted_tool_names() or meta.get("custom", False),
+            "path": source["path"],
+            "source": source["source"],
+            "docstring": docstring,
+            "prompt_description": tool_catalog.prompt_overrides().get(name, ""),
+            "prompt_preview": tool_catalog.prompt_text(name) or docstring,
+        }
+
+    def set_prompt_description(self, name: str, text: str) -> dict:
+        """Save the LLM-facing wording for a tool and rewrite agents that already list it."""
+        if len(text) > 2000:
+            raise ValueError("The prompt description is longer than 2000 characters.")
+        tool_catalog.set_prompt_description(name, text)
+        return {
+            "name": name,
+            "prompt_description": tool_catalog.prompt_overrides().get(name, ""),
+            "prompt_preview": tool_catalog.prompt_text(name) or "",
+            "refreshed_agents": agent_library.refresh_tool_sections(name),
+        }
+
     def list_tools(self) -> list[dict]:
         """Return tool metadata with custom-tool flags."""
         tool_catalog.load_tools()
@@ -668,6 +758,14 @@ def write_agent_scratchpad(
             parsed_payload = json.loads(payload)
         except Exception:
             parsed_payload = payload
+
+    # An empty write used to report success with nothing stored; fail so the model retries.
+    if parsed_payload is None or (isinstance(parsed_payload, str) and not parsed_payload.strip()) \
+            or parsed_payload in ({}, []):
+        raise ValueError(
+            'payload is empty. Pass a JSON object with the results, for example '
+            '{"answers": {}, "summary": "..."}; use an empty answers object if none were given.'
+        )
 
     result = scratchpad.store_subagent_result(
         subagent_id=subagent_id,

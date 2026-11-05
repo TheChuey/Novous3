@@ -87,6 +87,10 @@ export const Api = {
     return get(`/api/agent-tools/${encodeURIComponent(kind)}/${encodeURIComponent(agentId)}`);
   },
 
+  async getAgentToolFit(agentId, environment = 'workspace') {
+    return get(`/api/agents/${encodeURIComponent(agentId)}/tool-fit?environment=${encodeURIComponent(environment)}`);
+  },
+
   async setAgentTools(kind, agentId, tools, mode = null, subagents = null) {
     return send('PUT', `/api/agent-tools/${encodeURIComponent(kind)}/${encodeURIComponent(agentId)}`, { tools, mode, subagents });
   },
@@ -334,6 +338,18 @@ export const Api = {
     return get('/api/tools/library');
   },
 
+  async getToolDetails(toolName) {
+    return get(`/api/tools/${encodeURIComponent(toolName)}/details`);
+  },
+
+  async updateTool(toolName, source) {
+    return send('PUT', `/api/tools/${encodeURIComponent(toolName)}`, { source });
+  },
+
+  async saveToolPrompt(toolName, promptDescription) {
+    return send('PUT', `/api/tools/${encodeURIComponent(toolName)}/prompt`, { prompt_description: promptDescription });
+  },
+
   async getWorkbenchTool(toolName) {
     return get(`/api/testing/tool-workbench/tools/${encodeURIComponent(toolName)}`);
   },
@@ -535,9 +551,10 @@ export const Api = {
     return send('POST', '/api/testing/tool-workbench/test-harness', { tool_code: toolCode });
   },
 
-  async testToolWithLlm(model, toolCode, userPrompt, timeoutSeconds = 5) {
+  async testToolWithLlm(model, toolCode, userPrompt, timeoutSeconds = 5, options = {}) {
     return send('POST', '/api/testing/tool-workbench/test-with-llm', {
-      model, tool_code: toolCode, user_prompt: userPrompt, timeout_seconds: timeoutSeconds
+      model, tool_code: toolCode, user_prompt: userPrompt, timeout_seconds: timeoutSeconds,
+      execute: options.execute ?? true, description: options.description ?? null
     });
   },
 

@@ -494,6 +494,7 @@ class TestToolsInterface(unittest.TestCase):
                 "search_knowledge_branch",
                 "list_knowledge_branch_documents",
                 "read_knowledge_branch_document",
+                "ask_user_window",  # promoted custom tool in tools/promoted_tools.py
             },
         )
         self.assertGreater(len(tool_catalog.list_tools()), len(names))

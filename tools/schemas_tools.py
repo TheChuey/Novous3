@@ -19,6 +19,14 @@ class RegisterToolRequest(BaseModel):
     name: str | None = None
 
 
+class UpdateToolRequest(BaseModel):
+    source: str = Field(..., min_length=1, max_length=50000)
+
+
+class ToolPromptRequest(BaseModel):
+    prompt_description: str = Field("", max_length=2000)
+
+
 class MapPageRequest(BaseModel):
     path: str
     max_depth: int = 3

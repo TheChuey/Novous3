@@ -42,3 +42,16 @@ stay small. The stored file is unchanged; only what the tool returns is bounded.
 Entry ids are derived from kind, timestamp and label, so existing files need no
 migration. `read_file` saves the full text here but returns only the first page, and
 tells the agent how to fetch the rest.
+
+## Sub-agent payloads (`write_agent_scratchpad`)
+
+- Each write is stored in `subagent_history` and becomes `latest_subagent_result`.
+- `payload` is a JSON object, passed as a string. Any keys are kept, for example
+  `{"answers": {...}, "summary": "..."}`.
+- An empty payload (blank text, `{}` or `[]`) is refused with an error, so a write
+  never reports success with nothing stored. An empty `answers` object with a
+  `summary` saying no answers were given is a valid record.
+- Read it back with `read_agent_scratchpad(memory_type="latest_subagent_result")`, or
+  with `item=<id>` for a full entry from the index.
+- The chat's scratchpad panel and its Markdown export show any payload keys, not just
+  the retrieval fields (`results`, `query`, `knowledge_branch_name`, `error`).

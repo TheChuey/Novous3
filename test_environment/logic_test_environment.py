@@ -3,6 +3,7 @@ allow-list for the sandbox terminal and script files, and the Tool Workbench tha
 tests, generates and promotes user-authored Python tools."""
 
 import ast
+import difflib
 import json
 import os
 import re
@@ -15,6 +16,9 @@ import textwrap
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+
+from core_engine.logic_core_engine import Agent, tool_catalog, wrap_flat_arguments
+from modelProfiles.logic_modelProfiles import model_profiles
 
 
 class PathNotAllowed(ValueError):
@@ -437,7 +441,9 @@ class ToolWorkbench:
                 return "object"
         return "string"
 
-    def get_tool_schema(self, function: ast.FunctionDef) -> dict:
+    def get_tool_schema(self, function: ast.FunctionDef, description: str | None = None) -> dict:
+        """The schema an agent would send for this function, built by the same code as the agent.
+        ``description`` overrides the wording; otherwise the saved wording is used, then the docstring."""
         positional_args = function.args.args
         positional_defaults = (
             [None] * (len(positional_args) - len(function.args.defaults))
@@ -445,31 +451,16 @@ class ToolWorkbench:
         )
         keyword_args = function.args.kwonlyargs
         keyword_defaults = function.args.kw_defaults
-        properties = {}
-        required = []
+        parameters = {}
         for argument, default in (
             list(zip(positional_args, positional_defaults))
             + list(zip(keyword_args, keyword_defaults))
         ):
-            properties[argument.arg] = {
-                "type": self._json_type(argument.annotation),
-                "description": f"Parameter {argument.arg}",
-            }
-            if default is None:
-                required.append(argument.arg)
-        return {
-            "type": "function",
-            "function": {
-                "name": function.name,
-                "description": ast.get_docstring(function) or function.name,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                    "additionalProperties": False,
-                },
-            },
-        }
+            parameters[argument.arg] = default is None
+        if description is None:
+            docstring = ast.get_docstring(function) or ""
+            description = tool_catalog.prompt_text(function.name) or (docstring.splitlines()[0] if docstring else "")
+        return Agent.tool_schema(function.name, description, parameters)
 
     def validate_arguments(self, function: ast.FunctionDef, arguments: dict) -> str | None:
         """Return an error message when arguments don't match the function signature."""
@@ -706,27 +697,72 @@ class ToolWorkbench:
 
         return tool_registry.remove_tool(name)
 
-    def test_with_llm(self, tool_code: str, model: str, user_prompt: str, timeout: float) -> dict:
-        """Let a model call the tool through its JSON schema, then run it with those arguments."""
+    def _text_tool_calls(self, content: str, tool_name: str) -> list[dict]:
+        """Read calls a model wrote as JSON text instead of native tool_calls, the way the chat engine does."""
+        text = (content or "").strip()
+        decoder = json.JSONDecoder()
+        calls = []
+        index = 0
+        while index < len(text):
+            if text[index] not in "[{":
+                index += 1
+                continue
+            try:
+                parsed, end = decoder.raw_decode(text, index)
+            except json.JSONDecodeError:
+                index += 1
+                continue
+            items = parsed if isinstance(parsed, list) else [parsed]
+            found = False
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                source = item.get("function") if isinstance(item.get("function"), dict) else item
+                if source.get("name") != tool_name:
+                    continue
+                arguments = source.get("arguments") or source.get("parameters") or source.get("args") or {}
+                calls.append({"function": {"name": tool_name, "arguments": arguments}})
+                found = True
+            index = end if found else index + 1
+        return calls
+
+    def test_with_llm(self, tool_code: str, model: str, user_prompt: str, timeout: float,
+                      execute: bool = True, description: str | None = None) -> dict:
+        """Let a model call the tool through the agent's schema, then run it with those arguments.
+        ``execute=False`` (dry run) stops after checking the call, so the tool never runs."""
         try:
             function = self.get_function_definition(self.strip_test_harness(tool_code))
-            schema = self.get_tool_schema(function)
+            schema = self.get_tool_schema(function, description)
         except ValueError:
             raise
 
+        # Use the same context size the agent would use with this model.
+        num_ctx = model_profiles.effective(model).get("num_ctx")
         try:
             import ollama
             response = ollama.chat(
                 model=model,
                 messages=[{"role": "user", "content": user_prompt}],
                 tools=[schema],
+                options={"num_ctx": num_ctx} if num_ctx else None,
             )
         except Exception as exc:
+            if "does not support tools" in str(exc).lower():
+                return {
+                    "status": "UNSUPPORTED",
+                    "error_code": "ERR_MODEL_NO_TOOL_SUPPORT",
+                    "message": f"{model} does not support tool calls, so it cannot be tested here.",
+                    "llm_text_response": "",
+                    "tool_calls_detected": [],
+                    "function_input": None,
+                    "tool_execution_result": None,
+                }
             raise ModelCallError(f"LLM tool-call request failed: {exc}") from exc
 
         message = response.get("message", {})
         tool_calls = message.get("tool_calls") or []
         llm_text_response = message.get("content", "")
+        origin = "native" if tool_calls else None
 
         def failure(code: str, text: str, arguments=None):
             return {
@@ -736,15 +772,24 @@ class ToolWorkbench:
                 "llm_text_response": llm_text_response,
                 "tool_calls_detected": tool_calls,
                 "function_input": arguments,
+                "origin": origin,
                 "tool_execution_result": None,
             }
 
+        if not tool_calls:
+            tool_calls = self._text_tool_calls(llm_text_response, function.name)
+            origin = "text_json" if tool_calls else None
         if not tool_calls:
             return failure("ERR_NO_TOOL_CALL", "The selected model did not return a tool call.")
 
         call = tool_calls[0].get("function", {})
         if call.get("name") != function.name:
-            return failure("ERR_UNEXPECTED_TOOL_CALL", "The model called an unexpected tool function.")
+            called = str(call.get("name") or "")
+            near = difflib.get_close_matches(called, [function.name], n=1, cutoff=0.8)
+            hint = (f" It looks like a misspelling of '{function.name}'; a shorter, simpler tool name "
+                    "is easier for models to repeat." if near else "")
+            return failure("ERR_UNEXPECTED_TOOL_CALL",
+                           f"The model called '{called}' instead of '{function.name}'.{hint}")
         arguments = call.get("arguments", {})
         if isinstance(arguments, str):
             try:
@@ -753,9 +798,23 @@ class ToolWorkbench:
                 return failure("ERR_INVALID_TOOL_ARGUMENTS", "The model returned invalid JSON tool arguments.")
         if not isinstance(arguments, dict):
             return failure("ERR_INVALID_TOOL_ARGUMENTS", "The model's tool arguments must be a JSON object.")
+        parameters = schema["function"]["parameters"]
+        arguments = wrap_flat_arguments(list(parameters["properties"]), parameters["required"], arguments)
         problem = self.validate_arguments(function, arguments)
         if problem:
             return failure("ERR_INVALID_TOOL_ARGUMENTS", problem, arguments)
+
+        if not execute:
+            return {
+                "status": "CALL_VALID",
+                "error_code": None,
+                "message": "The model made a valid call. The tool was not run (dry run).",
+                "llm_text_response": llm_text_response,
+                "tool_calls_detected": tool_calls,
+                "function_input": arguments,
+                "origin": origin,
+                "tool_execution_result": None,
+            }
 
         execution = self.run_python_tool(self.strip_test_harness(tool_code), arguments, timeout=timeout)
         return {
@@ -764,6 +823,7 @@ class ToolWorkbench:
             "llm_text_response": llm_text_response,
             "tool_calls_detected": tool_calls,
             "function_input": arguments,
+            "origin": origin,
             "tool_execution_result": execution,
         }
 

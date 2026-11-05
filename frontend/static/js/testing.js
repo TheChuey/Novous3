@@ -58,6 +58,11 @@ function renderToolWorkbench(container, toolPayload = null) {
       </div>
       <h4 class="tool-workbench-stage mt-3">Stage 2: Ask LLM to Use Function</h4>
       <div class="tool-workbench-grid">
+        <div class="tool-workbench-field tool-workbench-wide">
+          <span>Models to test</span>
+          <div id="tw-llm-models" class="tw-model-checks text-muted small">Loading models…</div>
+          <label class="small"><input type="checkbox" id="tw-llm-dry"> Check the call only (don't run the tool)</label>
+        </div>
         <label class="tool-workbench-field">
           <span>Natural Language Request</span>
           <textarea id="tw-prompt" class="form-input" rows="5"></textarea>
@@ -71,6 +76,7 @@ function renderToolWorkbench(container, toolPayload = null) {
       <div class="tool-workbench-actions">
         <button type="button" class="btn btn-primary" id="tw-run-llm">Ask LLM to Use Tool</button>
       </div>
+      <div id="tw-llm-matrix" class="tw-llm-matrix" hidden></div>
       <h4 class="tool-workbench-stage mt-3">Stage 3 &amp; 4: Execution &amp; Test Results</h4>
       <div class="tool-workbench-actions">
         <button type="button" class="btn" id="tw-run">Direct Python Test</button>
@@ -116,10 +122,28 @@ function renderToolWorkbench(container, toolPayload = null) {
           </div>
         </div>
         <div class="code-editor">
-          <div class="code-editor-bar"><span class="code-editor-file" id="tw-tool-dialog-file"></span></div>
+          <div class="code-editor-bar">
+            <span class="code-editor-file" id="tw-tool-dialog-file"></span>
+            <button type="button" class="btn btn-sm" id="tw-tool-dialog-edit">Edit code</button>
+            <button type="button" class="btn btn-sm btn-primary hidden" id="tw-tool-dialog-save-code">Save code</button>
+            <button type="button" class="btn btn-sm hidden" id="tw-tool-dialog-cancel-code">Cancel</button>
+          </div>
           <div class="code-view" id="tw-tool-dialog-code" tabindex="0" aria-label="Tool function source"></div>
+          <textarea id="tw-tool-dialog-editor" class="tool-workbench-editor tool-dialog-editor hidden" spellcheck="false" aria-label="Edit tool function source"></textarea>
         </div>
-        <p class="text-muted small">Built-in tools that rely on module-level imports or objects may fail on Direct Python Test, but Stage 2 (asking the LLM to use the tool) works for every tool.</p>
+        <p class="text-muted small">Built-in tools that rely on module-level imports or objects may fail on Direct Python Test, but Stage 2 (asking the LLM to use the tool) works for every tool. Built-in code is read-only; only the prompt description below can be changed for them.</p>
+        <section class="tool-prompt-pane" aria-labelledby="tw-tool-prompt-title">
+          <h3 id="tw-tool-prompt-title">Prompt description</h3>
+          <p class="text-muted small">This wording is added to agent prompts and to the function schema the LLM sees when the tool is attached. Keep the docstring in the code describing how the tool works; use this to say when and how an agent should call it. Leave it empty to use the docstring.</p>
+          <textarea id="tw-tool-prompt" class="form-input tool-prompt-input" rows="3" maxlength="2000" aria-label="Prompt description"></textarea>
+          <div class="text-muted small">Text injected into prompts</div>
+          <pre id="tw-tool-prompt-preview" class="tool-workbench-output"></pre>
+          <div class="tool-prompt-actions">
+            <button type="button" class="btn btn-sm" id="tw-tool-prompt-reset">Reset to docstring</button>
+            <button type="button" class="btn btn-sm btn-primary" id="tw-tool-prompt-save">Save prompt description</button>
+            <span id="tw-tool-dialog-msg" class="small" aria-live="polite"></span>
+          </div>
+        </section>
       </dialog>
     </section>`);
 
@@ -136,6 +160,12 @@ function renderToolWorkbench(container, toolPayload = null) {
   const output = container.querySelector('#tw-output');
   const llmResponseSection = container.querySelector('#tw-llm-response-section');
   const llmResponse = container.querySelector('#tw-llm-response');
+  const llmModelList = container.querySelector('#tw-llm-models');
+  const dryRunBox = container.querySelector('#tw-llm-dry');
+  const llmMatrix = container.querySelector('#tw-llm-matrix');
+  let llmRows = [];
+  let llmContext = null;
+  let selectedRow = -1;
   const status = container.querySelector('#tw-status');
   const timeoutSelect = container.querySelector('#tw-timeout');
   const timeoutSeconds = () => Number(timeoutSelect.value) || 5;
@@ -255,22 +285,123 @@ function renderToolWorkbench(container, toolPayload = null) {
 
   const toolDialog = container.querySelector('#tw-tool-dialog');
   let viewedTool = null;
+  let viewedDetails = null;
+  const dialogEditButton = container.querySelector('#tw-tool-dialog-edit');
+  const dialogSaveCodeButton = container.querySelector('#tw-tool-dialog-save-code');
+  const dialogCancelCodeButton = container.querySelector('#tw-tool-dialog-cancel-code');
+  const dialogCodeView = container.querySelector('#tw-tool-dialog-code');
+  const dialogEditor = container.querySelector('#tw-tool-dialog-editor');
+  const toolPromptField = container.querySelector('#tw-tool-prompt');
+  const promptPreview = container.querySelector('#tw-tool-prompt-preview');
+  const dialogMessage = container.querySelector('#tw-tool-dialog-msg');
+  enableTabIndent(dialogEditor);
+
+  function setDialogMessage(text, cls = 'text-muted small') {
+    dialogMessage.textContent = text;
+    dialogMessage.className = cls;
+  }
+  function previewPrompt(text) {
+    const details = viewedDetails;
+    if (!details) return;
+    const wording = text.trim().replace(/\s+/g, ' ') || details.docstring;
+    promptPreview.textContent = [
+      `### ${details.name}`,
+      `- Provider: ${details.provider}`,
+      `- Signature: ${details.signature}`,
+      wording,
+    ].filter(Boolean).join('\n');
+  }
+  function setCodeEditing(editing) {
+    dialogEditor.classList.toggle('hidden', !editing);
+    dialogCodeView.classList.toggle('hidden', editing);
+    dialogEditButton.classList.toggle('hidden', editing);
+    dialogSaveCodeButton.classList.toggle('hidden', !editing);
+    dialogCancelCodeButton.classList.toggle('hidden', !editing);
+  }
   async function openToolDialog(name) {
     try {
-      const tool = await Api.getWorkbenchTool(name);
-      const meta = libraryTools.find(item => item.name === name);
+      const [tool, details] = await Promise.all([
+        Api.getWorkbenchTool(name),
+        Api.getToolDetails(name),
+      ]);
       viewedTool = tool;
-      container.querySelector('#tw-tool-dialog-title').textContent = tool.name;
+      viewedDetails = details;
+      container.querySelector('#tw-tool-dialog-title').textContent = details.name;
       container.querySelector('#tw-tool-dialog-meta').textContent =
-        `${tool.path}${meta?.signature ? ` · ${tool.name}${meta.signature}` : ''}`;
-      container.querySelector('#tw-tool-dialog-file').textContent = tool.path;
-      container.querySelector('#tw-tool-dialog-code').innerHTML = renderLines(tool.source.replace(/\r\n?/g, '\n'));
+        `${details.path} · ${details.name}${details.signature}${details.custom ? '' : ' · built in'}`;
+      container.querySelector('#tw-tool-dialog-file').textContent = details.path;
+      dialogCodeView.innerHTML = renderLines(details.source.replace(/\r\n?/g, '\n'));
+      dialogEditor.value = details.source;
+      setCodeEditing(false);
+      dialogEditButton.disabled = !details.custom;
+      dialogEditButton.title = details.custom ? '' : 'Built-in tools are read-only';
+      toolPromptField.value = details.prompt_description;
+      previewPrompt(details.prompt_description);
+      setDialogMessage('');
       toolDialog.showModal();
     } catch (err) {
       status.textContent = `Could not open tool: ${err.message}`;
       status.className = 'text-danger small';
     }
   }
+  async function saveToolCode() {
+    const name = viewedDetails.name;
+    dialogSaveCodeButton.disabled = true;
+    try {
+      await Api.updateTool(name, dialogEditor.value);
+      [viewedTool, viewedDetails] = await Promise.all([
+        Api.getWorkbenchTool(name),
+        Api.getToolDetails(name),
+      ]);
+      dialogCodeView.innerHTML = renderLines(viewedDetails.source.replace(/\r\n?/g, '\n'));
+      dialogEditor.value = viewedDetails.source;
+      container.querySelector('#tw-tool-dialog-meta').textContent =
+        `${viewedDetails.path} · ${viewedDetails.name}${viewedDetails.signature}`;
+      setCodeEditing(false);
+      setDialogMessage(`Saved ${name} to ${viewedDetails.path}.`, 'text-success small');
+      await loadToolLibrary();
+      container.dispatchEvent(new CustomEvent('novous:tool-promoted', {
+        bubbles: true, detail: { name }
+      }));
+    } catch (err) {
+      setDialogMessage(`Could not save code: ${err.message}`, 'text-danger small');
+    } finally {
+      dialogSaveCodeButton.disabled = false;
+    }
+  }
+  async function savePromptDescription(text) {
+    const name = viewedDetails.name;
+    try {
+      const saved = await Api.saveToolPrompt(name, text);
+      viewedDetails.prompt_description = saved.prompt_description;
+      toolPromptField.value = saved.prompt_description;
+      previewPrompt(saved.prompt_description);
+      const count = saved.refreshed_agents.length;
+      setDialogMessage(
+        `Saved. Updated ${count} agent prompt${count === 1 ? '' : 's'} that use ${name}.`,
+        'text-success small'
+      );
+    } catch (err) {
+      setDialogMessage(`Could not save prompt description: ${err.message}`, 'text-danger small');
+    }
+  }
+  dialogEditButton.addEventListener('click', () => {
+    dialogEditor.value = viewedDetails.source;
+    setCodeEditing(true);
+    dialogEditor.focus();
+  });
+  dialogCancelCodeButton.addEventListener('click', () => {
+    dialogEditor.value = viewedDetails.source;
+    setCodeEditing(false);
+    setDialogMessage('');
+  });
+  dialogSaveCodeButton.addEventListener('click', saveToolCode);
+  toolPromptField.addEventListener('input', () => previewPrompt(toolPromptField.value));
+  container.querySelector('#tw-tool-prompt-save').addEventListener('click', () => savePromptDescription(toolPromptField.value));
+  container.querySelector('#tw-tool-prompt-reset').addEventListener('click', () => {
+    toolPromptField.value = '';
+    savePromptDescription('');
+  });
   function useTool(tool) {
     if (codeField.value.trim() && !confirm(`Replace the current Python Function Code with ${tool.name}?`)) {
       return false;
@@ -445,12 +576,25 @@ function renderToolWorkbench(container, toolPayload = null) {
   }
 
   function showResult(result, reportContext) {
-    renderOutput(result);
+    const notRun = {
+      CALL_VALID: 'Dry run: the model made a valid call. The tool was not run.',
+      UNSUPPORTED: 'This model cannot use tools, so it was not tested.',
+    }[result.status];
+    if (notRun) {
+      output.textContent = result.message || notRun;
+    } else {
+      renderOutput(result);
+    }
     lastTestReport = createTestReport(result, reportContext);
     saveButton.disabled = false;
     const passed = result.status === 'SUCCESS';
-    status.textContent = passed ? 'Test passed' : 'Test failed';
-    status.className = passed ? 'text-success small' : 'text-danger small';
+    if (notRun) {
+      status.textContent = notRun;
+      status.className = 'text-muted small';
+    } else {
+      status.textContent = passed ? 'Test passed' : 'Test failed';
+      status.className = passed ? 'text-success small' : 'text-danger small';
+    }
     lastPassed = passed
       ? { code: codeField.value, input: inputField.value }
       : null;
@@ -472,6 +616,109 @@ function renderToolWorkbench(container, toolPayload = null) {
     llmResponseSection.hidden = false;
   }
 
+  function selectedLlmModels() {
+    return Array.from(llmModelList.querySelectorAll('input[type="checkbox"]:checked')).map(box => box.value);
+  }
+
+  // Installed chat models with tool support; models without it are shown but cannot be ticked.
+  async function loadLlmModels(preferred) {
+    llmModelList.textContent = 'Loading models…';
+    try {
+      const data = await Api.getModelProfiles();
+      const models = (data.models || []).map(item => ({
+        name: item.model,
+        supportsTools: !item.capabilities?.length || item.capabilities.includes('tools'),
+      }));
+      if (!models.length) {
+        llmModelList.textContent = data.error || 'No chat models installed.';
+        return;
+      }
+      const defaultModel = models.find(item => item.supportsTools && item.name === preferred)
+        || models.find(item => item.supportsTools);
+      llmModelList.innerHTML = models.map(item => `
+        <label class="tw-model-check${item.supportsTools ? '' : ' text-muted'}">
+          <input type="checkbox" value="${esc(item.name)}"
+                 ${item.supportsTools && item.name === defaultModel?.name ? 'checked' : ''}
+                 ${item.supportsTools ? '' : 'disabled'}>
+          <span>${esc(item.name)}</span>${item.supportsTools ? '' : ' <em>(no tool support)</em>'}
+        </label>`).join('');
+    } catch (err) {
+      llmModelList.textContent = `Could not load models: ${err.message}`;
+    }
+  }
+
+  // Ask each selected model in turn (Ollama loads one model at a time); one failing model
+  // does not stop the others.
+  async function collectLlmRows(models) {
+    const rows = [];
+    for (const [index, model] of models.entries()) {
+      status.textContent = `Asking ${model} (${index + 1} of ${models.length})…`;
+      status.className = 'text-muted small';
+      try {
+        const result = await Api.testToolWithLlm(model, codeField.value, promptField.value, timeoutSeconds(), {
+          execute: !dryRunBox.checked,
+        });
+        rows.push({ model, result });
+      } catch (err) {
+        rows.push({
+          model,
+          result: {
+            status: 'ERROR', error_code: 'ERR_TOOL_TEST_FAILED', message: err.message,
+            function_input: null, tool_calls_detected: [], llm_text_response: '',
+          },
+        });
+      }
+    }
+    return rows;
+  }
+
+  function llmArguments(result) {
+    if (result.function_input != null) return result.function_input;
+    const rawArgs = result.tool_calls_detected?.[0]?.function?.arguments;
+    return rawArgs && typeof rawArgs === 'object' ? rawArgs : null;
+  }
+
+  // Show one model's answer in the panels, the same way a single LLM test always did.
+  function applyLlmRow(index) {
+    const row = llmRows[index];
+    selectedRow = index;
+    showLlmResponse(row.result);
+    const extracted = llmArguments(row.result);
+    inputField.value = extracted != null ? JSON.stringify(extracted, null, 2) : '';
+    showResult(row.result, { ...llmContext, model_used: row.model, function_input: extracted });
+    renderLlmMatrix();
+    return row.result;
+  }
+
+  function renderLlmMatrix() {
+    llmMatrix.hidden = !llmRows.length;
+    if (!llmRows.length) return;
+    const outcome = result => ({
+      SUCCESS: '✓ ran',
+      CALL_VALID: '✓ valid call',
+      UNSUPPORTED: 'no tool support',
+    }[result.status] || `✗ ${result.error_code || result.status}`);
+    llmMatrix.innerHTML = `
+      <table class="tw-llm-table">
+        <thead><tr><th>Model</th><th>Result</th><th>Call</th><th>Arguments</th></tr></thead>
+        <tbody>${llmRows.map((row, index) => {
+          const args = llmArguments(row.result);
+          return `<tr data-row="${index}" tabindex="0" class="${index === selectedRow ? 'is-selected' : ''}">
+            <td>${esc(row.model)}</td>
+            <td>${esc(outcome(row.result))}</td>
+            <td>${esc(row.result.origin || '—')}</td>
+            <td><code>${esc(args == null ? '' : JSON.stringify(args).slice(0, 120))}</code></td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+      <p class="text-muted small">Click a row to see that model's answer and arguments.</p>`;
+  }
+
+  llmMatrix.addEventListener('click', event => {
+    const row = event.target.closest('tr[data-row]');
+    if (row && !busy) applyLlmRow(Number(row.dataset.row));
+  });
+
   async function loadModels() {
     modelSelect.replaceChildren(new Option('Loading models…', ''));
     try {
@@ -484,6 +731,7 @@ function renderToolWorkbench(container, toolPayload = null) {
       }
       models.forEach(model => modelSelect.appendChild(new Option(model, model)));
       modelSelect.value = models.includes(data.default) ? data.default : models[0];
+      await loadLlmModels(modelSelect.value);
     } catch (err) {
       modelSelect.replaceChildren(new Option(`Could not load models: ${err.message}`, ''));
     }
@@ -498,7 +746,7 @@ function renderToolWorkbench(container, toolPayload = null) {
           <div class="tool-workbench-library-item">
             <code>${esc(tool.name)}</code>
             <span>${esc(tool.signature)}</span>
-            <button type="button" class="btn btn-sm" data-tool-view="${esc(tool.name)}">View</button>
+            <button type="button" class="btn btn-sm" data-tool-view="${esc(tool.name)}">${tool.custom ? 'Edit' : 'View'}</button>
             ${tool.custom ? `
               <button type="button" class="btn btn-sm" data-tool-load="${esc(tool.name)}">Load</button>
               <button type="button" class="btn btn-sm" data-tool-delete="${esc(tool.name)}">Remove</button>
@@ -539,8 +787,9 @@ function renderToolWorkbench(container, toolPayload = null) {
       status.className = 'text-danger small';
       return;
     }
-    if (useLlm && !modelSelect.value) {
-      status.textContent = 'Select an installed model first.';
+    const llmModels = useLlm ? selectedLlmModels() : [];
+    if (useLlm && !llmModels.length) {
+      status.textContent = 'Select at least one installed model to test.';
       status.className = 'text-danger small';
       return;
     }
@@ -555,7 +804,7 @@ function renderToolWorkbench(container, toolPayload = null) {
     }
     const reportContext = {
       execution_mode: useLlm ? 'local-llm-tool-call' : 'local-python',
-      model_used: useLlm ? modelSelect.value : null,
+      model_used: useLlm ? llmModels.join(', ') : null,
       function_code: codeField.value,
       function_input: useLlm ? null : reportInput,
       prompt: useLlm ? promptField.value : ''
@@ -572,27 +821,20 @@ function renderToolWorkbench(container, toolPayload = null) {
     llmResponse.textContent = '';
     let needsInstallCheck = '';
     try {
-      const result = useLlm
-        ? await Api.testToolWithLlm(modelSelect.value, codeField.value, promptField.value, timeoutSeconds())
-        : await Api.executeToolTest(codeField.value, functionInput, timeoutSeconds());
+      let result;
       if (useLlm) {
-        showLlmResponse(result);
-        let extracted = result.function_input;
-        if (extracted == null) {
-          const rawArgs = result.tool_calls_detected?.[0]?.function?.arguments;
-          if (rawArgs && typeof rawArgs === 'object') extracted = rawArgs;
-        }
-        if (extracted != null) {
-          inputField.value = JSON.stringify(extracted, null, 2);
-          reportContext.function_input = extracted;
-        } else {
-          inputField.value = '';
-          status.textContent = result.message || 'The model did not return tool arguments.';
-        }
+        llmContext = reportContext;
+        selectedRow = -1;
+        llmRows = await collectLlmRows(llmModels);
+        const firstPassing = llmRows.findIndex(row => row.result.status === 'SUCCESS' || row.result.status === 'CALL_VALID');
+        result = applyLlmRow(firstPassing === -1 ? 0 : firstPassing);
+      } else {
+        result = await Api.executeToolTest(codeField.value, functionInput, timeoutSeconds());
+        showResult(result, reportContext);
       }
-      showResult(result, reportContext);
       const execution = result.tool_execution_result || result;
-      needsInstallCheck = result.status !== 'SUCCESS'
+      const ran = !['SUCCESS', 'CALL_VALID', 'UNSUPPORTED'].includes(result.status);
+      needsInstallCheck = ran
         ? `${execution.stderr || ''}\n${execution.stdout || ''}\n${result.message || ''}`
         : '';
     } catch (err) {

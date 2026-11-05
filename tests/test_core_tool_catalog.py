@@ -50,7 +50,7 @@ class TestToolCatalog(unittest.TestCase):
         }
         for exp in expected:
             self.assertIn(exp, names)
-        self.assertEqual(len(tools), 28)
+        self.assertEqual(len(tools), 29)  # core built-ins plus promoted custom tools
 
     def test_tools_directory_contains_only_the_soc_modules_and_promoted_module(self):
         # allowed_paths.json is private local configuration and may be absent.

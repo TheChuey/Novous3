@@ -31,6 +31,7 @@ body {
 .text-muted { color: var(--text-muted); }
 .text-danger { color: var(--danger); }
 .text-success { color: var(--success); }
+.text-warning { color: var(--warning); }
 .small { font-size: 0.82rem; }
 .mt-2 { margin-top: 0.5rem; }
 .mt-3 { margin-top: 1rem; }
@@ -1086,6 +1087,19 @@ body.is-resizing { cursor: col-resize; user-select: none; }
 .tool-workbench-library-item span { color: var(--text-muted); overflow-wrap: anywhere; }
 .tool-workbench-dialog .root-management-actions { flex-wrap: wrap; justify-content: flex-end; }
 .tool-workbench-dialog .code-view { max-height: 55vh; overflow: auto; }
+.tool-dialog-editor { min-height: 40vh; }
+.tool-prompt-pane { display: grid; gap: 0.5rem; margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid var(--border-color); }
+.tool-prompt-pane h3 { margin: 0; }
+.tool-prompt-input { width: 100%; resize: vertical; }
+.tool-prompt-pane .tool-workbench-output { max-height: 12rem; overflow: auto; margin: 0; }
+.tool-prompt-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.tw-model-checks { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; margin: 0.3rem 0; }
+.tw-model-check { display: inline-flex; align-items: center; gap: 0.3rem; }
+.tw-llm-matrix { margin-top: 0.8rem; overflow-x: auto; }
+.tw-llm-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.tw-llm-table th, .tw-llm-table td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--border-color); text-align: left; }
+.tw-llm-table tr[data-row] { cursor: pointer; }
+.tw-llm-table tr.is-selected { background: var(--bg-elev); }
 
 /* Context window: header chip, usage bar, forecast, and per-message rows */
 .ctx-chip {

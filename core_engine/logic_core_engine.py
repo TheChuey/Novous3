@@ -40,6 +40,16 @@ PINNED_TOOLS = {"rag-presenter": ("call_subagent", "read_agent_scratchpad")}
 _CURRENT_AGENT_ID: ContextVar[str] = ContextVar("current_agent_id", default="")
 
 
+def wrap_flat_arguments(parameters: list[str], required: list[str], args: Any) -> Any:
+    """Small models often send a tool's values flat ({"name": ...}) instead of wrapping them under
+    the one required parameter ({"json_data": {...}}). Wrap them when that is the only option."""
+    if not isinstance(args, dict) or len(required) != 1 or not args:
+        return args
+    if required[0] in args or set(args) & set(parameters):
+        return args
+    return {required[0]: args}
+
+
 def current_agent_id() -> str:
     return _CURRENT_AGENT_ID.get()
 
@@ -298,7 +308,11 @@ class AgentLibrary:
             boundaries=sections.get("boundaries", ""),
             model=str(meta.get("model") or ""),
             tools=list(meta.get("tools") or []),
-            extras={**sections, **({"max_tool_rounds": meta["max_tool_rounds"]} if "max_tool_rounds" in meta else {})},
+            extras={
+                **sections,
+                **({"max_tool_rounds": meta["max_tool_rounds"]} if "max_tool_rounds" in meta else {}),
+                **({"pinned_tools": [str(tool) for tool in meta["pinned_tools"]]} if meta.get("pinned_tools") else {}),
+            },
         )
 
         prompt_parts = [
@@ -479,7 +493,7 @@ class AgentLibrary:
             if meta is None:
                 entries.append([f"### {name}", "- Not registered in the tool catalog"])
                 continue
-            description = meta.get("description") or ""
+            description = tool_catalog.prompt_text(name) or meta.get("description") or ""
             if isinstance(description, list):
                 description = " ".join(description)
             entry = [f"### {name}", f"- Provider: {meta['provider']}", f"- Signature: {meta['signature']}"]
@@ -596,6 +610,33 @@ class AgentLibrary:
             cleaned.append({"id": subagent_id, "usage": usage})
         return cleaned
 
+    def refresh_tool_sections(self, tool_name: str) -> list[str]:
+        """Re-render only the '## Available Tools' section of every prompt and sub-agent that
+        uses ``tool_name``, so a saved prompt description reaches them. The tools list, mode
+        and sub-agent section are left as they are."""
+        targets = [("prompt", path.stem) for path in sorted(self.LIBRARY_ROOT.glob("*.md"))]
+        if self.SUBAGENT_LIBRARY_ROOT.is_dir():
+            targets += [("subagent", path.stem) for path in sorted(self.SUBAGENT_LIBRARY_ROOT.glob("*.yaml"))]
+        refreshed = []
+        for kind, agent_id in targets:
+            try:
+                tools = self.get_agent_tools(kind, agent_id)["tools"]
+                if tool_name not in tools:
+                    continue
+                path = self._definition_file(kind, agent_id)
+                text = path.read_text(encoding="utf-8")
+                prefix, body, layout = self._split_prompt_body(kind, text.splitlines())
+            except (OSError, ValueError, yaml.YAMLError):
+                continue
+            if body is None:
+                continue
+            newline = "\r\n" if "\r\n" in text else "\n"
+            body = self._apply_section(body, self.TOOLS_HEADING_PATTERN, self._render_tools_section(tools))
+            lines = self._join_prompt_body(prefix, body, layout)
+            path.write_text(newline.join(lines) + (newline if text.endswith(("\n", "\r")) else ""), encoding="utf-8", newline="")
+            refreshed.append(agent_id)
+        return refreshed
+
     def set_agent_tools(self, kind: str, agent_id: str, tools: list[str], mode: str | None = None,
                         subagents: list[dict] | None = None) -> dict:
         """Rewrite the ``tools`` (and optionally ``mode``) keys plus the prompt's generated
@@ -681,6 +722,8 @@ class Agent:
         # Context budget, set from the model profile by ChatService; usage measured from Ollama.
         self.num_ctx = MAX_NUM_CTX
         self.tools_available = len(self.tools)
+        self.tools_dropped: List[str] = []
+        self.tools_missing: List[str] = []
         self.calibration = 1.0
         self.last_usage: dict | None = None
         self.usage_totals = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
@@ -708,10 +751,15 @@ class Agent:
             flags.append("rounds_exhausted")
         if model_error:
             flags.append("model_error")
+        # Tools cut by this model's cap, or listed but not registered, cannot be called.
+        if self.tools_dropped:
+            flags.append("tools_dropped")
+        if self.tools_missing:
+            flags.append("tools_missing")
 
         if window_level == "crit" or rounds_exhausted or model_error:
             level = "crit"
-        elif window_level == "warn" or tool_failures:
+        elif window_level == "warn" or tool_failures or self.tools_dropped or self.tools_missing:
             level = "warn"
         else:
             level = "ok"
@@ -719,6 +767,8 @@ class Agent:
             "model": self.model,
             "num_ctx": self.num_ctx,
             "tools_active": len(self.tools),
+            "tools_dropped": list(self.tools_dropped),
+            "tools_missing": list(self.tools_missing),
             "tools_total": self.tools_available,
             "llm_calls": self.llm_calls,
             "prompt_tokens_last": (self.last_usage or {}).get("prompt_tokens"),
@@ -947,6 +997,12 @@ class Agent:
         except json.JSONDecodeError as exc:
             message = f"Arguments are not valid JSON: {exc}"
             return fail("bad_arguments", message, f"Error executing tool '{name}': {message}", args)
+        signature = inspect.signature(tool_func)
+        args = wrap_flat_arguments(
+            list(signature.parameters),
+            [p for p, v in signature.parameters.items() if v.default is inspect.Parameter.empty],
+            args,
+        )
         bind_error = self._bind_error(tool_func, args)
         if bind_error:
             return fail("bad_arguments", bind_error, f"Error executing tool '{name}': {bind_error}", args)
@@ -1093,30 +1149,43 @@ class Agent:
 
         yield {"type": "done", "reply": final_text}
 
-    def _ollama_schema(self, func: Callable) -> dict:
-        sig = inspect.signature(func)
-        doc = inspect.getdoc(func) or ""
-        properties = {}
-        required = []
-        for param_name, param in sig.parameters.items():
-            properties[param_name] = {
-                "type": "string",
-                "description": self.PARAMETER_DESCRIPTIONS.get(param_name, f"Parameter {param_name}"),
-            }
-            if param.default == inspect.Parameter.empty:
-                required.append(param_name)
+    @classmethod
+    def tool_schema(cls, name: str, description: str, parameters: dict[str, bool]) -> dict:
+        """The function schema sent to the model. ``parameters`` maps each name to whether it is
+        required. Every parameter is a string, as the agent sends them; the Tool Workbench uses
+        this same builder so its tests see what a real agent sees."""
         return {
             "type": "function",
             "function": {
-                "name": getattr(func, "name", None) or func.__name__,
-                "description": doc.splitlines()[0] if doc else "",
+                "name": name,
+                "description": description,
                 "parameters": {
                     "type": "object",
-                    "properties": properties,
-                    "required": required
-                }
-            }
+                    "properties": {
+                        param: {
+                            "type": "string",
+                            "description": cls.PARAMETER_DESCRIPTIONS.get(param, f"Parameter {param}"),
+                        }
+                        for param in parameters
+                    },
+                    "required": [param for param, required in parameters.items() if required],
+                },
+            },
         }
+
+    def _ollama_schema(self, func: Callable) -> dict:
+        sig = inspect.signature(func)
+        doc = inspect.getdoc(func) or ""
+        name = getattr(func, "name", None) or func.__name__
+        parameters = {
+            param_name: param.default == inspect.Parameter.empty
+            for param_name, param in sig.parameters.items()
+        }
+        return self.tool_schema(
+            name,
+            tool_catalog.prompt_text(name) or (doc.splitlines()[0] if doc else ""),
+            parameters,
+        )
 
 
 # --- Tool catalog --------------------------------------------------------------------
@@ -1133,6 +1202,38 @@ class ToolCatalog:
     TOOLS_DIR = REPO_ROOT / "tools"
     FIRST_PARTY_MODULES = ("tools.logic_tools",)
     NON_PLUGIN_FILES = {"__init__.py", "interface_tools.py", "schemas_tools.py", "logic_tools.py"}
+    PROMPT_DESCRIPTIONS_PATH = TOOLS_DIR / "data" / "tool_prompts.json"
+    _prompt_lock = threading.Lock()
+
+    def prompt_overrides(self) -> dict[str, str]:
+        """Return the saved prompt descriptions, keyed by tool name (empty when none saved)."""
+        try:
+            data = json.loads(self.PROMPT_DESCRIPTIONS_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return {str(name): str(text) for name, text in data.items() if str(text).strip()} if isinstance(data, dict) else {}
+
+    def prompt_text(self, name: str) -> str | None:
+        """Prompt wording for a tool as the LLM sees it (one line), or None to use the docstring."""
+        text = self.prompt_overrides().get(name, "")
+        cleaned = " ".join(text.split())
+        return cleaned or None
+
+    def set_prompt_description(self, name: str, text: str) -> None:
+        """Save (or, when blank, clear) the prompt wording for a registered tool."""
+        self.load_tools()
+        if name not in self.registry:
+            raise ValueError(f"Tool '{name}' is not registered.")
+        with self._prompt_lock:
+            data = self.prompt_overrides()
+            if text.strip():
+                data[name] = text.strip()
+            else:
+                data.pop(name, None)
+            self.PROMPT_DESCRIPTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = self.PROMPT_DESCRIPTIONS_PATH.with_suffix(".tmp")
+            temp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            temp_path.replace(self.PROMPT_DESCRIPTIONS_PATH)
     PROVIDER_BINDINGS = {
         "core_engine": "core_engine.interface_core_engine",
         "editor": "editor.interface_editor",
@@ -1432,23 +1533,36 @@ def apply_model_limits(agent: Agent, profile: AgentProfile, model: str, pinned: 
     """Set an agent's model, context size and tool cap from its model profile.
 
     When the cap is smaller than the tool list, the pinned tools are always kept and the rest
-    fill the remaining places in the list's own order. History is left untouched.
+    fill the remaining places in the list's own order. The agent's own ``pinned_tools`` are kept
+    too. Tools cut by the cap, and tools listed but not registered, are recorded on the agent so
+    the run reports them as flags instead of failing silently. History is left untouched.
     """
     limits = model_profiles.effective(model)
+    pinned = (*pinned, *(profile.extras.get("pinned_tools") or ()))
     available = tool_catalog.get_tools(profile.tools) if profile.mode == "agent" else []
     total = len(available)
+    registered = {getattr(f, "name", None) or f.__name__ for f in available}
+    missing = [tool for tool in profile.tools if tool not in registered] if profile.mode == "agent" else []
     cap = limits["max_tools"]
+    kept = available
     if cap is not None:
         keep = {id(f) for f in available if (getattr(f, "name", None) or f.__name__) in pinned}
         for func in available:
             if len(keep) >= cap:
                 break
             keep.add(id(func))
-        available = [func for func in available if id(func) in keep]
+        kept = [func for func in available if id(func) in keep]
+    dropped = [
+        getattr(f, "name", None) or f.__name__
+        for f in available
+        if f not in kept
+    ]
     agent.model = model
     agent.num_ctx = limits["num_ctx"]
-    agent.tools = {getattr(f, "name", None) or f.__name__: f for f in available}
+    agent.tools = {getattr(f, "name", None) or f.__name__: f for f in kept}
     agent.tools_available = total
+    agent.tools_dropped = dropped
+    agent.tools_missing = missing
 
 
 class ChatService:
@@ -1482,6 +1596,37 @@ class ChatService:
 
     def _apply_model_limits(self, agent: Agent, profile: AgentProfile, model: str) -> None:
         apply_model_limits(agent, profile, model, PINNED_TOOLS.get(profile.id, ()))
+
+    def tool_fit_report(self, agent_id: str, environment: str = "workspace") -> dict:
+        """Which installed models would cut this agent's tools, and which listed tools are not
+        registered. Uses the same limits a chat turn uses, so the warning matches the run."""
+        profile = agent_library.load_agent(agent_id, environment)
+        tool_catalog.load_tools()
+        listed = model_profiles.list_models()
+        unregistered = [tool for tool in profile.tools if tool not in tool_catalog.registry] if profile.mode == "agent" else []
+        report = {"agent_id": profile.id, "error": listed.get("error"), "models": [], "warnings": []}
+        if unregistered:
+            report["warnings"].append(
+                f"Tool(s) not registered, so the agent cannot call them: {', '.join(unregistered)}."
+            )
+        for entry in listed.get("models", []):
+            model = entry["model"]
+            probe = Agent(model=model, tools=[], profile=profile, session="tool-fit")
+            apply_model_limits(probe, profile, model, PINNED_TOOLS.get(profile.id, ()))
+            stats = probe.run_stats()
+            dropped = stats["tools_dropped"]
+            report["models"].append({
+                "model": model,
+                "max_tools": entry.get("max_tools"),
+                "tools_active": stats["tools_active"],
+                "dropped": dropped,
+            })
+            if dropped:
+                report["warnings"].append(
+                    f"{model} cuts {len(dropped)} tool(s): {', '.join(dropped)}. Pin them with "
+                    "pinned_tools in the agent's frontmatter, or use a model with a larger tool limit."
+                )
+        return report
 
     def _context_report(self, agent: Agent, profile: AgentProfile) -> dict:
         limits = model_profiles.effective(agent.model)

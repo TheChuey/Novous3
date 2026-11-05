@@ -109,4 +109,5 @@ if __name__ == "__main__":
     import uvicorn
     host = os.getenv("PROJECT_MANAGER_HOST", "127.0.0.1")
     port = int(os.getenv("PROJECT_MANAGER_PORT", "8000"))
-    uvicorn.run("server:app", host=host, port=port, reload=True)
+    # Open streams (terminal, squad runs) are cut after 5 s on Ctrl+C instead of blocking shutdown.
+    uvicorn.run("server:app", host=host, port=port, reload=True, timeout_graceful_shutdown=5)

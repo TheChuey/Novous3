@@ -4,11 +4,12 @@ Layer rule: no business logic here. Each endpoint validates transport concerns a
 delegates to ``logic_codebuilder`` (use-cases) or ``execution`` (the engine).
 """
 
+import asyncio
 import json
 import time
 from typing import Iterator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from codebuilder.execution import cancel_run, execute_python_code, run_stream
@@ -133,13 +134,13 @@ def api_terminal_clear():
 
 
 @router.get("/terminal/stream")
-def api_terminal_stream(offset: int = 0):
+def api_terminal_stream(request: Request, offset: int = 0):
     """Server-sent events with new terminal output after ``offset`` (0 replays the buffer)."""
-    def events():
+    async def events():
         position = max(offset, 0)
         last_state = None
         idle = 0
-        while True:
+        while not await request.is_disconnected():
             text, position_end = session.read(position)
             state = session.state()
             if text or state != last_state:
@@ -151,7 +152,7 @@ def api_terminal_stream(offset: int = 0):
                 if idle >= 100:
                     yield ": keep-alive\n\n"
                     idle = 0
-            time.sleep(0.15)
+            await asyncio.sleep(0.15)
 
     return StreamingResponse(
         events(), media_type="text/event-stream",

@@ -37,7 +37,10 @@ def api_test_harness(req: ToolWorkbenchRequest):
 @router.post("/api/testing/tool-workbench/test-with-llm")
 def api_test_tool_with_llm(req: ToolWorkbenchLLMRequest):
     try:
-        return tool_workbench.test_with_llm(req.tool_code, req.model, req.user_prompt, req.timeout_seconds)
+        return tool_workbench.test_with_llm(
+            req.tool_code, req.model, req.user_prompt, req.timeout_seconds,
+            execute=req.execute, description=req.description,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ModelCallError as exc:

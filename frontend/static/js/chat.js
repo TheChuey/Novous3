@@ -57,6 +57,17 @@ export function formatScratchpadMarkdown(memory) {
         lines.push(`- **Skipped incompatible vectors:** ${payload.skipped_incompatible_chunks}`);
       }
 
+      const RETRIEVAL_KEYS = ['query', 'knowledge_branch_name', 'knowledge_branch_id', 'error',
+        'skipped_incompatible_chunks', 'results'];
+      const extraPayload = Object.fromEntries(
+        Object.entries(payload).filter(([key]) => !RETRIEVAL_KEYS.includes(key))
+      );
+      if (typeof entry.payload === 'string' && entry.payload.trim()) {
+        lines.push('', '```', entry.payload, '```');
+      } else if (Object.keys(extraPayload).length) {
+        lines.push('', '```json', JSON.stringify(extraPayload, null, 2), '```');
+      }
+
       const results = Array.isArray(payload.results) ? payload.results : [];
       if (results.length) {
         lines.push('', `#### Retrieved passages (${results.length})`, '');
@@ -426,6 +437,20 @@ export function renderChatView(container) {
     }
 
     const results = Array.isArray(payload.results) ? payload.results : [];
+    // Payloads from other sub-agents and from write_agent_scratchpad have their own keys
+    // (for example "answers" and "summary"); show them instead of claiming nothing was saved.
+    const RETRIEVAL_KEYS = new Set(['query', 'knowledge_branch_name', 'error', 'results']);
+    const extra = entry.payload && typeof entry.payload === 'object'
+      ? Object.fromEntries(Object.entries(entry.payload).filter(([key]) => !RETRIEVAL_KEYS.has(key)))
+      : entry.payload;
+    const hasExtra = typeof extra === 'string' ? extra.trim() !== '' : !!extra && Object.keys(extra).length > 0;
+    if (!results.length && hasExtra) {
+      const content = document.createElement('pre');
+      content.className = 'scratchpad-payload';
+      content.textContent = typeof extra === 'string' ? extra : JSON.stringify(extra, null, 2);
+      details.appendChild(content);
+      return details;
+    }
     if (!results.length) {
       details.appendChild(emptyNote(statusValue === 'nothing_found'
         ? 'Retrieval completed; no relevant passages were found.'

@@ -14,6 +14,8 @@ class ToolWorkbenchRequest(BaseModel):
 class ToolWorkbenchLLMRequest(ToolWorkbenchRequest):
     model: str = Field(..., min_length=1, max_length=120)
     user_prompt: str = Field(..., min_length=1, max_length=5000)
+    execute: bool = True
+    description: str | None = Field(None, max_length=2000)
 
 
 class ToolWorkbenchGenerateRequest(BaseModel):

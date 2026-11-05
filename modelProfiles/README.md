@@ -14,3 +14,21 @@ overrides them. Edit them on the **Models** page.
 
 Routes: `GET /api/model-profiles`, `PUT /api/model-profiles/{model}`, `DELETE /api/model-profiles/{model}`.
 The chat's context report is in `core_engine/logic_context_window.py`.
+
+## Tool limits and tool checks
+
+- A profile's tool limit can cut tools from an agent. The cut is checked for every
+  model, in every chat turn and every squad run, so it applies to any installed model.
+- An agent can keep specific tools with `pinned_tools` in its frontmatter:
+
+  ```yaml
+  pinned_tools:
+    - ask_user_window
+  ```
+
+  Pinned tools are always kept. The rest fill the remaining places in the tool list's order.
+- A run reports tools the cap cut as the flag `tools_dropped`, and listed tools that are
+  not registered as `tools_missing`. Either flag puts the run at the warning level.
+- Saving an agent in the editor shows the same check for every installed model in the
+  status bar. The check is also at `GET /api/agents/{agent_id}/tool-fit`.
+- The check reports only. It does not change the tool list or the cap.

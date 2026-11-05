@@ -76,6 +76,15 @@ def api_set_agent_tools(kind: AgentDefinitionKind, agent_id: str, req: AgentTool
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@router.get("/api/agents/{agent_id}/tool-fit")
+def api_agent_tool_fit(agent_id: str, environment: str = "workspace"):
+    """Installed models that would cut this agent's tools, plus unregistered tools."""
+    try:
+        return chat_service.tool_fit_report(agent_id, environment)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 @router.post("/api/chat")
 async def api_chat(req: ChatRequest):
     if not req.message.strip():
