@@ -8,9 +8,8 @@ environment: codebuilder
 version: 2
 tools:
   - map_files
-  - delete_file
   - read_file
-  - write_file
+  - project_status
   - read_agent_scratchpad
   - read_code_scratchpad
   - write_agent_scratchpad

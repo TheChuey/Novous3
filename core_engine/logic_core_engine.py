@@ -34,7 +34,12 @@ from modelProfiles.logic_modelProfiles import model_profiles
 MAX_NUM_CTX = 32768
 DEFAULT_MODEL = "qwen2.5-coder:latest"
 # Tools a profile must keep when its tool cap is smaller than its tool list.
-PINNED_TOOLS = {"rag-presenter": ("call_subagent", "read_agent_scratchpad")}
+PINNED_TOOLS = {
+    "rag-presenter": ("call_subagent", "read_agent_scratchpad"),
+    "knowledge": ("call_subagent", "read_agent_scratchpad"),
+}
+# Agents whose knowledge retrieval runs in the runtime before the model sees each message.
+FORCED_RETRIEVAL_AGENTS = frozenset({"rag-presenter", "knowledge"})
 
 # The agent whose tool call is running, so shared tools can record who wrote what.
 _CURRENT_AGENT_ID: ContextVar[str] = ContextVar("current_agent_id", default="")
@@ -1656,14 +1661,14 @@ class ChatService:
                 "tool_health": self.agent_health(agent)}
 
     def prepare_agent_message(self, agent: Agent, profile: AgentProfile, message: str) -> str:
-        if profile.id != "rag-presenter":
+        if profile.id not in FORCED_RETRIEVAL_AGENTS:
             return message
 
         required_tools = ("call_subagent", "read_agent_scratchpad")
         missing_tools = [name for name in required_tools if name not in agent.tools]
         if missing_tools:
             raise RequiredDelegationError(
-                "RAG Presenter is missing required tools: " + ", ".join(missing_tools)
+                f"{profile.name or profile.id} is missing required tools: " + ", ".join(missing_tools)
             )
 
         handoff = {

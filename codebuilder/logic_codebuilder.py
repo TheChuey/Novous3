@@ -18,6 +18,11 @@ from codebuilder.execution import _kill_tree, _popen_group_kwargs
 from codebuilder.schemas_codebuilder import MAX_COMMAND_CHARS, StructuredEditRequest
 from core_engine.logic_core_engine import agent_library, questionnaire
 from editor.logic_editor import editor_files
+from file_manager.logic_file_manager import file_backend
+from scratchpadMemory.logic_scratchpadMemory import scratchpad
+
+# Pass this as json_file_path to read the questionnaire from the shared scratchpad instead of a file.
+QUESTIONS_SCRATCHPAD_SOURCE = "scratchpad"
 from test_environment.logic_test_environment import sandbox_env, sandbox_paths
 
 PILLAR_ROOT = Path(__file__).resolve().parent
@@ -113,19 +118,43 @@ class CodeBuilderService:
             "explanation": req.explanation,
         }
 
+    def _questions_from_scratchpad(self) -> Any:
+        """Return the questionnaire an agent saved with write_agent_scratchpad (the newest sub-agent result)."""
+        entry = scratchpad.read_memory("latest_subagent_result").get("latest_subagent_result") or {}
+        if entry.get("task_type") != "questionnaire":
+            raise ValueError(
+                "No questionnaire was found in the scratchpad. Save it with write_agent_scratchpad "
+                "(task_type \"questionnaire\") immediately before calling ask_user_questions."
+            )
+        payload = entry.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(f"Error parsing the questionnaire saved in the scratchpad: {exc}") from exc
+        if not payload:
+            raise ValueError(
+                "No questionnaire was found in the scratchpad. Save it with write_agent_scratchpad first."
+            )
+        return payload
+
     def _load_questions(self, json_file_path: str) -> List[dict]:
         relative = str(json_file_path).strip().lstrip("/")
         if relative.startswith("workspace/"):
             relative = relative[len("workspace/"):]
 
-        try:
-            raw = editor_files.read_file_content(relative)["content"]
-        except Exception:
-            raise ValueError(f"Questions file '{json_file_path}' was not found in the workspace.") from None
-        try:
-            data = json.loads(raw)
-        except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"Error parsing questions JSON file: {exc}") from exc
+        if relative.lower() == QUESTIONS_SCRATCHPAD_SOURCE:
+            data = self._questions_from_scratchpad()
+        else:
+            try:
+                # Read from the same configured root that write_file uses, so an agent-written file is found.
+                raw = file_backend.read_file(relative)["content"]
+            except Exception:
+                raise ValueError(f"Questions file '{json_file_path}' was not found in the workspace.") from None
+            try:
+                data = json.loads(raw)
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(f"Error parsing questions JSON file: {exc}") from exc
 
         items = data.get("questions", []) if isinstance(data, dict) else data if isinstance(data, list) else []
         questions = []

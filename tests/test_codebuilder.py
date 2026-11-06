@@ -211,7 +211,7 @@ def fake_questionnaire_host(file_text, answers=None):
         return {"answers": state.get("answers", {})} if state.get("answers") is not None else None
 
     patcher = pytest.MonkeyPatch()
-    patcher.setattr(logic_codebuilder.editor_files, "read_file_content", read_file_content)
+    patcher.setattr(logic_codebuilder.file_backend, "read_file", read_file_content)
     patcher.setattr(logic_codebuilder.questionnaire, "create_request", create_request)
     patcher.setattr(logic_codebuilder.questionnaire, "resolve_request", resolve_request)
     try:
