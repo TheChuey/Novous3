@@ -358,6 +358,27 @@ export const Api = {
     return send('DELETE', `/api/testing/tool-workbench/tools/${encodeURIComponent(toolName)}`);
   },
 
+  async listTestSuites(category = '') {
+    const query = category ? `?category=${encodeURIComponent(category)}` : '';
+    return get(`/api/testing/suites${query}`);
+  },
+
+  async saveTestSuite(suite) {
+    return send('POST', '/api/testing/suites', suite);
+  },
+
+  async deleteTestSuite(category, slug) {
+    return send('DELETE', `/api/testing/suites/${encodeURIComponent(category)}/${encodeURIComponent(slug)}`);
+  },
+
+  async getTestSuiteResults(category, slug) {
+    return get(`/api/testing/suites/${encodeURIComponent(category)}/${encodeURIComponent(slug)}/results`);
+  },
+
+  async saveTestSuiteRun(category, slug, run) {
+    return send('POST', `/api/testing/suites/${encodeURIComponent(category)}/${encodeURIComponent(slug)}/results`, run);
+  },
+
   async getModels() {
     return get('/api/models');
   },

@@ -1,0 +1,20 @@
+{
+  "id": "rag-squad-toc",
+  "name": "RAG squad: table of contents",
+  "category": "squads",
+  "description": "User asks the RAG squad for the knowledge table of contents. Checks the catalog tool is used.",
+  "agent_id": "rag-presenter",
+  "model": "qwen2.5-coder:latest",
+  "steps": [
+    {
+      "text": "Show me the table of contents of the knowledge you have.",
+      "enabled": true,
+      "expect": {
+        "contains": null,
+        "tool": "get_knowledge_catalog"
+      }
+    }
+  ],
+  "created": "2026-11-06T19:56:41+00:00",
+  "updated": "2026-11-06T19:56:41+00:00"
+}

@@ -20,7 +20,7 @@ from core_engine.logic_core_engine import agent_library, current_agent_id, tool,
 from editor.logic_editor import editor_files
 from file_manager.logic_file_manager import file_backend
 from ragMemory import interface_ragMemory as rag
-from scratchpadMemory.logic_scratchpadMemory import code_scratchpad, scratchpad
+from scratchpadMemory.logic_scratchpadMemory import code_scratchpad, scratchpad, squad_scratchpad
 
 
 class FileReadLimitError(ValueError):
@@ -775,6 +775,11 @@ def write_agent_scratchpad(
     )
     if trace_context is not None:
         codebuilder_run_state.save_handoff(trace_id, subagent_id, task_type, status, parsed_payload)
+        if squad_scratchpad.get(trace_id) is not None:
+            squad_scratchpad.post(
+                trace_id, active_agent_id, "note", f"Handoff: {task_type} ({status})",
+                json.dumps(parsed_payload, ensure_ascii=False, indent=2),
+            )
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
@@ -819,6 +824,54 @@ def post_code_scratchpad(title: str, content: str, kind: str = "note") -> str:
         {"posted": True, "id": entry["id"], "author": entry["author"], "kind": entry["kind"]},
         ensure_ascii=False,
     )
+
+
+def _active_squad_scratchpad() -> tuple[str, str]:
+    from orchestration.logic_orchestration import telemetry_bus
+
+    context = telemetry_bus.current_context()
+    if context is None:
+        raise ValueError("This tool requires an active squad run.")
+    run = squad_scratchpad.get(context[0])
+    if run is None or run["status"] != "running":
+        raise ValueError("This tool requires an active squad run.")
+    return context
+
+
+@tool(provider="scratchpadMemory")
+def read_squad_scratchpad(kind: str = "", author: str = "", limit: str = "10") -> str:
+    """Read recent entries from the current squad run, optionally filtering by kind or author."""
+    trace_id, _ = _active_squad_scratchpad()
+    try:
+        count = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("limit must be an integer from 1 to 50.") from exc
+    if not 1 <= count <= 50:
+        raise ValueError("limit must be an integer from 1 to 50.")
+    run = squad_scratchpad.get(trace_id, kind=kind, author=author)
+    if run is None:
+        raise ValueError("The squad scratchpad is no longer available.")
+    entries = []
+    for entry in run["entries"][:count]:
+        item = dict(entry)
+        item["content"] = entry["content"][:_CODE_SCRATCHPAD_READ_LIMIT]
+        if len(entry["content"]) > _CODE_SCRATCHPAD_READ_LIMIT:
+            item["content_truncated"] = True
+        entries.append(item)
+    return json.dumps({"run_id": trace_id, "entries": entries}, ensure_ascii=False, indent=2)
+
+
+@tool(provider="scratchpadMemory")
+def post_squad_scratchpad(title: str, content: str, kind: str = "note") -> str:
+    """Post a note, plan, code, test, or fix to the current squad run's scratchpad."""
+    trace_id, author = _active_squad_scratchpad()
+    kind = str(kind or "note").strip().lower()
+    if kind not in _CODE_SCRATCHPAD_TOOL_KINDS:
+        raise ValueError("kind must be one of: " + ", ".join(sorted(_CODE_SCRATCHPAD_TOOL_KINDS)))
+    if not str(content or "").strip():
+        raise ValueError("content must not be empty.")
+    entry = squad_scratchpad.post(trace_id, author, kind, title, content)
+    return json.dumps({"posted": True, "id": entry["id"], "author": author, "kind": kind}, ensure_ascii=False)
 
 
 @tool(provider="ragMemory")

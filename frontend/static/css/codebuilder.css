@@ -834,3 +834,86 @@ body.codebuilder-modal-open {
 }
 .codebuilder-agent-body { white-space: normal; }
 .codebuilder-workflow-stop { border-color: var(--danger); color: var(--danger); }
+/* Run-scoped squad scratchpad, shared by CodeBuilder and the Runs page. */
+.squad-scratchpad-dialog { width: min(1050px, 94vw); max-height: 90vh; overflow: auto; padding: 1rem; color: var(--text-main); background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius); color-scheme: dark; }
+.squad-scratchpad-dialog::backdrop { background: rgba(0, 0, 0, 0.7); }
+.squad-scratchpad-header, .squad-scratchpad-controls { display: flex; flex-wrap: wrap; align-items: end; gap: .6rem; }
+.squad-scratchpad-header { justify-content: space-between; }
+.squad-scratchpad-header h2 { margin: 0; }
+.squad-scratchpad-controls label, .squad-scratchpad-note label { display: grid; gap: .25rem; }
+.squad-scratchpad-content { max-height: 50vh; overflow: auto; margin: .75rem 0; }
+.squad-scratchpad-confirm { margin-top: 1rem; padding: .8rem; border: 1px solid var(--border-color); border-radius: 6px; }
+.squad-scratchpad-confirm[hidden] { display: none; }
+.squad-scratchpad-note { margin: .75rem 0; }
+
+/* ---------- Run scratchpad layout ----------
+ * One fixed window: header and controls stay put, only the entry list scrolls. */
+.reader-dialog.squad-scratchpad-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+  width: min(1050px, 94vw);
+  height: min(88vh, 900px);
+  max-height: 94vh;
+  padding: 1rem 1.1rem;
+  overflow: hidden;
+  resize: none;
+}
+.squad-scratchpad-dialog > * { flex: 0 0 auto; margin: 0; }
+.squad-scratchpad-dialog > .squad-scratchpad-header { align-items: center; padding-bottom: .5rem; border-bottom: 1px solid var(--sp-line, var(--border-color)); }
+.squad-scratchpad-dialog > .squad-scratchpad-header h2 { font-size: 1.15rem; }
+.squad-scratchpad-dialog > p.text-muted { font-size: .82rem; color: var(--sp-muted, var(--text-muted)); }
+.squad-scratchpad-dialog .squad-scratchpad-controls {
+  align-items: flex-end;
+  padding: .6rem .7rem;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+.squad-scratchpad-dialog .squad-scratchpad-controls label { font-size: .8rem; color: var(--sp-muted, var(--text-muted)); }
+.squad-scratchpad-dialog .squad-scratchpad-controls .form-select { min-width: 12rem; }
+.squad-scratchpad-dialog .reader-toolbar { margin: 0; }
+.squad-scratchpad-dialog > p[role="status"] { margin: 0; font-size: .85rem; color: var(--text-main); }
+.reader-dialog.squad-scratchpad-dialog .squad-scratchpad-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  margin: 0;
+  padding: .75rem;
+  overflow: auto;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+.squad-scratchpad-dialog .squad-scratchpad-note {
+  margin: 0;
+  padding: .5rem .7rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+.squad-scratchpad-dialog .squad-scratchpad-note > summary { cursor: pointer; font-weight: 600; }
+.squad-scratchpad-dialog .squad-scratchpad-note[open] { display: grid; gap: .5rem; padding-bottom: .7rem; }
+.squad-scratchpad-dialog .squad-scratchpad-note .form-input { width: 100%; }
+.squad-scratchpad-dialog .squad-scratchpad-confirm {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  align-items: center;
+  background: var(--bg-elev);
+  border-color: var(--warning);
+}
+.squad-scratchpad-dialog .squad-scratchpad-confirm strong,
+.squad-scratchpad-dialog .squad-scratchpad-confirm p { flex-basis: 100%; margin: 0; }
+.squad-scratchpad-dialog .squad-scratchpad-confirm p { font-size: .82rem; color: var(--sp-muted, var(--text-muted)); }
+.squad-scratchpad-dialog .squad-scratchpad-confirm[hidden] { display: none; }
+/* Entry cards inside the run scratchpad: readable header, clear body. */
+.squad-scratchpad-dialog .codebuilder-scratchpad-entry > summary { font-weight: 600; font-size: .9rem; line-height: 1.5; overflow-wrap: anywhere; }
+.squad-scratchpad-dialog .codebuilder-scratchpad-entry > p.text-muted { margin: .2rem 0 .5rem; font-size: .8rem; }
+.squad-scratchpad-dialog .prompt-rich-markdown { font-size: .9rem; line-height: 1.6; overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  .reader-dialog.squad-scratchpad-dialog[open] { width: 96vw; height: 92vh; padding: .8rem; }
+  .squad-scratchpad-dialog .squad-scratchpad-controls label { flex: 1 1 100%; }
+  .squad-scratchpad-dialog .squad-scratchpad-controls .form-select { min-width: 0; width: 100%; }
+}

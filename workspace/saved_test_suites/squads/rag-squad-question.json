@@ -1,0 +1,20 @@
+{
+  "id": "rag-squad-question",
+  "name": "RAG squad: knowledge question",
+  "category": "squads",
+  "description": "User asks a question that needs the knowledge base. Checks retrieval is used and the answer is given.",
+  "agent_id": "rag-presenter",
+  "model": "qwen2.5-coder:latest",
+  "steps": [
+    {
+      "text": "Search the knowledge base for how documents are indexed and summarise it in three bullet points.",
+      "enabled": true,
+      "expect": {
+        "contains": null,
+        "tool": "search_knowledge_branch"
+      }
+    }
+  ],
+  "created": "2026-11-06T19:56:41+00:00",
+  "updated": "2026-11-06T19:56:41+00:00"
+}

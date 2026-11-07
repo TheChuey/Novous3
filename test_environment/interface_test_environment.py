@@ -1,5 +1,5 @@
-"""Sandbox test-harness doorway: FastAPI router for /api/testing/tool-workbench/* and
-/api/sandbox/*."""
+"""Sandbox test-harness doorway: FastAPI router for /api/testing/tool-workbench/*,
+/api/testing/suites/* and /api/sandbox/*."""
 
 from fastapi import APIRouter, HTTPException
 
@@ -9,9 +9,12 @@ from test_environment.logic_test_environment import (
     sandbox_env,
     tool_workbench,
 )
+from test_environment.logic_test_suites import test_suite_store
 from test_environment.schemas_test_environment import (
     SandboxCheckRequest,
     SandboxInstallRequest,
+    SuiteRunRequest,
+    SuiteSaveRequest,
     ToolWorkbenchGenerateRequest,
     ToolWorkbenchLLMRequest,
     ToolWorkbenchRequest,
@@ -117,3 +120,45 @@ def api_delete_workbench_tool(tool_name: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Could not delete tool: {exc}") from exc
+
+
+# --- Saved test suites -----------------------------------------------------------
+
+def _suite_call(fn, *args):
+    try:
+        return fn(*args)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/api/testing/suites")
+def api_list_test_suites(category: str | None = None):
+    return {"suites": _suite_call(test_suite_store.list_suites, category)}
+
+
+@router.post("/api/testing/suites")
+def api_save_test_suite(req: SuiteSaveRequest):
+    return _suite_call(test_suite_store.save_suite, req.model_dump())
+
+
+@router.get("/api/testing/suites/{category}/{slug}")
+def api_get_test_suite(category: str, slug: str):
+    return _suite_call(test_suite_store.get_suite, category, slug)
+
+
+@router.delete("/api/testing/suites/{category}/{slug}")
+def api_delete_test_suite(category: str, slug: str):
+    _suite_call(test_suite_store.delete_suite, category, slug)
+    return {"status": "deleted"}
+
+
+@router.get("/api/testing/suites/{category}/{slug}/results")
+def api_get_test_suite_results(category: str, slug: str):
+    return _suite_call(test_suite_store.get_results, category, slug)
+
+
+@router.post("/api/testing/suites/{category}/{slug}/results")
+def api_append_test_suite_result(category: str, slug: str, req: SuiteRunRequest):
+    return _suite_call(test_suite_store.append_result, category, slug, req.model_dump())

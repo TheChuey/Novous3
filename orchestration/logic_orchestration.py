@@ -41,7 +41,7 @@ from orchestration.schemas_orchestration import (
     TraceStep,
 )
 from ragMemory import interface_ragMemory as rag
-from scratchpadMemory.logic_scratchpadMemory import code_scratchpad, scratchpad
+from scratchpadMemory.logic_scratchpadMemory import code_scratchpad, scratchpad, squad_scratchpad
 
 RAG_RETRIEVER_ID = "rag-retriever"
 CODE_SQUAD_ID = "code-squad"
@@ -1564,12 +1564,27 @@ class BasePattern(ABC):
     def run_members(self, run: _PatternRun) -> tuple[str, dict[str, Any] | None]:
         """Run the squad members; returns extra synthesis context and an optional result payload."""
 
+    @staticmethod
+    def _run_scratchpad_context(trace_id: str) -> str:
+        run = squad_scratchpad.get(trace_id)
+        if not run:
+            raise RuntimeError(f"Squad scratchpad not found for run '{trace_id}'.")
+        entries = run["entries"][:3]
+        if not entries:
+            return ""
+        lines = [
+            f"- {entry['author']} ({entry['kind']}): {entry['content'][:1200]}"
+            for entry in reversed(entries)
+        ]
+        return "\n\nRecent entries from this run's squad scratchpad:\n" + "\n".join(lines)
+
     def execute(self, request: OrchestrationRequest) -> OrchestrationResponse:
         if request.squad_id == CODE_SQUAD_ID:
             return code_squad_pipeline.run(request)
 
         request.trace_id = request.trace_id or f"tr_{uuid.uuid4().hex}"
         run = _PatternRun(request, _squad_for_request(request))
+        squad_scratchpad.begin(run.trace_id, run.squad_id or "unregistered", request.user_query)
         telemetry_bus.log_event(
             run.trace_id, "RUN_STARTED", "orchestrator", run.squad_id or run.primary_id,
             {"squad_id": run.squad_id or "unregistered", "pattern": self.name},
@@ -1608,6 +1623,7 @@ class BasePattern(ABC):
         except Exception as exc:
             status = "error"
             final_answer = f"Workflow failed: {exc}"
+            squad_scratchpad.post(run.trace_id, "orchestrator", "note", "Workflow error", str(exc))
             scratchpad_entry, scratchpad_snapshot = {}, {}
             telemetry_bus.log_event(
                 run.trace_id, "ERROR", "orchestrator", run.squad_id or run.primary_id,
@@ -1631,17 +1647,21 @@ class BasePattern(ABC):
             prompt = request.user_query
         else:
             prompt = f"Task: '{request.user_query}'. Parameters: {request.parameters}"
+            if self.name == "sequential":
+                prompt += self._run_scratchpad_context(run.trace_id)
         try:
             output = subagent_runner.run_agent_turn(
                 member_id, prompt, request.parameters, trace_id=run.trace_id
             )
         except Exception as exc:
+            squad_scratchpad.post(run.trace_id, member_id, "note", "Member failed", str(exc))
             _print_trace(f" │   \033[91m[ERROR]\033[0m Member '{member_id}' failed: {exc}")
             telemetry_bus.log_event(
                 run.trace_id, "ERROR", member_id, "orchestrator",
                 {"error": f"Sub-agent '{member_id}' failed: {exc}", "status": "error"},
             )
             return None, exc
+        squad_scratchpad.post(run.trace_id, member_id, "note", "Member response", output)
         telemetry_bus.log_event(
             run.trace_id, "AGENT_MESSAGE", member_id, "orchestrator",
             {"summary": "Sub-agent phase completed", "status": "success"},
@@ -1670,7 +1690,9 @@ class BasePattern(ABC):
         )
         if context:
             prompt += f"\n\n{context}"
+        prompt += self._run_scratchpad_context(run.trace_id)
         final_answer = subagent_runner.run_agent_turn(run.primary_id, prompt, trace_id=run.trace_id)
+        squad_scratchpad.post(run.trace_id, run.primary_id, "summary", "Primary synthesis", final_answer)
         run.add_step(
             run.primary_id, "PRIMARY_SYNTHESIS", "SUCCESS",
             f"Primary agent '{run.primary_id}' completed response",
@@ -1697,6 +1719,7 @@ class BasePattern(ABC):
             result_payload=payload,
             execution_trace=run.steps,
         )
+        squad_scratchpad.finish(run.trace_id, status)
         # Save before RUN_COMPLETE so the client's result fetch never races a 404.
         run_results.save(
             run.trace_id,
@@ -1825,8 +1848,10 @@ class RouterPattern(BasePattern):
         )
         try:
             reply = subagent_runner.run_agent_turn(run.primary_id, prompt, trace_id=run.trace_id)
+            squad_scratchpad.post(run.trace_id, run.primary_id, "plan", "Routing decision", reply)
             chosen, reason = _parse_routing_reply(reply, run.members)
         except Exception as exc:
+            squad_scratchpad.post(run.trace_id, run.primary_id, "note", "Routing failed", str(exc))
             chosen, reason = [], f"Routing turn failed: {exc}"
         if not chosen:
             chosen = run.members[:1]
@@ -1932,6 +1957,7 @@ class CodeSquadPipeline:
         status: str = "success",
     ) -> None:
         """Record a step on the coding agents' shared scratchpad; never fail the run over it."""
+        squad_scratchpad.post(ctx.trace_id, author, kind, title, content)
         try:
             code_scratchpad.post(author, kind, title, content, run_id=ctx.trace_id)
         except Exception as exc:  # noqa: BLE001 - the scratchpad is a record, not a dependency
@@ -1945,16 +1971,29 @@ class CodeSquadPipeline:
             {"status": status, "subagent_id": author, "result_count": 1, "direction": "write"},
         )
 
-    def _shared_notes_section(self) -> str:
+    def _shared_notes_section(self, trace_id: str) -> str:
         """Notes chat agents or the user left on the code scratchpad, newest first."""
         try:
             notes = code_scratchpad.entries(limit=self.SHARED_NOTES, kind="note")
-        except Exception:  # noqa: BLE001
-            return ""
-        if not notes:
-            return ""
+        except Exception as exc:  # noqa: BLE001 - notes are optional for the run
+            telemetry_bus.log_event(
+                trace_id, "ERROR", "orchestrator", "scratchpad",
+                {"error": f"Could not read the code scratchpad: {exc}", "status": "error"},
+            )
+            notes = []
         lines = "\n".join(f"- ({note['author']}) {note['title']}: {note['content']}" for note in notes)
-        return "\nNotes from other agents on the code scratchpad:\n" + lines[:self.SHARED_NOTES_CHARS] + "\n"
+        shared = "\nNotes from other agents on the code scratchpad:\n" + lines[:self.SHARED_NOTES_CHARS] + "\n" if notes else ""
+        return shared + self._run_notes_section(trace_id)
+
+    def _run_notes_section(self, trace_id: str) -> str:
+        run = squad_scratchpad.get(trace_id, kind="note")
+        if run is None:
+            raise RuntimeError(f"Squad scratchpad not found for run '{trace_id}'.")
+        run_notes = run["entries"][:self.SHARED_NOTES]
+        if run_notes:
+            lines = "\n".join(f"- ({note['author']}) {note['title']}: {note['content']}" for note in run_notes)
+            return "\nNotes from this squad run:\n" + lines[:self.SHARED_NOTES_CHARS] + "\n"
+        return ""
 
     def _ask_agent(self, ctx: CodeSquadRunContext, step: str, prompt: str, attempt: int = 0) -> str:
         agent_id = self.STEP_AGENTS[step]
@@ -2071,7 +2110,7 @@ class CodeSquadPipeline:
     def step_plan(self, ctx: CodeSquadRunContext) -> None:
         self._step_status(ctx, "plan", "running")
         prompt = (
-            f"User request: {ctx.query}\n\n{self._buffer_section(ctx.code)}\n{self._shared_notes_section()}\n"
+            f"User request: {ctx.query}\n\n{self._buffer_section(ctx.code)}\n{self._shared_notes_section(ctx.trace_id)}\n"
             "Write a short implementation plan for a single Python module: the functions "
             "to add or change, what each does, and how the result will be checked. "
             "Do not write the full code."
@@ -2085,7 +2124,7 @@ class CodeSquadPipeline:
 
     def step_build(self, ctx: CodeSquadRunContext) -> bool:
         self._step_status(ctx, "build", "running")
-        prompt = f"User request: {ctx.query}\n\n{self._buffer_section(ctx.code)}\n{self._shared_notes_section()}"
+        prompt = f"User request: {ctx.query}\n\n{self._buffer_section(ctx.code)}\n{self._shared_notes_section(ctx.trace_id)}"
         if ctx.plan:
             prompt += f"\nPlan to follow:\n{ctx.plan[:8_000]}\n"
         prompt += (
@@ -2128,6 +2167,7 @@ class CodeSquadPipeline:
             if result.get("status") == "SUCCESS":
                 prompt = (
                     f"User request: {ctx.query}\n\n{self._buffer_section(ctx.code)}\n\n"
+                    f"{self._run_notes_section(ctx.trace_id)}\n"
                     "Write a short Python test snippet that will run directly after this "
                     "module's code (its functions and classes are already defined; do not "
                     "import it). Use plain assert statements on the module's functions, "
@@ -2159,6 +2199,7 @@ class CodeSquadPipeline:
         evidence = json.dumps(ctx.last_test or {}, ensure_ascii=False, indent=2)[:8_000]
         prompt = (
             f"User request: {ctx.query}\n\n{self._buffer_section(ctx.code)}\n\n"
+            f"{self._run_notes_section(ctx.trace_id)}\n"
             f"The latest test failed with this evidence:\n{evidence}\n\n"
             "Find the root cause in the module and fix it with the smallest correct change. "
             "Interactive or entry-point code must stay under `if __name__ == \"__main__\":`. "
@@ -2214,6 +2255,7 @@ class CodeSquadPipeline:
         trace_id = request.trace_id
         action = self.ACTION_ALIASES.get(request.workflow_action, request.workflow_action)
         squad = squad_registry.get_squad(CODE_SQUAD_ID) or {}
+        squad_scratchpad.begin(trace_id, CODE_SQUAD_ID, request.user_query)
         params = request.parameters or {}
         editor_code = params.get("editor_code")
         ctx = CodeSquadRunContext(
@@ -2290,6 +2332,7 @@ class CodeSquadPipeline:
             },
             execution_trace=ctx.steps,
         )
+        squad_scratchpad.finish(trace_id, status)
         # Save before RUN_COMPLETE so the client's result fetch never races a 404.
         run_results.save(
             trace_id,
@@ -2392,6 +2435,8 @@ class OrchestrationRunService:
         try:
             pipeline_registry.run_orchestration(request)
         except Exception:
+            if squad_scratchpad.get(trace_id) is not None:
+                squad_scratchpad.finish(trace_id, "error")
             history = telemetry_bus.get_trace_history(trace_id)
             run_results.save(
                 trace_id,

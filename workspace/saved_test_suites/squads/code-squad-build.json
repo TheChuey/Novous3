@@ -1,0 +1,20 @@
+{
+  "id": "code-squad-build",
+  "name": "Code squad: build a function",
+  "category": "squads",
+  "description": "User asks the code squad to write a small function. Checks the reply contains the function definition.",
+  "agent_id": "code-planer",
+  "model": "qwen2.5-coder:latest",
+  "steps": [
+    {
+      "text": "Write a Python function reverse_string(text) that returns the reversed string. Show the code.",
+      "enabled": true,
+      "expect": {
+        "contains": "def reverse_string",
+        "tool": null
+      }
+    }
+  ],
+  "created": "2026-11-06T19:56:41+00:00",
+  "updated": "2026-11-06T19:56:41+00:00"
+}

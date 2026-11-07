@@ -122,6 +122,14 @@
 .suite-result-heading { justify-content: flex-start; font-size: 0.78rem; }
 .suite-result-heading strong { overflow-wrap: anywhere; }
 .suite-result pre { margin: 0.4rem 0 0; max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 0.8rem; }
+.suite-library { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem; }
+.suite-library label { display: grid; flex: 1; min-width: 200px; gap: 0.3rem; color: var(--text-muted); font-size: 0.8rem; }
+.suite-library .form-select { width: 100%; }
+.suite-step-expect { grid-column: 2 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem; }
+.suite-step-expect .form-input { width: 100%; min-width: 0; padding: 0.35rem 0.5rem; font-size: 0.8rem; }
+.suite-history { display: flex; flex-direction: column; gap: 0.35rem; }
+.suite-history ul { display: grid; gap: 0.3rem; max-height: 14vh; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.suite-history-run { width: 100%; justify-content: flex-start; text-align: left; font-size: 0.8rem; }
 .suite-dialog-footer { flex-wrap: wrap; border-top: 1px solid var(--border-color); padding-top: 0.65rem; }
 .suite-dialog-footer-secondary { justify-content: flex-end; flex-wrap: wrap; }
 .suite-dialog button:disabled,
@@ -180,5 +188,93 @@
   .suite-step { grid-template-columns: auto minmax(0, 1fr); }
   .suite-step-actions { grid-column: 2; justify-content: flex-end; }
   .suite-step-list { max-height: 22vh; }
+  .suite-step-expect { grid-template-columns: 1fr; }
   .suite-output-section { min-height: 140px; }
 }
+
+/* Floating (non-modal) runner window: the chat behind it stays visible and clickable. */
+.suite-dialog-floating {
+  display: block;
+  padding: 0;
+  pointer-events: none;
+  background: none;
+}
+.suite-dialog-floating .suite-dialog {
+  position: fixed;
+  top: 4.5rem;
+  right: 1.25rem;
+  width: min(680px, calc(100vw - 2.5rem));
+  height: min(78vh, 820px);
+  max-height: none;
+  min-width: 320px;
+  min-height: 360px;
+  resize: both;
+  overflow: auto;
+  pointer-events: auto;
+}
+.suite-dialog-floating .suite-dialog-header { cursor: move; user-select: none; }
+.suite-dialog-floating .suite-dialog-header button { cursor: pointer; }
+@media (max-width: 820px) {
+  .suite-dialog-floating .suite-dialog {
+    top: 0.5rem;
+    right: 0.5rem;
+    left: 0.5rem;
+    width: auto;
+    height: 80vh;
+    resize: none;
+  }
+}
+
+/* Window size controls: explicit width and height sliders for the floating runner. */
+.suite-size-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 1rem; font-size: 0.8rem; color: var(--text-muted); }
+.suite-size-controls label { display: flex; align-items: center; gap: 0.45rem; }
+.suite-size-controls input[type="range"] { width: 130px; accent-color: var(--primary); cursor: pointer; }
+.suite-size-controls output { min-width: 4.2em; font-variant-numeric: tabular-nums; color: var(--text); }
+@media (max-width: 820px) {
+  .suite-size-controls { display: none; }
+}
+
+/* Window frame: the header stays put, the body scrolls, and resize handles sit on every edge. */
+.suite-dialog-floating .suite-dialog {
+  right: auto;
+  overflow: visible;
+  min-height: 0;
+  max-height: none;
+  resize: none;
+  touch-action: none;
+}
+.suite-dialog-floating .suite-dialog-header { touch-action: none; }
+.suite-window-controls { display: flex; align-items: center; gap: 0.25rem; flex-shrink: 0; }
+.suite-window-controls button { min-width: 30px; padding: 0.25rem 0.45rem; line-height: 1; }
+.suite-window-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 0.8rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.suite-resize { position: absolute; z-index: 2; touch-action: none; }
+.suite-resize-n, .suite-resize-s { left: 12px; right: 12px; height: 10px; cursor: ns-resize; }
+.suite-resize-n { top: -5px; }
+.suite-resize-s { bottom: -5px; }
+.suite-resize-e, .suite-resize-w { top: 12px; bottom: 12px; width: 10px; cursor: ew-resize; }
+.suite-resize-e { right: -5px; }
+.suite-resize-w { left: -5px; }
+.suite-resize-ne, .suite-resize-sw, .suite-resize-nw, .suite-resize-se { width: 16px; height: 16px; }
+.suite-resize-ne { top: -5px; right: -5px; cursor: nesw-resize; }
+.suite-resize-sw { bottom: -5px; left: -5px; cursor: nesw-resize; }
+.suite-resize-nw { top: -5px; left: -5px; cursor: nwse-resize; }
+.suite-resize-se { bottom: -5px; right: -5px; cursor: nwse-resize; }
+.suite-dialog.is-minimized .suite-window-body,
+.suite-dialog.is-minimized .suite-resize,
+.suite-dialog.is-expanded .suite-resize { display: none; }
+.suite-dialog.is-minimized .suite-dialog-header { border-bottom: 0; }
+
+/* Pop-out window: the runner fills its own browser window; window-only controls are hidden. */
+.suite-dialog.is-popout .suite-resize,
+.suite-dialog.is-popout [data-suite-popout],
+.suite-dialog.is-popout [data-suite-hide],
+.suite-dialog.is-popout [data-suite-expand] { display: none; }
+.suite-dialog-popout .suite-dialog { box-shadow: none; border: 0; }

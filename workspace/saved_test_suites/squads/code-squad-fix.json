@@ -1,0 +1,20 @@
+{
+  "id": "code-squad-fix",
+  "name": "Code squad: fix a bug",
+  "category": "squads",
+  "description": "User gives a buggy function and asks for a fix. Checks the fix uses addition.",
+  "agent_id": "code-planer",
+  "model": "qwen2.5-coder:latest",
+  "steps": [
+    {
+      "text": "This function is wrong: def add(a, b): return a - b. Fix it so add(2, 3) returns 5, and show the fixed code.",
+      "enabled": true,
+      "expect": {
+        "contains": "a + b",
+        "tool": null
+      }
+    }
+  ],
+  "created": "2026-11-06T19:56:41+00:00",
+  "updated": "2026-11-06T19:56:41+00:00"
+}

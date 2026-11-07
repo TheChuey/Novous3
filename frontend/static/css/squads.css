@@ -37,7 +37,7 @@
 #health-badge { flex-shrink: 0; }
 
 /* --- Page scaffolding -------------------------------------------------------- */
-.sq-page { display: flex; flex-direction: column; gap: 1rem; max-width: 1500px; }
+.sq-page { display: flex; flex-direction: column; gap: 1rem; width: 100%; max-width: 1500px; margin: 0 auto; }
 .sq-page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
 .sq-page-head h2 { margin: 0 0 0.25rem; font-size: 1.35rem; }
 .sq-page-head p { margin: 0; }
@@ -305,14 +305,18 @@
 /* --- Runs ---------------------------------------------------------------------------- */
 .sq-runs {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
-  grid-template-rows: auto 1fr;
-  grid-template-areas: "form trace" "form result";
+  /* Left half: run form. Right half: live trace. Full-width result along the bottom. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-areas: "form trace" "result result";
   gap: 1rem;
-  align-items: start;
+  align-items: stretch;
 }
+.sq-runs > .card { min-width: 0; }
 .sq-run-form { grid-area: form; }
-.sq-trace { grid-area: trace; }
+/* The trace fills its half: the timeline takes the remaining height and the empty state is centred. */
+.sq-trace { grid-area: trace; display: flex; flex-direction: column; }
+.sq-trace .sq-timeline { flex: 1; min-height: 260px; display: flex; flex-direction: column; }
+.sq-trace .sq-timeline > li.text-muted:only-child { margin: auto; text-align: center; }
 .sq-result { grid-area: result; }
 .sq-run-form .btn-primary { width: 100%; }
 .sq-recent { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.4rem; }

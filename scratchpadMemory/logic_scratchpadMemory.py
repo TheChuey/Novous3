@@ -427,5 +427,113 @@ class CodeScratchpadService:
         return {"cleared": True, "path": self.RELATIVE_PATH}
 
 
+class SquadScratchpadService:
+    """Persistent, independently clearable scratchpads for squad runs."""
+
+    PATH = COMPONENT_ROOT / "data" / "squad_scratchpad.json"
+    MAX_ENTRIES = CodeScratchpadService.MAX_ENTRIES
+    MAX_CONTENT_CHARS = CodeScratchpadService.MAX_CONTENT_CHARS
+    KINDS = CodeScratchpadService.KINDS
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._active: set[str] = set()
+
+    def _read(self) -> dict[str, Any]:
+        if not self.PATH.is_file():
+            return {}
+        try:
+            data = json.loads(self.PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Could not read squad scratchpad '{self.PATH}': {exc}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Squad scratchpad must contain a JSON object: {self.PATH}")
+        return data
+
+    def _write(self, runs: dict[str, Any]) -> None:
+        _write_json_atomic(self.PATH, runs, ".squad_scratchpad.")
+
+    def begin(self, run_id: str, squad_id: str, query: str) -> None:
+        with self._lock:
+            runs = self._read()
+            if run_id in runs:
+                raise ValueError(f"Squad scratchpad already exists for '{run_id}'.")
+            runs[run_id] = {
+                "run_id": run_id, "squad_id": squad_id, "query": query,
+                "status": "running", "created_at": datetime.now(timezone.utc).isoformat(),
+                "entries": [], "version": 0,
+            }
+            self._write(runs)
+            self._active.add(run_id)
+
+    def post(self, run_id: str, author: str, kind: str, title: str, content: str) -> dict[str, Any]:
+        if kind not in self.KINDS:
+            raise ValueError("Scratchpad kind must be one of: " + ", ".join(sorted(self.KINDS)))
+        text = str(content or "")
+        entry = {
+            "id": uuid.uuid4().hex[:12], "run_id": run_id, "author": str(author or "unknown"),
+            "kind": kind, "title": str(title or "")[:200], "content": text[:self.MAX_CONTENT_CHARS],
+            "truncated": len(text) > self.MAX_CONTENT_CHARS,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with self._lock:
+            runs = self._read()
+            if run_id not in runs:
+                raise KeyError(run_id)
+            runs[run_id]["entries"] = (runs[run_id]["entries"] + [entry])[-self.MAX_ENTRIES:]
+            runs[run_id]["version"] = runs[run_id].get("version", 0) + 1
+            self._write(runs)
+        return entry
+
+    def finish(self, run_id: str, status: str) -> None:
+        with self._lock:
+            runs = self._read()
+            if run_id not in runs:
+                raise KeyError(run_id)
+            runs[run_id]["status"] = status
+            runs[run_id]["version"] = runs[run_id].get("version", 0) + 1
+            self._write(runs)
+            self._active.discard(run_id)
+
+    def get(self, run_id: str, kind: str = "", author: str = "") -> dict[str, Any] | None:
+        with self._lock:
+            run = self._read().get(run_id)
+            active = run_id in self._active
+        if run is None:
+            return None
+        entries = run["entries"]
+        return {
+            **run, "status": "interrupted" if run["status"] == "running" and not active else run["status"],
+            "total": len(entries),
+            "entries": [entry for entry in reversed(entries)
+                        if (not kind or entry["kind"] == kind) and (not author or entry["author"] == author)],
+        }
+
+    def list_runs(self) -> list[dict[str, Any]]:
+        with self._lock:
+            runs = self._read()
+            active = set(self._active)
+        return [
+            {**{key: value for key, value in run.items() if key != "entries"},
+             "status": "interrupted" if run["status"] == "running" and run["run_id"] not in active else run["status"]}
+            for run in reversed(list(runs.values()))
+        ]
+
+    def clear(self, run_id: str, expected_version: int | None = None) -> bool:
+        with self._lock:
+            runs = self._read()
+            run = runs.get(run_id)
+            if run is None:
+                return False
+            if run_id in self._active:
+                raise ValueError("A running squad scratchpad cannot be cleared.")
+            if expected_version is not None and run.get("version", 0) != expected_version:
+                raise ValueError("The scratchpad changed; refresh and save it again before clearing.")
+            del runs[run_id]
+            self._write(runs)
+        return True
+
+
 scratchpad = ScratchpadService()
 code_scratchpad = CodeScratchpadService()
+squad_scratchpad = SquadScratchpadService()

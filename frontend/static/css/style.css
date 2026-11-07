@@ -1277,3 +1277,95 @@ body.is-resizing { cursor: col-resize; user-select: none; }
 .codebuilder-scratchpad-entry > summary { cursor: pointer; }
 .codebuilder-scratchpad-entry > summary .codebuilder-scratchpad-entry-meta { display: inline-flex; vertical-align: middle; }
 .codebuilder-scratchpad-entry > summary .codebuilder-scratchpad-entry-title { display: block; }
+
+/* ---------- Scratchpad readability ----------
+ * Scoped to the scratchpad dialogs (.reader-dialog). Text meets WCAG AA contrast on every
+ * surface: muted text and links are lifted from the global greys, and each level of
+ * nesting (entry > passage > code) gets its own surface so the layers stay distinct. */
+.reader-dialog {
+  color-scheme: dark;
+  background: var(--bg-card);
+  --sp-text: #e6eaf2;
+  --sp-muted: #aab3c5;
+  --sp-link: #7cb2ff;
+  --sp-code-bg: #0d0e11;
+  --sp-surface: #1b1d23;
+  --sp-raised: #252931;
+  --sp-line: #3a3f4a;
+  color: var(--sp-text);
+  line-height: 1.6;
+}
+.reader-dialog .scratchpad-reader,
+.reader-dialog .scratchpad-section,
+.reader-dialog .scratchpad-read,
+.reader-dialog .codebuilder-scratchpad-entry,
+.reader-dialog .codebuilder-scratchpad-run > summary { color: var(--sp-text); }
+.reader-dialog .text-muted,
+.reader-dialog .codebuilder-scratchpad-run > summary,
+.reader-dialog .codebuilder-scratchpad-entry-meta { color: var(--sp-muted); }
+.reader-dialog .scratchpad-section h3 {
+  color: var(--text-main);
+  font-size: 0.98rem;
+  padding-bottom: 0.35rem;
+  margin-bottom: 0.6rem;
+  border-bottom: 1px solid var(--sp-line);
+}
+.reader-dialog .scratchpad-read,
+.reader-dialog .codebuilder-scratchpad-entry {
+  padding: 0.7rem 0.9rem;
+  margin-bottom: 0.6rem;
+  background: var(--sp-surface);
+  border-color: var(--sp-line);
+  border-radius: 8px;
+}
+.reader-dialog .scratchpad-read > summary { line-height: 1.5; overflow-wrap: anywhere; }
+.reader-dialog .scratchpad-read[open] > summary { margin-bottom: 0.5rem; }
+.reader-dialog .scratchpad-read p { margin: 0.4rem 0; }
+.reader-dialog .scratchpad-read .scratchpad-read { background: var(--sp-raised); margin: 0.5rem 0 0; }
+.reader-dialog .scratchpad-result-query {
+  margin: 0 0 0.6rem;
+  padding: 0.4rem 0.6rem;
+  color: var(--sp-text);
+  background: var(--sp-raised);
+  border-radius: 6px;
+}
+.reader-dialog .scratchpad-read pre,
+.reader-dialog .scratchpad-section > pre,
+.reader-dialog .scratchpad-payload {
+  color: var(--sp-text);
+  background: var(--sp-code-bg);
+  border: 1px solid var(--sp-line);
+  border-radius: 6px;
+  padding: 0.75rem 0.9rem;
+  font: 0.85em/1.6 Consolas, 'Cascadia Mono', monospace;
+}
+.reader-dialog .scratchpad-tree { background: var(--sp-surface); border-color: var(--sp-line); border-radius: 6px; }
+.reader-dialog .scratchpad-file-link,
+.reader-dialog .reader-nav a,
+.reader-dialog .reader-nav button { color: var(--sp-link); }
+.reader-dialog .scratchpad-file-link:hover,
+.reader-dialog .reader-nav button:hover { color: #ffffff; border-color: var(--sp-link); }
+.reader-dialog .reader-nav a,
+.reader-dialog .reader-nav span { border-color: var(--sp-line); }
+.reader-dialog .text-danger { color: #ff8a8a; }
+.reader-dialog .badge { font-weight: 700; }
+
+/* Entry headers: a readable kind chip instead of a bare outlined word. */
+.reader-dialog .codebuilder-scratchpad-entry { border-left-width: 4px; font-size: 0.85rem; }
+.reader-dialog .codebuilder-scratchpad-entry-meta { font-size: 0.8em; margin-bottom: 0.25rem; }
+.reader-dialog .codebuilder-scratchpad-entry-title { margin: 0.2rem 0 0.35rem; font-size: 0.95em; color: var(--sp-text); }
+.reader-dialog .codebuilder-scratchpad-kind {
+  padding: 0.05rem 0.55rem;
+  border: 0;
+  border-radius: 999px;
+  font-size: 0.85em;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #0b0c0f;
+  background: var(--kind-color, var(--accent));
+}
+.reader-dialog .codebuilder-scratchpad-entry[data-kind="code"] { --kind-color: #4ade80; border-left-color: #4ade80; }
+.reader-dialog .codebuilder-scratchpad-entry[data-kind="test"] { --kind-color: #fbbf24; border-left-color: #fbbf24; }
+.reader-dialog .codebuilder-scratchpad-entry[data-kind="fix"] { --kind-color: #f87171; border-left-color: #f87171; }
+.reader-dialog .codebuilder-scratchpad-entry[data-kind="note"] { --kind-color: #94a3b8; border-left-color: #94a3b8; }
+.reader-dialog .codebuilder-scratchpad-entry > summary { padding: 0.1rem 0; }

@@ -4,7 +4,7 @@ import pytest
 
 from orchestration.logic_orchestration import squad_registry
 from modelProfiles.logic_modelProfiles import model_profiles
-from scratchpadMemory.logic_scratchpadMemory import code_scratchpad, scratchpad
+from scratchpadMemory.logic_scratchpadMemory import code_scratchpad, scratchpad, squad_scratchpad
 
 
 @pytest.fixture(autouse=True)
@@ -13,6 +13,13 @@ def isolated_code_scratchpad(tmp_path, monkeypatch):
     path = tmp_path / "code_scratchpad.json"
     monkeypatch.setattr(code_scratchpad, "CODE_SCRATCHPAD_PATH", path)
     return path
+
+
+@pytest.fixture(autouse=True)
+def isolated_squad_scratchpad(tmp_path, monkeypatch):
+    """Keep squad run scratchpads away from real user data."""
+    monkeypatch.setattr(squad_scratchpad, "PATH", tmp_path / "squad_scratchpad.json")
+    monkeypatch.setattr(squad_scratchpad, "_active", set())
 
 
 @pytest.fixture(autouse=True)
@@ -36,3 +43,11 @@ def isolated_squad_registry(tmp_path, monkeypatch):
     """Keep every test away from the real squad definitions and metrics files."""
     monkeypatch.setattr(squad_registry, "SQUADS_PATH", tmp_path / "orchestration_squads.json")
     monkeypatch.setattr(squad_registry, "METRICS_PATH", tmp_path / "orchestration_squad_metrics.json")
+
+
+@pytest.fixture(autouse=True)
+def isolated_test_suites(tmp_path, monkeypatch):
+    """Keep saved test suites and their run history out of the real workspace."""
+    from test_environment import logic_test_suites
+
+    monkeypatch.setattr(logic_test_suites, "SUITES_ROOT", tmp_path / "saved_test_suites")

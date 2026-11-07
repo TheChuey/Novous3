@@ -1,0 +1,17 @@
+{
+  "id": "thinker-plan",
+  "name": "Thinker squad: project plan",
+  "category": "squads",
+  "description": "User describes a vague idea. Manual check: the squad should open its questions before planning, then answer them.",
+  "agent_id": "problem-identifier",
+  "model": "qwen2.5-coder:latest",
+  "steps": [
+    {
+      "text": "I want to build a small app that helps me track my weekly habits. Help me plan it.",
+      "enabled": true,
+      "expect": null
+    }
+  ],
+  "created": "2026-11-06T19:56:41+00:00",
+  "updated": "2026-11-06T19:56:41+00:00"
+}

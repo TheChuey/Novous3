@@ -17,3 +17,6 @@ workspace/sandbox/
 tools/allowed_paths.json
 orchestration/data/
 modelProfiles/data/
+
+# Saved test suite run history (suite definitions under workspace/saved_test_suites are tracked)
+workspace/saved_test_suites/results/

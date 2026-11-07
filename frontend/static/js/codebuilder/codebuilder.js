@@ -8,6 +8,7 @@ import { iconSvg } from '../icons.js';
 import { setupSidePanels } from '../side_panels.js';
 import { appendMarkdown } from '../markdown.js';
 import { setupScratchpadReader } from '../scratchpad_reader.js';
+import { openSquadScratchpad } from '../squad_scratchpad.js';
 
 const DEMO_CODE = `print("Hello from Novous CodeBuilder!")
 for i in range(3):
@@ -85,6 +86,7 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
   const agentPicker = document.getElementById('codebuilder-agent-select');
   const memoryToggle = document.getElementById('codebuilder-memory-toggle');
   const scratchpadOpen = document.getElementById('codebuilder-scratchpad-open');
+  const squadScratchpadOpen = document.getElementById('codebuilder-squad-scratchpad-open');
   const scratchpadDialog = document.getElementById('codebuilder-scratchpad-dialog');
   const scratchpadContent = document.getElementById('codebuilder-scratchpad-content');
   const scratchpadStatus = document.getElementById('codebuilder-scratchpad-status');
@@ -107,6 +109,8 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
   const workflowRevert = document.getElementById('codebuilder-workflow-revert');
   const squadSteps = document.getElementById('codebuilder-squad-steps');
   const orchestrationStatus = document.getElementById('codebuilder-orchestration-status');
+  let lastSquadScratchpadTrace = '';
+  squadScratchpadOpen?.addEventListener('click', () => openSquadScratchpad(lastSquadScratchpadTrace));
   const editorActivity = document.getElementById('codebuilder-editor-activity');
   const changeCount = document.getElementById('codebuilder-change-count');
   const changeViewToggle = document.getElementById('codebuilder-change-view');
@@ -1577,6 +1581,7 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
       return;
     }
     workflowTraceId = started.trace_id;
+    lastSquadScratchpadTrace = started.trace_id;
     const source = new EventSource(`/api/orchestration/stream/${encodeURIComponent(started.trace_id)}`);
     orchestrationSource = source;
     let eventQueue = Promise.resolve();
@@ -1863,6 +1868,7 @@ export function renderCodeBuilderView(container) {
             <button id="codebuilder-agent-refresh" class="cb-btn cb-btn-icon cb-btn-ghost" type="button" title="Reload agents" aria-label="Reload agents">${iconSvg('refresh')}</button>
             <button id="codebuilder-memory-toggle" class="cb-btn cb-btn-icon cb-btn-ghost" type="button" aria-pressed="false" title="Save this chat to a text file you choose" aria-label="Memory mode">${iconSvg('database')}</button>
             <button id="codebuilder-scratchpad-open" class="cb-btn cb-btn-icon cb-btn-ghost cb-count" type="button" title="Code scratchpad: plans, code, tests, fixes and notes" aria-label="Open the code scratchpad">${iconSvg('clipboard')}<span id="codebuilder-scratchpad-count">0</span></button>
+            <button id="codebuilder-squad-scratchpad-open" class="cb-btn cb-btn-ghost" type="button" title="Open per-run squad scratchpads">Squad scratchpads</button>
             <button id="codebuilder-chat-expand" class="cb-btn cb-btn-icon cb-btn-ghost" type="button" aria-expanded="true" title="Hide chat panel" aria-label="Hide chat panel">${iconSvg('chevron-left')}</button>
           </div>
           <p id="codebuilder-chat-status" class="codebuilder-chat-status">Select an agent to start.</p>

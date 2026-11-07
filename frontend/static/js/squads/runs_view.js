@@ -7,6 +7,7 @@ import { esc, navigate } from '../shell.js';
 import { appendMarkdown } from '../markdown.js';
 import { createAgentMeters, runHealthHtml } from '../agent_meters.js';
 import { PATTERN_INFO, codeChangeFromEvent, describeEvent, startSquadRun } from './run_client.js';
+import { openSquadScratchpad } from '../squad_scratchpad.js';
 
 let activeRun = null;
 const recentRuns = [];
@@ -64,6 +65,7 @@ export function renderRunsView(container, payload = null) {
           <h2>Runs</h2>
           <p class="text-muted">Run a squad on a real request and watch how its agents hand work to each other.</p>
         </div>
+        <button type="button" class="btn" data-act="squad-scratchpads">Squad scratchpads</button>
       </header>
       <div class="sq-runs">
         <section class="card sq-run-form">
@@ -109,6 +111,7 @@ export function renderRunsView(container, payload = null) {
   const resultBox = container.querySelector('[data-role="result"]');
   const recent = container.querySelector('[data-role="recent"]');
   const runButton = container.querySelector('[data-act="run"]');
+  container.querySelector('[data-act="squad-scratchpads"]').addEventListener('click', () => openSquadScratchpad());
   let squads = [];
   let codeChange = null;
 
@@ -188,6 +191,7 @@ export function renderRunsView(container, payload = null) {
       <table class="sq-steps"><thead><tr><th>#</th><th>Agent</th><th>Phase</th><th>Status</th><th>Details</th></tr></thead>
         <tbody>${stepRows(result.execution_trace)}</tbody></table>
       <div class="sq-inspector-actions mt-2">
+        <button type="button" class="btn btn-sm" data-act="squad-scratchpad">View squad scratchpad</button>
         ${result.scratchpad_snapshot && Object.keys(result.scratchpad_snapshot).length
           ? '<button type="button" class="btn btn-sm" data-act="scratchpad">View scratchpad</button>' : ''}
         ${codeChange?.fileExists && codeChange.changedLines.length
@@ -205,7 +209,9 @@ export function renderRunsView(container, payload = null) {
 
   resultBox.addEventListener('click', async event => {
     const act = event.target.closest('button')?.dataset.act;
-    if (act === 'scratchpad') {
+    if (act === 'squad-scratchpad') {
+      await openSquadScratchpad(resultBox.dataset.trace);
+    } else if (act === 'scratchpad') {
       const box = resultBox.querySelector('[data-role="scratchpad"]');
       try {
         box.textContent = JSON.stringify(await Api.getOrchestrationRunScratchpad(resultBox.dataset.trace), null, 2);

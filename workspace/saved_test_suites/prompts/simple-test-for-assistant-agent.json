@@ -1,0 +1,45 @@
+{
+  "id": "simple-test-for-assistant-agent",
+  "name": "simple test for assistant agent",
+  "category": "prompts",
+  "description": "",
+  "agent_id": "chat-assitant",
+  "model": "qwen2.5-coder:7b",
+  "steps": [
+    {
+      "text": "Hello",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "what is my name",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "what tools do you have?",
+      "enabled": true,
+      "expect": {
+        "contains": "list of tools",
+        "tool": "do not use the tools"
+      }
+    },
+    {
+      "text": "map your workspace",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "read the files",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "summarize the chat in the logs",
+      "enabled": true,
+      "expect": null
+    }
+  ],
+  "created": "2026-11-06T20:10:59+00:00",
+  "updated": "2026-11-06T20:22:31+00:00"
+}

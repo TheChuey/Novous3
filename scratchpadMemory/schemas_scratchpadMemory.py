@@ -4,6 +4,8 @@ coding agents' shared board."""
 from enum import Enum
 from typing import Any, TypedDict
 
+from pydantic import BaseModel, Field
+
 
 class SubAgentStatus(str, Enum):
     SUCCESS = "success"
@@ -71,3 +73,9 @@ class CodeScratchpadEntry(TypedDict):
     content: str
     truncated: bool
     created_at: str
+
+
+class SquadScratchpadNote(BaseModel):
+    author: str = Field(default="user", min_length=1, max_length=100)
+    title: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., min_length=1, max_length=20_000)

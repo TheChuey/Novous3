@@ -131,6 +131,11 @@ The plan and build prompts include up to 3 recent `note` entries from the code s
 
 Each run records a squad run in the metrics and saves its result (including a `scratchpad_snapshot` built from its own handoffs) **before** emitting `RUN_COMPLETE`. `POST /api/orchestration/runs/{trace_id}/cancel` stops a run between steps or mid-stream with status `cancelled`.
 
+All squad runs also have a separate, persistent run-scoped squad scratchpad. It
+records agent responses and handoffs; the Runs and CodeBuilder pages provide a
+viewer, filtering, notes, exports and an explicit save-or-discard close flow.
+See [Scratchpad memory](../scratchpadMemory/README.md#squad-run-scratchpads).
+
 `codingagent` keeps the tool-calling helpers (`preview_editor_code`, `preview_code_change`, `inspect_http_routes`, `run_python_code`, `write_file`), which also publish editor previews and changed lines when they run inside a trace.
 
 ## Live squad observability

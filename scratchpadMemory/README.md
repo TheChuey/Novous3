@@ -23,6 +23,35 @@ Agents use it through the `read_agent_scratchpad` and `write_agent_scratchpad`
 tools. A scratchpad left by the former `agentMemory/` package is moved to
 `scratchpadMemory/data/scratchpad.json` on first start.
 
+## Squad run scratchpads
+
+Every squad run, including CodeBuilder runs, has a separate scratchpad in
+`scratchpadMemory/data/squad_scratchpad.json`. It records the participating agents'
+responses, code workflow entries and user notes, with the same 200-entry and
+20,000-character-per-entry limits as the coding scratchpad. It does not replace
+the general or coding scratchpads, nor change how agents use those scratchpads.
+Sequential squad members and the lead receive a bounded excerpt of recent entries
+from their own run. CodeBuilder's plan, build, test and fix steps also receive recent
+notes from the run; fan-out members start independently and the lead sees their results.
+Tool-capable agents can additionally be assigned `read_squad_scratchpad` and
+`post_squad_scratchpad` in the agent tool settings. These tools operate only on
+the current squad run and report an error outside one. The CodeBuilder pipeline
+continues to use its existing text-only agents and orchestrator-written entries.
+
+Open **Squad scratchpads** in Runs or CodeBuilder to select a run, filter by agent
+or type, search, add notes, and export Markdown or standalone HTML. Print / Save
+PDF uses the browser print dialog. Closing a completed scratchpad offers to save
+the entire run or discard it before clearing; cancelling keeps it. Closing the
+browser or a running scratchpad does not clear it: unsaved runs remain available
+after a restart, and interrupted runs are marked as such. Browser download settings
+determine whether a Save As dialog appears; when only a download can be started,
+you must confirm it was saved before clearing. If entries change during saving,
+the app keeps the scratchpad and asks you to refresh. Keep in mind that these scratchpads
+may contain agent output and code, and are stored locally until cleared.
+
+The REST endpoints under `/api/agent-memory/squad-scratchpads` list runs and
+read, add notes to, or delete an individual run. An active run cannot be deleted.
+
 ## Recalling memory
 
 `read_agent_scratchpad` is a paged recall, so repeated lookups in a long chat

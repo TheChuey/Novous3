@@ -1431,8 +1431,9 @@ export function renderChatView(container) {
     }
   }
 
-  function openTodoSuite() {
+  function openTodoSuite(options = {}) {
     openTestSuiteRunner({
+      popout: options?.popout === true,
       filePath: container.querySelector('#todo-file-select')?.value || '',
       agentId: agentSelect.value,
       model: currentModel,
@@ -1566,6 +1567,30 @@ export function renderChatView(container) {
     clearScratchpad,
     viewRag: openRag
   });
+  // Messages from a pop-out Test Suite window appear in this chat.
+  if ('BroadcastChannel' in window) {
+    const suiteChannel = new BroadcastChannel('novous-suite-runner');
+    suiteChannel.onmessage = event => {
+      const data = event.data || {};
+      if (data.type === 'chat') {
+        appendMessage(data.role, data.text);
+      } else if (data.type === 'tool') {
+        const tool = data.event || {};
+        appendToolBadge(tool.tool, tool.status, tool.args, tool.display);
+      }
+    };
+  }
+  // The pop-out window opens /chat?suite_window=1 and starts the runner once agents and models load.
+  if (new URLSearchParams(window.location.search).get('suite_window') === '1') {
+    let waited = 0;
+    const waitForRoster = setInterval(() => {
+      waited += 150;
+      if ((agents.length && installedModels.length) || waited > 10000) {
+        clearInterval(waitForRoster);
+        openTodoSuite({ popout: true });
+      }
+    }, 150);
+  }
   loadTodoFiles();
   container.querySelector('#todo-file-refresh')
     ?.addEventListener('click', () => loadTodoFiles());
