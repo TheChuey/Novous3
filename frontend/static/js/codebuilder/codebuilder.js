@@ -8,6 +8,7 @@ import { iconSvg } from '../icons.js';
 import { setupSidePanels } from '../side_panels.js';
 import { appendMarkdown } from '../markdown.js';
 import { setupScratchpadReader } from '../scratchpad_reader.js';
+import { attachScratchpadSwitcher } from '../scratchpad_switcher.js';
 import { openSquadScratchpad } from '../squad_scratchpad.js';
 
 const DEMO_CODE = `print("Hello from Novous CodeBuilder!")
@@ -1151,6 +1152,15 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
   scratchpadAuthorFilter.addEventListener('change', loadScratchpad);
   scratchpadKindFilter.addEventListener('change', loadScratchpad);
 
+  attachScratchpadSwitcher({
+    toolbar: shell.querySelector('.codebuilder-scratchpad-toolbar'),
+    content: scratchpadContent,
+    nativeControls: [scratchpadAuthorFilter, scratchpadKindFilter, scratchpadRefresh, scratchpadClear],
+    currentStore: 'code',
+    onRestore: loadScratchpad,
+    onNativeClear: clearScratchpad,
+  });
+
   // The agent picker and its buttons live in the chat panel heading.
   const renderAgents = () => {
     agentPicker.replaceChildren();
@@ -1817,7 +1827,7 @@ export async function setupCodeBuilderPage(rootId = 'codebuilder-editor') {
   return { editor, runCode, loadAgents };
 }
 
-export function renderCodeBuilderView(container) {
+export async function renderCodeBuilderView(container) {
   if (!container) return;
   container.innerHTML = `
     <div class="codebuilder-shell">
@@ -1998,11 +2008,12 @@ export function renderCodeBuilderView(container) {
     </div>
   `;
 
-  container.querySelector('[data-scratchpad-close]')?.addEventListener('click', () => {
-    container.querySelector('#codebuilder-scratchpad-dialog')?.close();
+  const shell = container.querySelector('.codebuilder-shell');
+  shell.querySelector('[data-scratchpad-close]')?.addEventListener('click', () => {
+    shell.querySelector('#codebuilder-scratchpad-dialog')?.close();
   });
   // The "more" menu closes after a choice, on Escape, or on a click elsewhere.
-  const moreMenu = container.querySelector('.cb-menu');
+  const moreMenu = shell.querySelector('.cb-menu');
   moreMenu?.querySelector('.cb-menu-list').addEventListener('click', () => { moreMenu.open = false; });
   moreMenu?.addEventListener('keydown', event => {
     if (event.key === 'Escape') { moreMenu.open = false; moreMenu.querySelector('summary').focus(); }
@@ -2012,7 +2023,7 @@ export function renderCodeBuilderView(container) {
     if (!moreMenu.contains(event.target)) moreMenu.open = false;
   };
   document.addEventListener('pointerdown', closeMenuOutside);
-  setupCodeBuilderPage();
+  await setupCodeBuilderPage();
 }
 
 if (typeof window !== 'undefined' && document.readyState !== 'loading') {
