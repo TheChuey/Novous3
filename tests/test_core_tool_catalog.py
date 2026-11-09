@@ -38,11 +38,11 @@ class TestToolCatalog(unittest.TestCase):
             "editor",
             "delete_file",
             "map_files",
-            "read_agent_scratchpad",
+            "read_chat_scratchpad",
             "call_subagent",
-            "write_agent_scratchpad",
-            "read_code_scratchpad",
-            "post_code_scratchpad",
+            "write_chat_scratchpad",
+            "read_coding_scratchpad",
+            "write_coding_scratchpad",
             "get_knowledge_catalog",
             "search_knowledge_branch",
             "list_knowledge_branch_documents",
@@ -50,7 +50,7 @@ class TestToolCatalog(unittest.TestCase):
         }
         for exp in expected:
             self.assertIn(exp, names)
-        self.assertEqual(len(tools), 29)  # core built-ins plus promoted custom tools
+        self.assertEqual(len(tools), 32)  # core built-ins plus promoted custom tools
 
     def test_tools_directory_contains_only_the_soc_modules_and_promoted_module(self):
         # allowed_paths.json is private local configuration and may be absent.

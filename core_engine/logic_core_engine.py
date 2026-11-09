@@ -35,14 +35,21 @@ MAX_NUM_CTX = 32768
 DEFAULT_MODEL = "qwen2.5-coder:latest"
 # Tools a profile must keep when its tool cap is smaller than its tool list.
 PINNED_TOOLS = {
-    "rag-presenter": ("call_subagent", "read_agent_scratchpad"),
-    "knowledge": ("call_subagent", "read_agent_scratchpad"),
+    "rag-presenter": ("call_subagent", "read_chat_scratchpad"),
+    "knowledge": ("call_subagent", "read_chat_scratchpad"),
 }
 # Agents whose knowledge retrieval runs in the runtime before the model sees each message.
 FORCED_RETRIEVAL_AGENTS = frozenset({"rag-presenter", "knowledge"})
 
 # The agent whose tool call is running, so shared tools can record who wrote what.
 _CURRENT_AGENT_ID: ContextVar[str] = ContextVar("current_agent_id", default="")
+# The chat session whose turn is running; chat scratchpad tools read and write under it.
+_CURRENT_SESSION_ID: ContextVar[str] = ContextVar("current_session_id", default="")
+
+# Scratchpad tools by store and direction. Agents address these by agent name and title.
+SCRATCHPAD_READ_TOOLS = ("read_coding_scratchpad", "read_chat_scratchpad", "read_squad_scratchpad")
+SCRATCHPAD_WRITE_TOOLS = ("write_coding_scratchpad", "write_chat_scratchpad", "write_squad_scratchpad")
+SCRATCHPAD_TOOLS = frozenset(SCRATCHPAD_READ_TOOLS + SCRATCHPAD_WRITE_TOOLS)
 
 
 def wrap_flat_arguments(parameters: list[str], required: list[str], args: Any) -> Any:
@@ -57,6 +64,10 @@ def wrap_flat_arguments(parameters: list[str], required: list[str], args: Any) -
 
 def current_agent_id() -> str:
     return _CURRENT_AGENT_ID.get()
+
+
+def current_session_id() -> str:
+    return _CURRENT_SESSION_ID.get()
 
 AGENT_MD_TEMPLATE = """# {name}
 
@@ -705,10 +716,12 @@ class Agent:
         "subagent_id": "The canonical sub-agent ID.",
         "task_type": "The task type requested by orchestration.",
         "proposed_content": "The complete proposed file or editor content.",
-        "memory_type": "Leave empty to list saved items, or one of: latest_read, latest_map, latest_subagent_result.",
-        "item": "A saved file path, or an id from the list, to read in pages.",
-        "offset": "Character position to start the page at; use next_offset from the previous page. Default 0.",
-        "max_chars": "Page size in characters, 500 to 20000. Default 4000.",
+        "agent": "The agent name the entry was saved under, for example rag-retriever.",
+        "title": "The title the entry was saved under, for example result.",
+        "content": "The text to save.",
+        "index": "0 for the newest matching entry, 1 for the one before it. Default 0.",
+        "offset": "Character position to start reading at; use next_offset from the previous result. Default 0.",
+        "questions": 'JSON object where each key is a short id and each value is the question text, for example: {"q1": "What error do you see?", "q2": "When did it start?"}',
     }
 
     def __init__(self, model: str | None, tools: List[Callable], profile: AgentProfile, session=None):
@@ -901,26 +914,31 @@ class Agent:
     @staticmethod
     def _scratchpad_handoff(name: str, args: Any, result: Any) -> dict:
         """Summarize a scratchpad read or write for SCRATCHPAD_HANDOFF telemetry."""
-        if name == "write_agent_scratchpad":
+        if name in SCRATCHPAD_WRITE_TOOLS:
             source = args if isinstance(args, dict) else {}
-            payload = source.get("payload")
+            payload = source.get("content")
             if isinstance(payload, str):
                 try:
                     payload = json.loads(payload)
                 except json.JSONDecodeError:
-                    payload = None
+                    pass
+            handoff_status = "success"
+            agent_name = source.get("agent", "")
         else:
             try:
                 memory = json.loads(result) if isinstance(result, str) else {}
             except json.JSONDecodeError:
                 memory = {}
-            source = memory.get("latest_subagent_result", {}) if isinstance(memory, dict) else {}
-            source = source if isinstance(source, dict) else {}
-            payload = source.get("payload", {})
+            memory = memory if isinstance(memory, dict) else {}
+            found = bool(memory.get("found"))
+            payload = memory.get("content", "") if found else {}
+            handoff_status = "success" if found else "missing"
+            agent_name = memory.get("agent", "")
+        source = {"status": handoff_status, "subagent_id": agent_name}
         handoff = {
-            "status": source.get("status", "success"),
-            "subagent_id": source.get("subagent_id", ""),
-            "direction": "write" if name == "write_agent_scratchpad" else "read",
+            "status": source["status"],
+            "subagent_id": source["subagent_id"],
+            "direction": "write" if name in SCRATCHPAD_WRITE_TOOLS else "read",
         }
         if isinstance(payload, dict):
             for key in ("results", "issues_found"):
@@ -1019,12 +1037,12 @@ class Agent:
             finally:
                 _CURRENT_AGENT_ID.reset(agent_token)
         except Exception as exc:
-            if trace_context and name == "write_agent_scratchpad":
+            if trace_context and name in SCRATCHPAD_WRITE_TOOLS:
                 telemetry_bus.log_event(
                     trace_id, "SCRATCHPAD_HANDOFF", agent_id, "scratchpad",
                     {
                         "status": "error",
-                        "subagent_id": args.get("subagent_id", "") if isinstance(args, dict) else "",
+                        "subagent_id": args.get("agent", "") if isinstance(args, dict) else "",
                         "direction": "write",
                     },
                 )
@@ -1044,7 +1062,7 @@ class Agent:
         self.tool_events.append(event)
         if trace_context:
             log_tool_end("success", elapsed())
-            if name in {"write_agent_scratchpad", "read_agent_scratchpad"}:
+            if name in SCRATCHPAD_TOOLS:
                 telemetry_bus.log_event(
                     trace_id, "SCRATCHPAD_HANDOFF", agent_id, "scratchpad",
                     self._scratchpad_handoff(name, args, result),
@@ -1664,7 +1682,7 @@ class ChatService:
         if profile.id not in FORCED_RETRIEVAL_AGENTS:
             return message
 
-        required_tools = ("call_subagent", "read_agent_scratchpad")
+        required_tools = ("call_subagent", "read_chat_scratchpad")
         missing_tools = [name for name in required_tools if name not in agent.tools]
         if missing_tools:
             raise RequiredDelegationError(
@@ -1686,8 +1704,8 @@ class ChatService:
             scratchpad_result = agent.act(
                 {
                     "function": {
-                        "name": "read_agent_scratchpad",
-                        "arguments": {"memory_type": "latest_subagent_result", "max_chars": "20000"},
+                        "name": "read_chat_scratchpad",
+                        "arguments": {"agent": "rag-retriever", "title": "result", "index": "0"},
                     }
                 },
                 origin="orchestrator",
@@ -1699,7 +1717,7 @@ class ChatService:
             "Do not invoke the sub-agent again. Treat errors or missing evidence "
             "as retrieval failures and report them honestly.\n"
             f"call_subagent result:\n{retrieval_result}\n"
-            f"latest_subagent_result:\n{scratchpad_result}"
+            f"read_chat_scratchpad(agent=rag-retriever, title=result):\n{scratchpad_result}"
         )
 
     def run_single_agent(self, agent_id: str, message: str, model: str | None = None,
@@ -1724,18 +1742,22 @@ class ChatService:
             }
 
         agent.tool_events = []
+        session_token = _CURRENT_SESSION_ID.set(session_key)
         try:
-            prepared_message = self.prepare_agent_message(agent, profile, message)
-            reply = agent.think(prepared_message)
-        except RequiredDelegationError as exc:
-            reply = f"[engine] Could not complete required agent setup: {exc}"
-        except Exception as exc:  # Ollama down / model missing -> graceful error reply
-            agent.note_failure("model_error", "", str(exc))
-            reply = (f"[engine] Could not reach the model runtime: {exc}\n"
-                     f"Start Ollama (e.g. `ollama serve`) and pull the model "
-                     f"`{model or profile.model or 'qwen2.5-coder:latest'}`, then retry.")
-            if agent.messages and agent.messages[-1].get("role") == "user":
-                agent.messages.pop()
+            try:
+                prepared_message = self.prepare_agent_message(agent, profile, message)
+                reply = agent.think(prepared_message)
+            except RequiredDelegationError as exc:
+                reply = f"[engine] Could not complete required agent setup: {exc}"
+            except Exception as exc:  # Ollama down / model missing -> graceful error reply
+                agent.note_failure("model_error", "", str(exc))
+                reply = (f"[engine] Could not reach the model runtime: {exc}\n"
+                         f"Start Ollama (e.g. `ollama serve`) and pull the model "
+                         f"`{model or profile.model or 'qwen2.5-coder:latest'}`, then retry.")
+                if agent.messages and agent.messages[-1].get("role") == "user":
+                    agent.messages.pop()
+        finally:
+            _CURRENT_SESSION_ID.reset(session_token)
 
         return {
             "reply": reply,

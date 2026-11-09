@@ -18,7 +18,7 @@ from orchestration.logic_orchestration import (
 from orchestration.schemas_orchestration import OrchestrationRequest
 from scratchpadMemory.logic_scratchpadMemory import code_scratchpad
 from server import app
-from tools.logic_tools import post_code_scratchpad, read_code_scratchpad
+from tools.logic_tools import read_coding_scratchpad, write_coding_scratchpad
 
 
 GOOD = "def add(a, b):\n    return a + b\n"
@@ -69,20 +69,24 @@ def test_code_scratchpad_routes_read_filter_and_clear():
     assert client.get("/api/agent-memory/code-scratchpad").json()["total"] == 0
 
 
-def test_post_tool_records_the_calling_agent():
+def test_write_tool_records_the_calling_agent():
     agent = Agent(
         model=None,
-        tools=[post_code_scratchpad, read_code_scratchpad],
+        tools=[write_coding_scratchpad, read_coding_scratchpad],
         profile=AgentProfile(id="codingagent", mode="agent"),
     )
     agent.act(
-        {"function": {"name": "post_code_scratchpad", "arguments": {"title": "Hint", "content": "Use dataclasses"}}},
+        {"function": {"name": "write_coding_scratchpad",
+                      "arguments": {"agent": "codingagent", "title": "Hint", "content": "Use dataclasses"}}},
         "native",
     )
     entry = code_scratchpad.latest("note")
     assert entry["author"] == "codingagent" and entry["run_id"] == "chat"
-    read = json.loads(read_code_scratchpad(kind="note"))
-    assert read["entries"][0]["content"] == "Use dataclasses"
+    read = json.loads(read_coding_scratchpad(agent="codingagent", title="Hint"))
+    assert read["found"] is True and read["content"] == "Use dataclasses"
+    missing = json.loads(read_coding_scratchpad(agent="codingagent", title="Nope"))
+    assert missing["found"] is False
+    assert {"agent": "codingagent", "title": "Hint"} in missing["available"]
 
 
 @pytest.fixture

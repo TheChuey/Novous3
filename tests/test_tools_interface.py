@@ -16,7 +16,7 @@ from scratchpadMemory.logic_scratchpadMemory import scratchpad
 from server import app
 from editor.logic_editor import editor_files
 from file_manager.logic_file_manager import file_backend
-from tools.logic_tools import read_agent_scratchpad, tool_registry, workspace_files
+from tools.logic_tools import read_chat_scratchpad, tool_registry, workspace_files
 
 
 class TestToolsInterface(unittest.TestCase):
@@ -59,13 +59,13 @@ class TestToolsInterface(unittest.TestCase):
     def test_agent_executes_tool_json_embedded_in_explanatory_text(self):
         calls = []
 
-        def read_agent_scratchpad(memory_type="all"):
-            calls.append(memory_type)
+        def read_chat_scratchpad(agent="", title="", index="0"):
+            calls.append(title)
             return '{"latest_subagent_result":{"status":"success"}}'
 
         agent = Agent(
             model="test-model",
-            tools=[read_agent_scratchpad],
+            tools=[read_chat_scratchpad],
             profile=AgentProfile(mode="agent"),
         )
         responses = [
@@ -73,8 +73,8 @@ class TestToolsInterface(unittest.TestCase):
                 "message": {
                     "content": (
                         "Here is the JSON for a function call:\n"
-                        '{"name": "read_agent_scratchpad", "parameters": '
-                        '{"memory_type": "latest_subagent_result"}}'
+                        '{"name": "read_chat_scratchpad", "parameters": '
+                        '{"agent": "rag-retriever", "title": "result"}}'
                     )
                 }
             },
@@ -83,9 +83,9 @@ class TestToolsInterface(unittest.TestCase):
         with patch("core_engine.logic_core_engine.ollama.chat", side_effect=responses):
             reply = agent.think("Check the latest sub-agent result")
 
-        self.assertEqual(calls, ["latest_subagent_result"])
+        self.assertEqual(calls, ["result"])
         self.assertEqual(reply, "Scratchpad retrieval succeeded.")
-        self.assertEqual(agent.tool_events[0]["tool"], "read_agent_scratchpad")
+        self.assertEqual(agent.tool_events[0]["tool"], "read_chat_scratchpad")
         self.assertEqual(agent.tool_events[0]["origin"], "text_json")
 
     def test_rag_presenter_format_answer_json_becomes_markdown(self):
@@ -115,13 +115,13 @@ class TestToolsInterface(unittest.TestCase):
     def test_streaming_agent_does_not_emit_embedded_tool_call_as_chat_text(self):
         calls = []
 
-        def read_agent_scratchpad(memory_type="all"):
-            calls.append(memory_type)
+        def read_chat_scratchpad(agent="", title="", index="0"):
+            calls.append(title)
             return '{"latest_subagent_result":{"status":"success"}}'
 
         agent = Agent(
             model="test-model",
-            tools=[read_agent_scratchpad],
+            tools=[read_chat_scratchpad],
             profile=AgentProfile(mode="agent"),
         )
         stream_responses = [
@@ -130,8 +130,8 @@ class TestToolsInterface(unittest.TestCase):
                 {
                     "message": {
                         "content": (
-                            '{"name": "read_agent_scratchpad", "parameters": '
-                            '{"memory_type": "latest_subagent_result"}}'
+                            '{"name": "read_chat_scratchpad", "parameters": '
+                            '{"agent": "rag-retriever", "title": "result"}}'
                         )
                     }
                 },
@@ -147,14 +147,14 @@ class TestToolsInterface(unittest.TestCase):
         ):
             events = list(agent.think_stream("Check the latest result"))
 
-        self.assertEqual(calls, ["latest_subagent_result"])
+        self.assertEqual(calls, ["result"])
         self.assertEqual(
             [event["text"] for event in events if event["type"] == "token"],
             ["Scratchpad retrieval succeeded."],
         )
         self.assertEqual(
             [event["event"]["tool"] for event in events if event["type"] == "tool_event"],
-            ["read_agent_scratchpad"],
+            ["read_chat_scratchpad"],
         )
 
     def test_scratchpad_api_reads_and_clears_saved_memory(self):
@@ -485,11 +485,14 @@ class TestToolsInterface(unittest.TestCase):
                 "create_folder",
                 "editor",
                 "delete_file",
-                "read_agent_scratchpad",
+                "read_chat_scratchpad",
                 "call_subagent",
-                "write_agent_scratchpad",
-                "read_code_scratchpad",
-                "post_code_scratchpad",
+                "write_chat_scratchpad",
+                "read_coding_scratchpad",
+                "write_coding_scratchpad",
+                "read_squad_scratchpad",
+                "write_squad_scratchpad",
+                "clear_squad_scratchpad",
                 "get_knowledge_catalog",
                 "search_knowledge_branch",
                 "list_knowledge_branch_documents",
@@ -526,22 +529,22 @@ class TestToolsInterface(unittest.TestCase):
 
     def test_scratchpad_recall_schema_tells_the_model_when_to_use_it(self):
         agent = Agent(model="test-model", tools=[], profile=AgentProfile(mode="agent"))
-        schema = agent._ollama_schema(read_agent_scratchpad)["function"]
+        schema = agent._ollama_schema(read_chat_scratchpad)["function"]
 
-        self.assertIn("remember", schema["description"])
-        self.assertIn("summarize", schema["description"])
-        for name in ("memory_type", "item", "offset", "max_chars"):
+        self.assertIn("agent", schema["description"])
+        self.assertIn("title", schema["description"])
+        for name in ("agent", "title", "index", "offset"):
             self.assertNotEqual(schema["parameters"]["properties"][name]["description"], f"Parameter {name}")
 
     def test_workbench_tool_source_includes_undecorated_test_source(self):
-        response = TestClient(app).get("/api/testing/tool-workbench/tools/read_agent_scratchpad")
+        response = TestClient(app).get("/api/testing/tool-workbench/tools/read_chat_scratchpad")
 
         self.assertEqual(response.status_code, 200, response.text)
         tool = response.json()
         self.assertEqual(tool["path"], "tools/logic_tools.py")
         self.assertIn("@tool(", tool["source"])
         self.assertNotIn("@tool", tool["test_source"])
-        self.assertIn("def read_agent_scratchpad(", tool["test_source"])
+        self.assertIn("def read_chat_scratchpad(", tool["test_source"])
         compile(tool["test_source"], "test_source", "exec")
 
 

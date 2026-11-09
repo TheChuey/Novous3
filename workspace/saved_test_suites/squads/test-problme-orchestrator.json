@@ -1,0 +1,17 @@
+{
+  "id": "test-problme-orchestrator",
+  "name": "test problme orchestrator",
+  "category": "squads",
+  "description": "",
+  "agent_id": "problem-orchestrator",
+  "model": "qwen2.5-coder:latest",
+  "steps": [
+    {
+      "text": "My small online store has experienced a 30% decline in monthly sales over the last three months. Website traffic appears to be about the same, and I haven't changed my product prices. I don't know what is causing the decline. Help me identify the possible causes and develop a plan to fix the problem.\"",
+      "enabled": true,
+      "expect": null
+    }
+  ],
+  "created": "2026-11-08T04:51:44+00:00",
+  "updated": "2026-11-08T04:51:44+00:00"
+}

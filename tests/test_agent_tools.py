@@ -93,15 +93,15 @@ def test_clearing_prompt_tools_writes_an_empty_list_and_drops_the_section(librar
 def test_subagent_tools_leave_prompt_block_alone(libraries):
     _, subagents = libraries
 
-    result = agent_library.set_agent_tools("subagent", "worker", ["read_file", "write_agent_scratchpad"])
+    result = agent_library.set_agent_tools("subagent", "worker", ["read_file", "write_squad_scratchpad"])
 
-    assert result["tools"] == ["read_file", "write_agent_scratchpad"]
+    assert result["tools"] == ["read_file", "write_squad_scratchpad"]
     text = (subagents / "worker.yaml").read_text(encoding="utf-8")
     assert "    - not_a_real_key" in text
     data, body = agent_library.parse_subagent_yaml("worker")
     assert data["name"] == "Worker"
     assert "## Available Tools\n\n### read_file\n- Provider:" in body
-    assert "### write_agent_scratchpad" in body
+    assert "### write_squad_scratchpad" in body
     assert "  ## Available Tools\n" in text
 
 
@@ -185,8 +185,8 @@ def test_create_subagent_scaffolds_a_loadable_definition(libraries):
     data, body = agent_library.parse_subagent_yaml("doc-writer")
     assert data["name"] == 'Doc "Writer": v2'
     assert data["description"] == "Writes docs. Fast."
-    assert data["tools"] == ["read_agent_scratchpad", "write_agent_scratchpad"]
-    assert "## role" in body and '"subagent_id": "doc-writer"' in body
+    assert data["tools"] == ["read_squad_scratchpad", "write_squad_scratchpad"]
+    assert "## role" in body and 'agent: "doc-writer"' in body
     catalog_ids = [agent["id"] for agent in squad_registry.list_agent_catalog()["subagents"]]
     assert "doc-writer" in catalog_ids
 

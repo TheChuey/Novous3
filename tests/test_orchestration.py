@@ -107,8 +107,8 @@ def test_rag_presenter_delegates_to_retriever_and_reads_scratchpad(tmp_path, mon
                 "message": {
                     "content": (
                         "Here is the JSON for a function call:\n"
-                        '{"name": "read_agent_scratchpad", "parameters": '
-                        '{"memory_type": "latest_subagent_result"}}'
+                        '{"name": "read_chat_scratchpad", "parameters": '
+                        '{"agent": "rag-retriever", "title": "result"}}'
                     )
                 }
             }
@@ -146,8 +146,8 @@ def test_rag_presenter_delegates_to_retriever_and_reads_scratchpad(tmp_path, mon
     assert chat.call_count == 2
     assert [event["tool"] for event in answer["tool_events"]] == [
         "call_subagent",
-        "read_agent_scratchpad",
-        "read_agent_scratchpad",
+        "read_chat_scratchpad",
+        "read_chat_scratchpad",
     ]
     result = scratchpad.read_memory("latest_subagent_result")
     assert result["latest_subagent_result"]["subagent_id"] == "rag-retriever"

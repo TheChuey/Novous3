@@ -19,8 +19,8 @@ from workspace.logic_workspace import workspace_workflow
 
 # Tools the orchestration patterns expect: the lead reads the scratchpad during synthesis and
 # sub-agents hand their structured results back through it.
-LEAD_HANDOFF_TOOL = "read_agent_scratchpad"
-MEMBER_HANDOFF_TOOL = "write_agent_scratchpad"
+LEAD_HANDOFF_TOOL = "read_squad_scratchpad"
+MEMBER_HANDOFF_TOOL = "write_squad_scratchpad"
 DELEGATION_TOOL = "call_subagent"
 
 _KIND_BY_DEFINITION = {"prompt": "agent", "subagent": "subagent"}
@@ -30,6 +30,40 @@ class SquadArchitect:
     """Builds, validates and applies squad blueprints."""
 
     # --- Reading -------------------------------------------------------------------
+
+    def get_agent_prompt(self, agent_id: str) -> str | None:
+        """Return the raw prompt text for a primary agent or sub-agent."""
+        clean = agent_library.normalize_agent_id(agent_id)
+        definition = agent_library.definition_kind(clean)
+        if definition is None:
+            return None
+        if definition == "prompt":
+            md_path = agent_library.LIBRARY_ROOT / f"{clean}.md"
+            if not md_path.is_file():
+                return None
+            _, body = agent_library._read_agent_markdown(md_path)
+            return body
+        _, body = agent_library.parse_subagent_yaml(clean)
+        return body
+
+    def set_agent_prompt(self, agent_id: str, prompt_text: str) -> dict[str, Any]:
+        """Replace the prompt body of a primary agent or sub-agent, keeping all metadata intact."""
+        clean = agent_library.normalize_agent_id(agent_id)
+        definition = agent_library.definition_kind(clean)
+        if definition is None:
+            raise FileNotFoundError(f"Agent not found: {agent_id}")
+        path = agent_library._definition_file(definition, clean)
+        text = path.read_text(encoding="utf-8")
+        newline = "\r\n" if "\r\n" in text else "\n"
+        lines = text.splitlines()
+        prefix, _, layout = agent_library._split_prompt_body(definition, lines)
+        body = prompt_text.splitlines()
+        result = agent_library._join_prompt_body(prefix, body, layout)
+        path.write_text(
+            newline.join(result) + (newline if text.endswith(("\n", "\r")) else ""),
+            encoding="utf-8", newline="",
+        )
+        return {"agent_id": clean, "saved": True}
 
     def describe_agent(self, agent_id: str) -> dict[str, Any] | None:
         """One node of the squad graph: identity, kind, mode, tools and delegation allow-list."""

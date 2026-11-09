@@ -9,8 +9,8 @@ from modelProfiles.logic_modelProfiles import model_profiles
 
 FIVE_TOOLS = [
     "call_subagent",
-    "read_agent_scratchpad",
-    "write_agent_scratchpad",
+    "read_chat_scratchpad",
+    "write_chat_scratchpad",
     "write_file",
     "ask_user_window",
 ]

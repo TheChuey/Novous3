@@ -842,8 +842,6 @@ body.codebuilder-modal-open {
 .squad-scratchpad-header h2 { margin: 0; }
 .squad-scratchpad-controls label, .squad-scratchpad-note label { display: grid; gap: .25rem; }
 .squad-scratchpad-content { max-height: 50vh; overflow: auto; margin: .75rem 0; }
-.squad-scratchpad-confirm { margin-top: 1rem; padding: .8rem; border: 1px solid var(--border-color); border-radius: 6px; }
-.squad-scratchpad-confirm[hidden] { display: none; }
 .squad-scratchpad-note { margin: .75rem 0; }
 
 /* ---------- Run scratchpad layout ----------
@@ -860,7 +858,8 @@ body.codebuilder-modal-open {
   resize: none;
 }
 .squad-scratchpad-dialog > * { flex: 0 0 auto; margin: 0; }
-.squad-scratchpad-dialog > .squad-scratchpad-header { align-items: center; padding-bottom: .5rem; border-bottom: 1px solid var(--sp-line, var(--border-color)); }
+.squad-scratchpad-dialog > .squad-scratchpad-header { align-items: center; padding-bottom: .5rem; border-bottom: 1px solid var(--sp-line, var(--border-color)); display: flex; flex-wrap: wrap; gap: .5rem; justify-content: space-between; }
+.squad-scratchpad-dialog > .squad-scratchpad-header .scratchpad-switcher-bar { margin-left: auto; margin-right: .5rem; }
 .squad-scratchpad-dialog > .squad-scratchpad-header h2 { font-size: 1.15rem; }
 .squad-scratchpad-dialog > p.text-muted { font-size: .82rem; color: var(--sp-muted, var(--text-muted)); }
 .squad-scratchpad-dialog .squad-scratchpad-controls {
@@ -895,19 +894,6 @@ body.codebuilder-modal-open {
 .squad-scratchpad-dialog .squad-scratchpad-note > summary { cursor: pointer; font-weight: 600; }
 .squad-scratchpad-dialog .squad-scratchpad-note[open] { display: grid; gap: .5rem; padding-bottom: .7rem; }
 .squad-scratchpad-dialog .squad-scratchpad-note .form-input { width: 100%; }
-.squad-scratchpad-dialog .squad-scratchpad-confirm {
-  margin: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: .5rem;
-  align-items: center;
-  background: var(--bg-elev);
-  border-color: var(--warning);
-}
-.squad-scratchpad-dialog .squad-scratchpad-confirm strong,
-.squad-scratchpad-dialog .squad-scratchpad-confirm p { flex-basis: 100%; margin: 0; }
-.squad-scratchpad-dialog .squad-scratchpad-confirm p { font-size: .82rem; color: var(--sp-muted, var(--text-muted)); }
-.squad-scratchpad-dialog .squad-scratchpad-confirm[hidden] { display: none; }
 /* Entry cards inside the run scratchpad: readable header, clear body. */
 .squad-scratchpad-dialog .codebuilder-scratchpad-entry > summary { font-weight: 600; font-size: .9rem; line-height: 1.5; overflow-wrap: anywhere; }
 .squad-scratchpad-dialog .codebuilder-scratchpad-entry > p.text-muted { margin: .2rem 0 .5rem; font-size: .8rem; }

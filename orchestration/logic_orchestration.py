@@ -136,7 +136,7 @@ _COUNT_KEYS = {
 }
 _ERROR_KINDS = {"unknown_tool", "bad_arguments", "tool_error", "model_error"}
 # Handoff tools a squad agent always keeps, however small its model's tool limit is.
-SQUAD_PINNED_TOOLS = ("read_agent_scratchpad", "write_agent_scratchpad", "call_subagent")
+SQUAD_PINNED_TOOLS = ("read_squad_scratchpad", "write_squad_scratchpad", "call_subagent")
 _TRACE_CONTEXT: ContextVar[tuple[str, str] | None] = ContextVar(
     "orchestration_trace_context", default=None
 )
@@ -948,7 +948,7 @@ class SquadRegistry:
         return True
 
     SUBAGENT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-    SUBAGENT_DEFAULT_TOOLS = ("read_agent_scratchpad", "write_agent_scratchpad")
+    SUBAGENT_DEFAULT_TOOLS = ("read_squad_scratchpad", "write_squad_scratchpad")
 
     def create_subagent(self, subagent_id: str, name: str, description: str = "") -> dict[str, Any]:
         """Scaffold ``subAgentLibrary/<id>.yaml`` with the standard role/purpose/handoff prompt."""
@@ -991,13 +991,10 @@ class SquadRegistry:
             "  - Output clean, structured results without conversational chitchat.",
             "",
             "  ## output format & scratchpad handoff",
-            "  Always call `write_agent_scratchpad`:",
-            "  {",
-            f'    "subagent_id": "{clean}",',
-            '    "task_type": "<task>",',
-            '    "status": "success",',
-            '    "payload": {}',
-            "  }",
+            "  Always call `write_squad_scratchpad` with these three values:",
+            f'  agent: "{clean}"',
+            '  title: "result"',
+            "  content: your result as text or JSON",
         ]
         text = "\n".join(lines) + "\n"
         definition = yaml.safe_load(text)
@@ -1400,6 +1397,62 @@ class SubAgentRunner:
                 usage_event_data(agent_id, agent_instance.run_stats()),
             )
 
+    _SQUAD_SCRATCHPAD_TOOLS = frozenset(
+        ("read_squad_scratchpad", "write_squad_scratchpad", "clear_squad_scratchpad")
+    )
+
+    _EXPECTED_OUTPUT: dict[str, tuple[str, str, str]] = {
+        "inquisitive":          ("inquisitive",          "questions", "investigation questions"),
+        "questionnaire":        ("questionnaire",        "result",    "questionnaire answers"),
+        "problem-analyst":      ("problem-analyst",      "result",    "analysis report"),
+        "problem-report-builder": ("problem-report-builder", "result", "HTML report"),
+    }
+
+    def _validate_agent_output(self, agent_id: str, trace_id: str | None, reply: str) -> str:
+        normalized = agent_library.normalize_agent_id(agent_id)
+        expected = self._EXPECTED_OUTPUT.get(normalized)
+        if not expected or not trace_id:
+            return reply
+        sp_agent, sp_title, description = expected
+        run_data = squad_scratchpad.get(trace_id)
+        if run_data is None:
+            return reply
+        found = any(
+            e.get("author") == sp_agent and e.get("title") == sp_title
+            for e in run_data.get("entries", [])
+        )
+        if found:
+            return reply
+        error_msg = (
+            f'{{"error": "Agent \\"{agent_id}\\" finished without writing its expected output '
+            f'({description}) to the scratchpad. The investigation cannot continue.", '
+            f'"agent": "{agent_id}", "expected_agent": "{sp_agent}", "expected_title": "{sp_title}"}}'
+        )
+        _print_trace(
+            f"\033[91m[VALIDATION] {agent_id} did not write {sp_agent}/{sp_title} "
+            f"— stopping chain.\033[0m"
+        )
+        return error_msg
+
+    def _ensure_squad_run(
+        self, trace_id: str | None, agent_id: str, meta: dict, profile: Any, prompt_input: str
+    ) -> bool:
+        if not trace_id:
+            return False
+        if not self._SQUAD_SCRATCHPAD_TOOLS.intersection(profile.tools):
+            return False
+        existing = squad_scratchpad.get(trace_id)
+        if existing is not None:
+            return False
+        squad_id = meta.get("squad") or "ad-hoc"
+        query = prompt_input[:200] if prompt_input else agent_id
+        squad_scratchpad.begin(trace_id, squad_id, query)
+        _print_trace(
+            f"\033[92m[SQUAD RUN] Auto-started squad scratchpad {trace_id} "
+            f"for {agent_id} (squad={squad_id})\033[0m"
+        )
+        return True
+
     def run_agent_turn(
         self,
         agent_id: str,
@@ -1418,6 +1471,7 @@ class SubAgentRunner:
 
             meta, body = self.load_agent(agent_id)
             profile = self._build_profile(agent_id, meta, body)
+            auto_started = self._ensure_squad_run(trace_id, agent_id, meta, profile, prompt_input)
             model = profile.model or "qwen2.5-coder:latest"
             agent_instance = Agent(model=model, tools=[], profile=profile)
             if profile.mode == "agent" and profile.tools:
@@ -1429,8 +1483,14 @@ class SubAgentRunner:
             except Exception as exc:
                 agent_instance.note_failure("model_error", "", str(exc))
                 self._emit_usage(trace_id, agent_id, agent_instance)
+                if auto_started and trace_id:
+                    squad_scratchpad.finish(trace_id, "error")
                 raise
             self._emit_usage(trace_id, agent_id, agent_instance)
+            reply = self._validate_agent_output(agent_id, trace_id, reply)
+
+            if auto_started and trace_id:
+                squad_scratchpad.finish(trace_id, "completed")
             return reply
 
 
@@ -1685,8 +1745,8 @@ class BasePattern(ABC):
         )
         prompt = (
             f"User request: '{run.request.user_query}'. "
-            "Inspect scratchpad using read_agent_scratchpad('latest_subagent_result') "
-            "and synthesize the final output in clear, user-facing prose."
+            "Read each member's result with read_squad_scratchpad, using the member's agent name "
+            "and the title 'result', then synthesize the final output in clear, user-facing prose."
         )
         if context:
             prompt += f"\n\n{context}"
@@ -1747,15 +1807,105 @@ def _member_outputs_context(outputs: dict[str, str]) -> str:
 
 
 class SequentialPattern(BasePattern):
-    """Executes squad members one after another to avoid local LLM hardware bottlenecks."""
+    """Executes squad members one after another to avoid local LLM hardware bottlenecks.
+    Stops early if a member fails validation (missing expected scratchpad output)."""
 
     name = "sequential"
 
+    _PROGRAMMATIC_STEPS: dict[str, str] = {
+        "questionnaire": "_run_questionnaire_step",
+    }
+
     def run_members(self, run: _PatternRun) -> tuple[str, dict[str, Any] | None]:
         for member_id in run.members:
-            _, error = self._run_member(run, member_id)
+            handler_name = self._PROGRAMMATIC_STEPS.get(member_id)
+            if handler_name:
+                method = getattr(self, handler_name, None)
+                if method:
+                    error = method(run)
+                    self._record_member(run, member_id, error)
+                    if error:
+                        _print_trace(
+                            f" │   \033[91m[PIPELINE STOPPED]\033[0m "
+                            f"Programmatic step '{member_id}' failed — skipping remaining members."
+                        )
+                        break
+                    continue
+
+            output, error = self._run_member(run, member_id)
             self._record_member(run, member_id, error)
+            if error:
+                _print_trace(
+                    f" │   \033[91m[PIPELINE STOPPED]\033[0m "
+                    f"Member '{member_id}' raised an error — skipping remaining members."
+                )
+                break
+            if output and '"error"' in output and "finished without writing" in output:
+                _print_trace(
+                    f" │   \033[91m[PIPELINE STOPPED]\033[0m "
+                    f"Member '{member_id}' failed validation — skipping remaining members."
+                )
+                break
         return "", None
+
+    @staticmethod
+    def _run_questionnaire_step(run: _PatternRun) -> Exception | None:
+        """Read inquisitive's questions from the scratchpad, call ask_user_window,
+        and write the combined result back. Fully programmatic — no LLM involved."""
+        _print_trace(f" ├── Executing programmatic step '\033[93mquestionnaire\033[0m'...")
+        try:
+            sp = squad_scratchpad.get(run.trace_id)
+            if not sp:
+                raise RuntimeError("No squad scratchpad found.")
+
+            questions_json = None
+            for entry in sp.get("entries", []):
+                if entry.get("author") == "inquisitive" and entry.get("title") == "questions":
+                    raw = entry["content"]
+                    questions_json = json.loads(raw) if isinstance(raw, str) else raw
+                    break
+            if not questions_json:
+                raise RuntimeError("Inquisitive did not write questions to the scratchpad.")
+
+            if isinstance(questions_json, list):
+                if questions_json and isinstance(questions_json[0], dict):
+                    questions_json = questions_json[0]
+                else:
+                    questions_json = {f"q{i+1}": str(q) for i, q in enumerate(questions_json)}
+
+            if "questions" in questions_json and isinstance(questions_json["questions"], dict):
+                questions_json = questions_json["questions"]
+
+            from tools.promoted_tools import ask_user_window
+            answer_raw = ask_user_window(json.dumps(questions_json, ensure_ascii=False))
+            try:
+                answer_data = json.loads(answer_raw)
+            except (json.JSONDecodeError, TypeError):
+                answer_data = {"status": "error", "message": "Could not parse questionnaire response."}
+
+            result = {
+                "questions": questions_json,
+                "answers": answer_data.get("answers") if answer_data.get("status") == "success" else None,
+                "status": answer_data.get("status", "unknown"),
+            }
+
+            squad_scratchpad.post(
+                run.trace_id, "questionnaire", "note", "result",
+                json.dumps(result, ensure_ascii=False),
+            )
+            _print_trace(
+                f" │   \033[92m[QUESTIONNAIRE]\033[0m "
+                f"Status: {result['status']}, answers collected."
+            )
+
+            if result["status"] != "success":
+                raise RuntimeError(f"Questionnaire failed: {answer_data.get('message', 'unknown error')}")
+
+            return None
+        except Exception as exc:
+            squad_scratchpad.post(run.trace_id, "questionnaire", "note", "Member failed", str(exc))
+            _print_trace(f" │   \033[91m[QUESTIONNAIRE ERROR]\033[0m {exc}")
+            return exc
 
 
 class FanOutPattern(BasePattern):

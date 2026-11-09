@@ -142,12 +142,12 @@ class TestChatServiceModelLimits(unittest.TestCase):
 
     def test_pinned_tools_survive_a_small_cap(self):
         rag = AgentProfile(id="rag-presenter", mode="agent", system_prompt="x",
-                           tools=["map_files", "call_subagent", "read_agent_scratchpad"])
+                           tools=["map_files", "call_subagent", "read_chat_scratchpad"])
         model_profiles.save("tiny-model:1b", 8192, 1024, 1)
         agent = Agent(model=None, tools=[], profile=rag)
         self.service._apply_model_limits(agent, rag, "tiny-model:1b")
 
-        self.assertEqual(set(agent.tools), {"call_subagent", "read_agent_scratchpad"})
+        self.assertEqual(set(agent.tools), {"call_subagent", "read_chat_scratchpad"})
 
     def test_changing_model_mid_chat_keeps_the_history(self):
         agent = Agent(model=None, tools=[], profile=self.profile)

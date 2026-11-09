@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 
 from squads.logic_squads import squad_architect
 from squads.schemas_squads import (
+    AgentPromptRequest,
     BlueprintValidation,
     MemberCreateRequest,
     SquadBlueprint,
@@ -31,6 +32,27 @@ def get_squad_agent(agent_id: str):
     if node is None:
         raise HTTPException(status_code=404, detail="Agent not found.")
     return node
+
+
+@router.get("/agents/{agent_id}/prompt")
+def get_agent_prompt(agent_id: str):
+    try:
+        text = squad_architect.get_agent_prompt(agent_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if text is None:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    return {"agent_id": agent_id, "prompt": text}
+
+
+@router.put("/agents/{agent_id}/prompt")
+def set_agent_prompt(agent_id: str, req: AgentPromptRequest):
+    try:
+        return squad_architect.set_agent_prompt(agent_id, req.prompt)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/blueprints/{squad_id}")

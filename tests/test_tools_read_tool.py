@@ -145,7 +145,7 @@ class TestReadTool(unittest.TestCase):
         self.assertLessEqual(len(result["content"]), 4000)
         self.assertEqual(result["total_chars"], len(long_text))
         self.assertEqual(result["next_offset"], len(result["content"]))
-        self.assertIn("read_agent_scratchpad(item='long.md', offset='", result["scratchpad"]["context"])
+        self.assertIn("chat session", result["scratchpad"]["context"])
 
 
 if __name__ == "__main__":

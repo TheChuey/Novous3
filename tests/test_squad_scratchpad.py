@@ -151,28 +151,69 @@ def test_sequential_members_receive_only_their_run_context():
 
 
 def test_agent_handoff_is_recorded_under_active_agent():
-    from tools.logic_tools import write_agent_scratchpad
+    from tools.logic_tools import write_squad_scratchpad
 
     squad_scratchpad.begin("run", "squad", "request")
     with telemetry_bus.agent_context("run", "worker"):
-        write_agent_scratchpad(subagent_id="another", task_type="review", payload='{"finding": "evidence"}')
+        write_squad_scratchpad(agent="worker", title="review", content='{"finding": "evidence"}')
     entry = squad_scratchpad.get("run")["entries"][0]
-    assert entry["author"] == "worker"
+    assert entry["author"] == "worker" and entry["title"] == "review"
     assert '"finding": "evidence"' in entry["content"]
 
 
 def test_squad_agent_tools_are_trace_scoped():
     import json
-    from tools.logic_tools import post_squad_scratchpad, read_squad_scratchpad
+    from tools.logic_tools import read_squad_scratchpad, write_squad_scratchpad
 
     squad_scratchpad.begin("run", "squad", "request")
     squad_scratchpad.begin("other", "squad", "another request")
     squad_scratchpad.post("other", "worker", "note", "other", "other run")
     with pytest.raises(ValueError, match="active squad run"):
-        read_squad_scratchpad()
+        read_squad_scratchpad(agent="worker", title="other")
     with telemetry_bus.agent_context("run", "worker"):
-        assert json.loads(post_squad_scratchpad("note", "run content"))["author"] == "worker"
-        result = json.loads(read_squad_scratchpad(author="worker"))
-        assert [entry["content"] for entry in result["entries"]] == ["run content"]
-        with pytest.raises(ValueError, match="limit"):
-            read_squad_scratchpad(limit="0")
+        result = json.loads(write_squad_scratchpad(agent="worker", title="note", content="run content"))
+        assert result["agent"] == "worker" and result["store"] == "squad"
+        found = json.loads(read_squad_scratchpad(agent="worker", title="note"))
+        assert found["found"] is True and found["content"] == "run content"
+        missing = json.loads(read_squad_scratchpad(agent="worker", title="other"))
+        assert missing["found"] is False and missing["available"] == [{"agent": "worker", "title": "note"}]
+        with pytest.raises(ValueError, match="agent and title"):
+            read_squad_scratchpad(agent="", title="note")
+
+
+def test_squad_read_pages_long_content_and_picks_by_index():
+    import json
+    from tools.logic_tools import read_squad_scratchpad
+
+    squad_scratchpad.begin("run", "squad", "request")
+    squad_scratchpad.post("run", "worker", "note", "result", "old")
+    squad_scratchpad.post("run", "worker", "note", "result", "x" * 9_000)
+    with telemetry_bus.agent_context("run", "worker"):
+        newest = json.loads(read_squad_scratchpad(agent="worker", title="result"))
+        assert newest["total_matches"] == 2 and newest["content"] == "x" * 8_000
+        assert newest["next_offset"] == 8_000
+        rest = json.loads(read_squad_scratchpad(agent="worker", title="result", offset="8000"))
+        assert rest["content"] == "x" * 1_000 and "next_offset" not in rest
+        older = json.loads(read_squad_scratchpad(agent="worker", title="result", index="1"))
+        assert older["content"] == "old"
+
+
+def test_clear_tool_removes_only_the_matching_entries():
+    import json
+    from tools.logic_tools import clear_squad_scratchpad, write_squad_scratchpad
+
+    squad_scratchpad.begin("run", "squad", "request")
+    squad_scratchpad.begin("other", "squad", "another request")
+    squad_scratchpad.post("other", "worker", "note", "other", "other run")
+    squad_scratchpad.post("run", "worker", "plan", "drop me", "plan entry")
+    with telemetry_bus.agent_context("run", "worker"):
+        write_squad_scratchpad(agent="worker", title="keep", content="keep me")
+        before = squad_scratchpad.get("run")["version"]
+        assert json.loads(clear_squad_scratchpad(kind="plan"))["removed"] == 1
+        assert squad_scratchpad.get("run")["version"] == before + 1
+        with pytest.raises(ValueError, match="kind must be one of"):
+            clear_squad_scratchpad(kind="bogus")
+        assert json.loads(clear_squad_scratchpad())["removed"] == 1
+        assert squad_scratchpad.get("run")["total"] == 0
+        assert squad_scratchpad.get("run")["status"] == "running"
+    assert squad_scratchpad.get("other")["total"] == 1

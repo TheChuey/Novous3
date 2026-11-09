@@ -33,9 +33,11 @@ the general or coding scratchpads, nor change how agents use those scratchpads.
 Sequential squad members and the lead receive a bounded excerpt of recent entries
 from their own run. CodeBuilder's plan, build, test and fix steps also receive recent
 notes from the run; fan-out members start independently and the lead sees their results.
-Tool-capable agents can additionally be assigned `read_squad_scratchpad` and
-`post_squad_scratchpad` in the agent tool settings. These tools operate only on
-the current squad run and report an error outside one. The CodeBuilder pipeline
+Tool-capable agents can additionally be assigned `read_squad_scratchpad`,
+`post_squad_scratchpad` and `clear_squad_scratchpad` in the agent tool settings.
+These tools operate only on the current squad run and report an error outside one.
+`clear_squad_scratchpad` removes entries (optionally only those of one kind or
+author) and keeps the run active; it does not delete the run record. The CodeBuilder pipeline
 continues to use its existing text-only agents and orchestrator-written entries.
 
 Open **Squad scratchpads** in Runs or CodeBuilder to select a run, filter by agent

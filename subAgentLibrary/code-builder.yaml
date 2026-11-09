@@ -3,7 +3,7 @@ name: Code Builder Sub-Agent
 description: Writes or changes the single Python module in the CodeBuilder editor.
 type: subagent
 mode: agent
-model: qwen2.5-coder:latest
+model: qwen2.5-coder:14b
 environment: workspace
 squad: code-squad
 version: 2

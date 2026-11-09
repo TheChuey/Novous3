@@ -10,7 +10,7 @@ from orchestration.logic_orchestration import (
     telemetry_bus,
 )
 
-META = {"id": "worker", "mode": "agent", "tools": ["map_files", "read_agent_scratchpad"], "model": "tiny-model:1b"}
+META = {"id": "worker", "mode": "agent", "tools": ["map_files", "read_squad_scratchpad"], "model": "tiny-model:1b"}
 
 
 def usage_events(trace_id):
@@ -48,7 +48,7 @@ class TestSquadTurnUsage(unittest.TestCase):
         data = usage_events(self.trace_id)[-1]["data"]
         self.assertEqual(data["tools_total"], 2)
         self.assertEqual(data["tools_active"], 1)
-        self.assertIn("read_agent_scratchpad", SQUAD_PINNED_TOOLS)
+        self.assertIn("read_squad_scratchpad", SQUAD_PINNED_TOOLS)
 
     def test_a_sub_agent_turn_is_credited_to_the_sub_agent(self):
         response = {"message": {"role": "assistant", "content": "done"}, "prompt_eval_count": 40}

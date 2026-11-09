@@ -16,11 +16,16 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 
-from core_engine.logic_core_engine import agent_library, current_agent_id, tool, tool_catalog
+from core_engine.logic_core_engine import (
+    agent_library, current_agent_id, current_session_id, tool, tool_catalog,
+)
 from editor.logic_editor import editor_files
 from file_manager.logic_file_manager import file_backend
 from ragMemory import interface_ragMemory as rag
-from scratchpadMemory.logic_scratchpadMemory import code_scratchpad, scratchpad, squad_scratchpad
+from scratchpadMemory.logic_scratchpadMemory import (
+    available_scratchpad_pairs, chat_scratchpad, code_scratchpad, match_scratchpad_entries,
+    scratchpad, squad_scratchpad,
+)
 
 
 class FileReadLimitError(ValueError):
@@ -679,21 +684,182 @@ tool_registry = ToolRegistryService()
 
 # --- Agent-facing tools ----------------------------------------------------------------
 
+# Scratchpad tools: one write and one read for each store (coding, chat, squad). A write saves
+# content under an agent name and a title. A read returns one entry picked by agent, title and
+# index (0 = newest), so the model asks for something specific instead of the whole store.
+_CODE_SCRATCHPAD_TOOL_KINDS = {"note", "plan", "code", "test", "fix"}
+_SCRATCHPAD_READ_LIMIT = 8_000
+
+
+def _scratchpad_writer(agent: str) -> str:
+    return str(agent or "").strip() or current_agent_id() or "agent"
+
+
+def _scratchpad_key(agent: str, title: str, index: str) -> tuple[str, str, int]:
+    agent = str(agent or "").strip()
+    title = str(title or "").strip()
+    if not agent or not title:
+        raise ValueError("agent and title are required: pass the agent name and the title the entry was saved under.")
+    try:
+        position = int(str(index or "0").strip() or "0")
+    except ValueError as exc:
+        raise ValueError("index must be a whole number: 0 is the newest match.") from exc
+    if position < 0:
+        raise ValueError("index must be 0 or greater: 0 is the newest match.")
+    return agent, title, position
+
+
+def _scratchpad_offset(offset: str) -> int:
+    try:
+        value = int(str(offset or "0").strip() or "0")
+    except ValueError as exc:
+        raise ValueError("offset must be a whole number of characters.") from exc
+    if value < 0:
+        raise ValueError("offset must be 0 or greater.")
+    return value
+
+
+def _scratchpad_write_args(agent: str, title: str, content: str) -> tuple[str, str]:
+    title = str(title or "").strip()
+    if not title or not str(content or "").strip():
+        raise ValueError("title and content must not be empty.")
+    return _scratchpad_writer(agent), title
+
+
+def _scratchpad_recall(store: str, entries: list[dict], agent: str, title: str, index: int, offset: int) -> str:
+    """One entry chosen by agent, title and index, returned as a page of its content."""
+    matches = match_scratchpad_entries(entries, agent, title)
+    if not matches:
+        return json.dumps({
+            "found": False, "store": store,
+            "message": f"No {store} entry from '{agent}' titled '{title}'.",
+            "available": available_scratchpad_pairs(entries),
+        }, ensure_ascii=False, indent=2)
+    if index >= len(matches):
+        return json.dumps({
+            "found": False, "store": store,
+            "message": f"Only {len(matches)} matching {store} entries. Use an index from 0 to {len(matches) - 1}.",
+            "available": available_scratchpad_pairs(entries),
+        }, ensure_ascii=False, indent=2)
+    entry = matches[index]
+    content = str(entry.get("content", ""))
+    page = content[offset: offset + _SCRATCHPAD_READ_LIMIT]
+    result = {
+        "found": True, "store": store, "agent": entry.get("author", ""), "title": entry.get("title", ""),
+        "index": index, "total_matches": len(matches), "created_at": entry.get("created_at", ""),
+        "offset": offset, "total_chars": len(content), "content": page,
+    }
+    next_offset = offset + len(page)
+    if next_offset < len(content):
+        result["next_offset"] = next_offset
+        result["hint"] = (f"More content. Call read_{store}_scratchpad with agent='{agent}', "
+                          f"title='{title}', index='{index}', offset='{next_offset}'.")
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _chat_session_id() -> str:
+    session_id = current_session_id()
+    if not session_id:
+        raise ValueError("The chat scratchpad is only available inside a chat session.")
+    return session_id
+
+
+def _active_squad_scratchpad() -> tuple[str, str]:
+    from orchestration.logic_orchestration import telemetry_bus
+
+    context = telemetry_bus.current_context()
+    if context is None:
+        raise ValueError("This tool requires an active squad run.")
+    run = squad_scratchpad.get(context[0])
+    if run is None or run["status"] != "running":
+        raise ValueError("This tool requires an active squad run.")
+    return context
+
+
+def _mirror_squad_handoff(trace_id: str, agent: str, title: str, content: str) -> None:
+    """Squad and code pipelines read the newest handoff from the shared agent scratchpad; keep it current."""
+    from orchestration.logic_orchestration import codebuilder_run_state
+
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        payload = None
+    if not isinstance(payload, (dict, list)) or not payload:
+        payload = {"text": content}
+    scratchpad.store_subagent_result(subagent_id=agent, task_type=title, status="success", payload=payload)
+    codebuilder_run_state.save_handoff(trace_id, agent, title, "success", payload)
+
+
 @tool(provider="scratchpadMemory")
-def read_agent_scratchpad(memory_type: str = "index", item: str = "", offset: str = "0", max_chars: str = "4000") -> str:
-    """Recall what you have read or saved: call this when the user asks what you remember, to list or summarize saved files, or about earlier content; no arguments lists items, item=<path or id> reads one in pages.
-
-    With no arguments, returns an index of saved items (id, kind, label, size, time, preview).
-    With item set to a file path or id, returns one page of that item's text, at most max_chars
-    long, starting at offset. Pass next_offset from the result as offset to read the next page.
-    memory_type 'latest_read', 'latest_map' or 'latest_subagent_result' returns the newest of that kind.
-    """
-    return json.dumps(scratchpad.recall(memory_type, item, offset, max_chars), ensure_ascii=False)
+def write_coding_scratchpad(agent: str, title: str, content: str) -> str:
+    """Save content to the coding scratchpad under an agent name and a title. Read it back with read_coding_scratchpad using the same agent and title."""
+    writer, title = _scratchpad_write_args(agent, title, content)
+    entry = code_scratchpad.post(writer, "note", title, content, run_id="chat")
+    return json.dumps({"saved": True, "store": "coding", "agent": writer, "title": title, "id": entry["id"]},
+                      ensure_ascii=False)
 
 
-@tool(provider="orchestration")
-def call_subagent(subagent_id: str, task_prompt: str, parameters: str = "{}") -> str:
-    """Dynamically invoke a background sub-agent from subAgentLibrary/ with a task prompt and parameters."""
+@tool(provider="scratchpadMemory")
+def read_coding_scratchpad(agent: str, title: str, index: str = "0", offset: str = "0") -> str:
+    """Read one coding scratchpad entry by agent name and title. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist."""
+    agent, title, position = _scratchpad_key(agent, title, index)
+    entries = code_scratchpad.entries(limit=code_scratchpad.MAX_ENTRIES)
+    return _scratchpad_recall("coding", entries, agent, title, position, _scratchpad_offset(offset))
+
+
+@tool(provider="scratchpadMemory")
+def write_chat_scratchpad(agent: str, title: str, content: str) -> str:
+    """Save content to this chat's scratchpad under an agent name and a title. Read it back with read_chat_scratchpad using the same agent and title."""
+    session_id = _chat_session_id()
+    writer, title = _scratchpad_write_args(agent, title, content)
+    entry = chat_scratchpad.post(session_id, writer, title, content)
+    return json.dumps({"saved": True, "store": "chat", "agent": writer, "title": title, "id": entry["id"]},
+                      ensure_ascii=False)
+
+
+@tool(provider="scratchpadMemory")
+def read_chat_scratchpad(agent: str, title: str, index: str = "0", offset: str = "0") -> str:
+    """Read one entry from this chat's scratchpad by agent name and title. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist."""
+    session_id = _chat_session_id()
+    agent, title, position = _scratchpad_key(agent, title, index)
+    entries = chat_scratchpad.entries(session_id)
+    return _scratchpad_recall("chat", entries, agent, title, position, _scratchpad_offset(offset))
+
+
+@tool(provider="scratchpadMemory")
+def write_squad_scratchpad(agent: str, title: str, content: str) -> str:
+    """Save content to the current squad run's scratchpad under an agent name and a title. Read it back with read_squad_scratchpad using the same agent and title."""
+    trace_id, _ = _active_squad_scratchpad()
+    writer, title = _scratchpad_write_args(agent, title, content)
+    entry = squad_scratchpad.post(trace_id, writer, "note", title, content)
+    _mirror_squad_handoff(trace_id, writer, title, content)
+    return json.dumps({"saved": True, "store": "squad", "agent": writer, "title": title, "id": entry["id"]},
+                      ensure_ascii=False)
+
+
+@tool(provider="scratchpadMemory")
+def read_squad_scratchpad(agent: str, title: str, index: str = "0", offset: str = "0") -> str:
+    """Read one entry from the current squad run's scratchpad by agent name and title. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist."""
+    trace_id, _ = _active_squad_scratchpad()
+    agent, title, position = _scratchpad_key(agent, title, index)
+    run = squad_scratchpad.get(trace_id)
+    entries = run["entries"] if run else []
+    return _scratchpad_recall("squad", entries, agent, title, position, _scratchpad_offset(offset))
+
+
+@tool(provider="scratchpadMemory")
+def clear_squad_scratchpad(kind: str = "", author: str = "") -> str:
+    """Clear entries from the current squad run's scratchpad. Optionally limit by kind or author; leave both empty to clear everything. The run itself stays active."""
+    trace_id, _ = _active_squad_scratchpad()
+    kind = str(kind or "").strip().lower()
+    if kind and kind not in _CODE_SCRATCHPAD_TOOL_KINDS:
+        raise ValueError("kind must be one of: " + ", ".join(sorted(_CODE_SCRATCHPAD_TOOL_KINDS)))
+    author = str(author or "").strip()
+    removed = squad_scratchpad.clear_entries(trace_id, author=author, kind=kind)
+    return json.dumps({"cleared": True, "removed": removed}, ensure_ascii=False)
+
+
+def _run_subagent(subagent_id: str, task_prompt: str, parameters: str) -> str:
     from orchestration.logic_orchestration import RAG_RETRIEVER_ID, rag_retriever, subagent_runner
 
     # A caller whose prompt lists '## Sub-agents' may only reach those; no list means unrestricted.
@@ -730,148 +896,27 @@ def call_subagent(subagent_id: str, task_prompt: str, parameters: str = "{}") ->
     )
 
 
-@tool(provider="scratchpadMemory")
-def write_agent_scratchpad(
-    subagent_id: str = "subagent",
-    task_type: str = "general",
-    status: str = "success",
-    payload: str = "",
-) -> str:
-    """Write structured sub-agent execution payloads into the shared scratchpad."""
-    from orchestration.logic_orchestration import (
-        TASK_TYPE_BY_AGENT,
-        codebuilder_run_state,
-        telemetry_bus,
-    )
-
-    # Inside a trace, the active code agent's identity wins over what the model passed.
-    trace_context = telemetry_bus.current_context()
-    if trace_context is not None:
-        trace_id, active_agent_id = trace_context
-        if active_agent_id in TASK_TYPE_BY_AGENT:
-            subagent_id = active_agent_id
-            task_type = TASK_TYPE_BY_AGENT[active_agent_id]
-
-    parsed_payload = payload
-    if isinstance(payload, str) and payload.strip().startswith(("[", "{")):
+@tool(provider="orchestration")
+def call_subagent(subagent_id: str, task_prompt: str, parameters: str = "{}") -> str:
+    """Dynamically invoke a background sub-agent from subAgentLibrary/ with a task prompt and parameters. In a chat, its output is saved to the chat scratchpad as agent=<subagent_id>, title=result."""
+    before = scratchpad.read_memory("latest_subagent_result").get("latest_subagent_result")
+    output = _run_subagent(subagent_id, task_prompt, parameters)
+    session_id = current_session_id()
+    if session_id and output:
+        chat_scratchpad.post(session_id, subagent_id, "result", output)
+    after = scratchpad.read_memory("latest_subagent_result").get("latest_subagent_result")
+    already_stored = after is not None and after is not before and after != before
+    if not already_stored:
         try:
-            parsed_payload = json.loads(payload)
-        except Exception:
-            parsed_payload = payload
-
-    # An empty write used to report success with nothing stored; fail so the model retries.
-    if parsed_payload is None or (isinstance(parsed_payload, str) and not parsed_payload.strip()) \
-            or parsed_payload in ({}, []):
-        raise ValueError(
-            'payload is empty. Pass a JSON object with the results, for example '
-            '{"answers": {}, "summary": "..."}; use an empty answers object if none were given.'
+            payload = json.loads(output) if isinstance(output, str) else output
+        except (json.JSONDecodeError, TypeError):
+            payload = {"result": output}
+        if not isinstance(payload, dict) or not payload:
+            payload = {"result": output}
+        scratchpad.store_subagent_result(
+            subagent_id=subagent_id, task_type="call_subagent", status="success", payload=payload
         )
-
-    result = scratchpad.store_subagent_result(
-        subagent_id=subagent_id,
-        task_type=task_type,
-        status=status,
-        payload=parsed_payload,
-    )
-    if trace_context is not None:
-        codebuilder_run_state.save_handoff(trace_id, subagent_id, task_type, status, parsed_payload)
-        if squad_scratchpad.get(trace_id) is not None:
-            squad_scratchpad.post(
-                trace_id, active_agent_id, "note", f"Handoff: {task_type} ({status})",
-                json.dumps(parsed_payload, ensure_ascii=False, indent=2),
-            )
-    return json.dumps(result, ensure_ascii=False, indent=2)
-
-
-_CODE_SCRATCHPAD_TOOL_KINDS = {"note", "plan", "code", "test", "fix"}
-_CODE_SCRATCHPAD_READ_LIMIT = 4_000
-
-
-@tool(provider="scratchpadMemory")
-def read_code_scratchpad(kind: str = "", limit: str = "10") -> str:
-    """Read the coding agents' shared scratchpad, newest first.
-
-    kind filters by entry type: plan, code, test, fix, summary, or note ('' for all).
-    """
-    try:
-        count = max(1, min(int(limit or 10), 50))
-    except (TypeError, ValueError):
-        count = 10
-    compact = []
-    for entry in code_scratchpad.entries(limit=count, kind=str(kind or "").strip()):
-        content = entry.get("content", "")
-        item = {key: entry.get(key) for key in ("author", "kind", "title", "run_id", "created_at")}
-        item["content"] = content[:_CODE_SCRATCHPAD_READ_LIMIT]
-        if len(content) > _CODE_SCRATCHPAD_READ_LIMIT:
-            item["content_truncated"] = True
-        compact.append(item)
-    return json.dumps({"entries": compact}, ensure_ascii=False, indent=2)
-
-
-@tool(provider="scratchpadMemory")
-def post_code_scratchpad(title: str, content: str, kind: str = "note") -> str:
-    """Post an entry to the coding agents' shared scratchpad so the code squad and other agents see it.
-
-    kind is note (default), plan, code, test, or fix.
-    """
-    kind = str(kind or "note").strip().lower()
-    if kind not in _CODE_SCRATCHPAD_TOOL_KINDS:
-        raise ValueError("kind must be one of: " + ", ".join(sorted(_CODE_SCRATCHPAD_TOOL_KINDS)))
-    if not str(content or "").strip():
-        raise ValueError("content must not be empty.")
-    entry = code_scratchpad.post(current_agent_id() or "agent", kind, title, content, run_id="chat")
-    return json.dumps(
-        {"posted": True, "id": entry["id"], "author": entry["author"], "kind": entry["kind"]},
-        ensure_ascii=False,
-    )
-
-
-def _active_squad_scratchpad() -> tuple[str, str]:
-    from orchestration.logic_orchestration import telemetry_bus
-
-    context = telemetry_bus.current_context()
-    if context is None:
-        raise ValueError("This tool requires an active squad run.")
-    run = squad_scratchpad.get(context[0])
-    if run is None or run["status"] != "running":
-        raise ValueError("This tool requires an active squad run.")
-    return context
-
-
-@tool(provider="scratchpadMemory")
-def read_squad_scratchpad(kind: str = "", author: str = "", limit: str = "10") -> str:
-    """Read recent entries from the current squad run, optionally filtering by kind or author."""
-    trace_id, _ = _active_squad_scratchpad()
-    try:
-        count = int(limit)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("limit must be an integer from 1 to 50.") from exc
-    if not 1 <= count <= 50:
-        raise ValueError("limit must be an integer from 1 to 50.")
-    run = squad_scratchpad.get(trace_id, kind=kind, author=author)
-    if run is None:
-        raise ValueError("The squad scratchpad is no longer available.")
-    entries = []
-    for entry in run["entries"][:count]:
-        item = dict(entry)
-        item["content"] = entry["content"][:_CODE_SCRATCHPAD_READ_LIMIT]
-        if len(entry["content"]) > _CODE_SCRATCHPAD_READ_LIMIT:
-            item["content_truncated"] = True
-        entries.append(item)
-    return json.dumps({"run_id": trace_id, "entries": entries}, ensure_ascii=False, indent=2)
-
-
-@tool(provider="scratchpadMemory")
-def post_squad_scratchpad(title: str, content: str, kind: str = "note") -> str:
-    """Post a note, plan, code, test, or fix to the current squad run's scratchpad."""
-    trace_id, author = _active_squad_scratchpad()
-    kind = str(kind or "note").strip().lower()
-    if kind not in _CODE_SCRATCHPAD_TOOL_KINDS:
-        raise ValueError("kind must be one of: " + ", ".join(sorted(_CODE_SCRATCHPAD_TOOL_KINDS)))
-    if not str(content or "").strip():
-        raise ValueError("content must not be empty.")
-    entry = squad_scratchpad.post(trace_id, author, kind, title, content)
-    return json.dumps({"posted": True, "id": entry["id"], "author": author, "kind": kind}, ensure_ascii=False)
+    return output
 
 
 @tool(provider="ragMemory")
@@ -958,7 +1003,11 @@ def map_files(path: str = "") -> str:
     """Return a directory tree and save a copy in the shared agent-memory scratchpad."""
     tree = workspace_files.map_files(path)
     scratchpad.store_map(tree, path)
-    return json.dumps(tree, ensure_ascii=False, indent=2)
+    rendered = json.dumps(tree, ensure_ascii=False, indent=2)
+    session_id = current_session_id()
+    if session_id:
+        chat_scratchpad.post(session_id, "map_files", path or "workspace", rendered)
+    return rendered
 
 
 map_files.display_output = True
@@ -970,7 +1019,8 @@ def read_file(path: str, request: str = "") -> str:
 
     PDF, DOCX, PPTX, and ODT documents are text-extracted with Docling; OCR is enabled
     for PDFs to support scanned pages. Text files are limited to 1 MB; documents to
-    25 MB and 1 MB of extracted text. Successful reads are saved to agent memory in full.
+    25 MB and 1 MB of extracted text. Inside a chat, the full text is saved to the chat
+    scratchpad as agent=read_file, title=<path>, and read_chat_scratchpad pages through it.
     Returns JSON with the request, path, the first page of content (with next_offset
     when the file is longer), and scratchpad context for fetching the rest.
     """
@@ -983,18 +1033,24 @@ def read_file(path: str, request: str = "") -> str:
         raise RuntimeError(f"Could not read '{path}': {exc}") from exc
 
     scratchpad_result = scratchpad.store_read(result["path"], content, request)
+    session_id = current_session_id()
+    if session_id and content:
+        chat_scratchpad.post(session_id, "read_file", result["path"], content)
     page = scratchpad.window(content, 0, scratchpad.RECALL_DEFAULT_CHARS)
-    if page["truncated"]:
+    if page["truncated"] and session_id:
         context = (
             f"Showing the first {page['returned_chars']} of {page['total_chars']} characters. "
-            f"The full text is saved in the scratchpad. Call read_agent_scratchpad(item='{result['path']}', "
-            f"offset='{page['next_offset']}') for the next page. Do not call read_file again for this file."
+            f"The full text is saved in this chat's scratchpad. Call read_chat_scratchpad(agent='read_file', "
+            f"title='{result['path']}', offset='{page['next_offset']}') for the next part. "
+            "Do not call read_file again for this file."
+        )
+    elif page["truncated"]:
+        context = (
+            f"Showing the first {page['returned_chars']} of {page['total_chars']} characters. "
+            "The rest is only kept inside a chat session, so ask for the part you need instead."
         )
     else:
-        context = (
-            f"Full text returned. Also saved in the scratchpad for later recall: "
-            f"read_agent_scratchpad(item='{result['path']}')."
-        )
+        context = "Full text returned."
     payload = {
         "request": request,
         "path": result["path"],

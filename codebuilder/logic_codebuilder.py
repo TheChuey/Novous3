@@ -119,12 +119,12 @@ class CodeBuilderService:
         }
 
     def _questions_from_scratchpad(self) -> Any:
-        """Return the questionnaire an agent saved with write_agent_scratchpad (the newest sub-agent result)."""
+        """Return the questionnaire an agent saved last (the newest squad handoff, titled "questionnaire")."""
         entry = scratchpad.read_memory("latest_subagent_result").get("latest_subagent_result") or {}
         if entry.get("task_type") != "questionnaire":
             raise ValueError(
-                "No questionnaire was found in the scratchpad. Save it with write_agent_scratchpad "
-                "(task_type \"questionnaire\") immediately before calling ask_user_questions."
+                "No questionnaire was found in the scratchpad. Save it with write_squad_scratchpad "
+                "(title \"questionnaire\") immediately before calling ask_user_questions."
             )
         payload = entry.get("payload")
         if isinstance(payload, str):
@@ -134,7 +134,7 @@ class CodeBuilderService:
                 raise ValueError(f"Error parsing the questionnaire saved in the scratchpad: {exc}") from exc
         if not payload:
             raise ValueError(
-                "No questionnaire was found in the scratchpad. Save it with write_agent_scratchpad first."
+                "No questionnaire was found in the scratchpad. Save it with write_squad_scratchpad first."
             )
         return payload
 

@@ -167,22 +167,24 @@ def test_inspect_http_routes_lists_static_route_declarations(monkeypatch):
 
 
 def test_scratchpad_tool_records_handoff_for_current_workflow_only(monkeypatch):
+    from scratchpadMemory.logic_scratchpadMemory import squad_scratchpad
+
     trace_id = "tr_current_scratchpad_handoff"
     telemetry_bus.initialize_trace(trace_id)
+    squad_scratchpad.begin(trace_id, "code-squad", "fix the URL handling")
     monkeypatch.setattr(scratchpad, "store_subagent_result", lambda **_kwargs: {"updated_at": "test"})
 
     with telemetry_bus.agent_context(trace_id, "code-troubleshooter"):
-        registered_tool("write_agent_scratchpad")(
-            subagent_id="code-troubleshooter",
-            task_type="code_troubleshooting",
-            status="nothing_found",
-            payload='{"reason":"URL was not provided"}',
+        registered_tool("write_squad_scratchpad")(
+            agent="code-troubleshooter",
+            title="code_troubleshooting",
+            content='{"reason":"URL was not provided"}',
         )
 
     assert codebuilder_run_state.get_handoff(trace_id) == {
         "subagent_id": "code-troubleshooter",
         "task_type": "code_troubleshooting",
-        "status": "nothing_found",
+        "status": "success",
         "payload": {"reason": "URL was not provided"},
     }
 

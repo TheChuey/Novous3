@@ -123,7 +123,7 @@ def test_shipped_sample_squad_suites_are_valid():
     folder = repo_root / "workspace" / "saved_test_suites" / "squads"
     samples = sorted(folder.glob("*.json"))
 
-    assert len(samples) == 5
+    assert len(samples) >= 5
     for path in samples:
         suite = json.loads(path.read_text(encoding="utf-8"))
         SuiteSaveRequest(**{k: suite[k] for k in ("name", "category", "description", "agent_id", "model", "steps")})

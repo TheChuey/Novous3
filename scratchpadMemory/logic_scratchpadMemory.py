@@ -217,7 +217,7 @@ class ScratchpadService:
             if self._label(kind, entry) == key:
                 return kind, entry
         raise ValueError(
-            f"No saved item matches '{key}'. Call read_agent_scratchpad with no arguments to list saved items."
+            f"No saved item matches '{key}'. Use the index to list saved items."
         )
 
     def window(self, text: str, offset: int = 0, max_chars: int = RECALL_DEFAULT_CHARS) -> dict[str, Any]:
@@ -276,7 +276,7 @@ class ScratchpadService:
         match = next(((k, e) for k, e in items if k == kind), None)
         if match is None:
             return {"kind": kind, "item": None,
-                    "message": f"Nothing saved as {kind} yet. Call read_agent_scratchpad with no arguments to list saved items."}
+                    "message": f"Nothing saved as {kind} yet."}
         return self._fetch(*match, start, size)
 
     def _index(self, items: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
@@ -296,7 +296,7 @@ class ScratchpadService:
             if kind == "subagent":
                 row["status"] = entry.get("status", "")
             rows.append(row)
-        hint = ("Call read_agent_scratchpad(item=<id>) to read one item in pages."
+        hint = ("Read one item by its id in pages."
                 if items else "Nothing is saved yet.")
         return {"items": rows, "total_items": len(items), "showing": len(rows), "hint": hint}
 
@@ -310,7 +310,7 @@ class ScratchpadService:
             header.update(task_type=entry.get("task_type", ""), status=entry.get("status", ""))
         page = self.window(self._body(kind, entry), offset, size)
         if page["truncated"]:
-            page["hint"] = f"Continue with read_agent_scratchpad(item='{item_id}', offset='{page['next_offset']}')."
+            page["hint"] = f"Continue from offset {page['next_offset']} for item '{item_id}'."
         return {**header, **page}
 
     def _latest_subagent(self, data: dict[str, Any], offset: int, size: int) -> dict[str, Any]:
@@ -329,8 +329,7 @@ class ScratchpadService:
             **page,
         }
         if windowed["truncated"]:
-            windowed["hint"] = (f"Continue with read_agent_scratchpad(item='{windowed['id']}', "
-                                f"offset='{windowed['next_offset']}').")
+            windowed["hint"] = (f"Continue from offset {windowed['next_offset']} for item '{windowed['id']}'.")
         return {"latest_subagent_result": windowed}
 
     def clear_memory(self) -> dict[str, Any]:
@@ -533,7 +532,99 @@ class SquadScratchpadService:
             self._write(runs)
         return True
 
+    def clear_entries(self, run_id: str, author: str = "", kind: str = "") -> int:
+        """Remove entries from a run, keeping the run record. Works while the run is active."""
+        with self._lock:
+            runs = self._read()
+            if run_id not in runs:
+                raise KeyError(run_id)
+            run = runs[run_id]
+            kept = [
+                entry for entry in run["entries"]
+                if not ((not author or entry["author"] == author) and (not kind or entry["kind"] == kind))
+            ]
+            removed = len(run["entries"]) - len(kept)
+            if removed:
+                run["entries"] = kept
+                run["version"] = run.get("version", 0) + 1
+                self._write(runs)
+        return removed
+
+
+class ChatScratchpadService:
+    """Notes and results saved per chat session, so each chat keeps its own history."""
+
+    PATH = COMPONENT_ROOT / "data" / "chat_scratchpad.json"
+    MAX_ENTRIES = 200
+    MAX_CONTENT_CHARS = 20_000
+
+    def __init__(self):
+        self._lock = threading.RLock()
+
+    def _read(self) -> dict[str, Any]:
+        if not self.PATH.is_file():
+            return {}
+        try:
+            data = json.loads(self.PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Could not read chat scratchpad '{self.PATH}': {exc}") from exc
+        sessions = data.get("sessions") if isinstance(data, dict) else None
+        return sessions if isinstance(sessions, dict) else {}
+
+    def _write(self, sessions: dict[str, Any]) -> None:
+        _write_json_atomic(self.PATH, {"sessions": sessions}, ".chat_scratchpad.")
+
+    def post(self, session_id: str, author: str, title: str, content: str) -> dict[str, Any]:
+        text = str(content or "")
+        entry = {
+            "id": uuid.uuid4().hex[:12], "session_id": session_id,
+            "author": str(author or "unknown"), "title": str(title or "")[:200],
+            "content": text[:self.MAX_CONTENT_CHARS], "truncated": len(text) > self.MAX_CONTENT_CHARS,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with self._lock:
+            sessions = self._read()
+            sessions[session_id] = (sessions.get(session_id, []) + [entry])[-self.MAX_ENTRIES:]
+            self._write(sessions)
+        return entry
+
+    def entries(self, session_id: str) -> list[dict[str, Any]]:
+        """Entries of one session, newest first."""
+        with self._lock:
+            items = list(self._read().get(session_id, []))
+        return list(reversed(items))
+
+    def clear(self, session_id: str) -> int:
+        with self._lock:
+            sessions = self._read()
+            removed = len(sessions.pop(session_id, []))
+            self._write(sessions)
+        return removed
+
+
+def match_scratchpad_entries(entries: list[dict[str, Any]], agent: str, title: str) -> list[dict[str, Any]]:
+    """Entries whose agent and title match exactly (case-insensitive), newest first."""
+    wanted_agent, wanted_title = agent.strip().lower(), title.strip().lower()
+    return [
+        entry for entry in entries
+        if str(entry.get("author", "")).strip().lower() == wanted_agent
+        and str(entry.get("title", "")).strip().lower() == wanted_title
+    ]
+
+
+def available_scratchpad_pairs(entries: list[dict[str, Any]], limit: int = 50) -> list[dict[str, str]]:
+    """Distinct agent and title pairs present in a store, for a model to retry with."""
+    seen: list[dict[str, str]] = []
+    for entry in entries:
+        pair = {"agent": str(entry.get("author", "")), "title": str(entry.get("title", ""))}
+        if pair not in seen:
+            seen.append(pair)
+        if len(seen) >= limit:
+            break
+    return seen
+
 
 scratchpad = ScratchpadService()
 code_scratchpad = CodeScratchpadService()
 squad_scratchpad = SquadScratchpadService()
+chat_scratchpad = ChatScratchpadService()

@@ -3,6 +3,7 @@ import { createIcon, iconSvg } from './icons.js';
 import { appendMarkdown } from './markdown.js';
 import { ragWarningNodes } from './rag_warnings.js';
 import { setupScratchpadReader } from './scratchpad_reader.js';
+import { attachScratchpadSwitcher } from './scratchpad_switcher.js';
 import { setupSidePanels } from './side_panels.js';
 import { buildTestPanel } from './test_panel.js';
 import { contextChipText, contextLevel, renderContextReport, summarizeReport } from './context_window.js';
@@ -604,6 +605,21 @@ export function renderChatView(container) {
     scratchpadDialog.close();
   });
   container.querySelector('[data-scratchpad-refresh]').addEventListener('click', loadScratchpad);
+
+  attachScratchpadSwitcher({
+    toolbar: container.querySelector('#chat-scratchpad-toolbar'),
+    content: scratchpadContent,
+    nativeControls: [],
+    currentStore: 'chat',
+    onRestore: loadScratchpad,
+    onNativeClear: async () => {
+      if (!confirm('Clear the chat scratchpad? This cannot be undone.')) return;
+      await Api.clearAgentScratchpad();
+      scratchpadContent.textContent = '';
+      scratchpadStatus.textContent = 'Scratchpad cleared.';
+      scratchpadStatus.hidden = false;
+    },
+  });
 
   const knowledgeCatalogDialog = container.querySelector('#chat-knowledge-catalog-dialog');
   const knowledgeCatalogContent = container.querySelector('#chat-knowledge-catalog-content');

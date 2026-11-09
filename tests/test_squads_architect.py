@@ -25,7 +25,7 @@ description: Does background work.
 type: subagent
 mode: agent
 tools:
-  - write_agent_scratchpad
+  - write_squad_scratchpad
 prompt: |
   # Worker
 """
@@ -50,7 +50,7 @@ def blueprint(**overrides):
     data = {
         "name": "Research Team",
         "pattern": "fanout",
-        "lead": SquadMember(agent_id="lead", tools=["read_agent_scratchpad"]),
+        "lead": SquadMember(agent_id="lead", tools=["read_squad_scratchpad"]),
         "members": [SquadMember(agent_id="peer"), SquadMember(agent_id="worker")],
     }
     data.update(overrides)
@@ -61,7 +61,7 @@ def test_describe_agent_reports_kind_tools_and_mode(libraries):
     assert squad_architect.describe_agent("lead")["kind"] == "agent"
     worker = squad_architect.describe_agent("worker")
     assert worker["kind"] == "subagent"
-    assert worker["tools"] == ["write_agent_scratchpad"]
+    assert worker["tools"] == ["write_squad_scratchpad"]
     assert squad_architect.describe_agent("ghost") is None
 
 
@@ -80,7 +80,7 @@ def test_validate_reports_structural_errors_and_handoff_warnings(libraries):
 
     ok = squad_architect.validate(blueprint(lead=SquadMember(agent_id="lead")))
     assert ok.ok
-    assert any("read_agent_scratchpad" in warning for warning in ok.warnings)
+    assert any("read_squad_scratchpad" in warning for warning in ok.warnings)
 
 
 def test_save_blueprint_registers_squad_and_applies_tools_and_allow_list(libraries):
@@ -92,7 +92,7 @@ def test_save_blueprint_registers_squad_and_applies_tools_and_allow_list(librari
     plan = saved["blueprint"]
     assert plan["pattern"] == "fanout"
     assert [member["id"] for member in plan["members"]] == ["peer", "worker"]
-    assert plan["lead"]["tools"] == ["read_agent_scratchpad", "call_subagent"]
+    assert plan["lead"]["tools"] == ["read_squad_scratchpad", "call_subagent"]
     assert plan["lead"]["mode"] == "agent"
     # Only sub-agent members go on the delegation allow-list; peers run through the pattern.
     assert plan["lead"]["allowed_subagents"] == ["worker"]
@@ -126,4 +126,4 @@ def test_create_member_scaffolds_either_kind(libraries):
     agent = squad_architect.create_member("agent", "analyst", "Analyst", "Analyses things.")
     sub = squad_architect.create_member("subagent", "fetcher", "Fetcher", "Fetches things.")
     assert agent["kind"] == "agent" and agent["id"] == "analyst"
-    assert sub["kind"] == "subagent" and "write_agent_scratchpad" in sub["tools"]
+    assert sub["kind"] == "subagent" and "write_squad_scratchpad" in sub["tools"]

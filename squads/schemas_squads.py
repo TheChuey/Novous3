@@ -46,3 +46,7 @@ class MemberCreateRequest(BaseModel):
 class ToolAssignmentRequest(BaseModel):
     agent_id: str = Field(..., min_length=1, max_length=80)
     tool: str = Field(..., min_length=1, max_length=80)
+
+
+class AgentPromptRequest(BaseModel):
+    prompt: str = Field(..., max_length=100000)

@@ -8,8 +8,8 @@ import { renderArchitectCanvas } from './architect_canvas.js';
 import { PATTERN_INFO } from './run_client.js';
 
 const STEPS = ['Basics', 'Lead agent', 'Members', 'Tools', 'Review'];
-const LEAD_HANDOFF = 'read_agent_scratchpad';
-const MEMBER_HANDOFF = 'write_agent_scratchpad';
+const LEAD_HANDOFF = 'read_squad_scratchpad';
+const MEMBER_HANDOFF = 'write_squad_scratchpad';
 
 function sameList(a = [], b = []) {
   return a.length === b.length && a.every((value, i) => value === b[i]);

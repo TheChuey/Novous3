@@ -125,6 +125,28 @@ export const Api = {
     return send('DELETE', '/api/agent-memory/code-scratchpad');
   },
 
+  async getChatScratchpad(sessionId = '') {
+    const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return get(`/api/agent-memory/chat-scratchpad${query}`);
+  },
+
+  async listChatScratchpadSessions() {
+    return get('/api/agent-memory/chat-scratchpad/sessions');
+  },
+
+  async clearChatScratchpad(sessionId = '') {
+    const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return send('DELETE', `/api/agent-memory/chat-scratchpad${query}`);
+  },
+
+  async getSquadScratchpadRuns() {
+    return get('/api/agent-memory/squad-scratchpads');
+  },
+
+  async getSquadScratchpadRun(runId) {
+    return get(`/api/agent-memory/squad-scratchpads/${encodeURIComponent(runId)}`);
+  },
+
   async getRagDocuments(baseId) {
     const query = baseId ? `?base_id=${encodeURIComponent(baseId)}` : '';
     return get(`/api/rag/documents${query}`);
@@ -510,6 +532,14 @@ export const Api = {
 
   async getSquadAgent(agentId) {
     return get(`/api/squads-architect/agents/${encodeURIComponent(agentId)}`);
+  },
+
+  async getAgentPrompt(agentId) {
+    return get(`/api/squads-architect/agents/${encodeURIComponent(agentId)}/prompt`);
+  },
+
+  async setAgentPrompt(agentId, prompt) {
+    return send('PUT', `/api/squads-architect/agents/${encodeURIComponent(agentId)}/prompt`, { prompt });
   },
 
   async getSquadBlueprint(squadId) {
