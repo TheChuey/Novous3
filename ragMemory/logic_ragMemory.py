@@ -452,7 +452,9 @@ class OllamaEmbedder:
         for offset in range(0, len(texts), self.batch_size):
             requested = texts[offset:offset + self.batch_size]
             try:
-                response = ollama.embed(model=self.model, input=requested)
+                from core_engine.logic_core_engine import serialized_ollama_embed
+
+                response = serialized_ollama_embed(model=self.model, input=requested)
             except ollama.ResponseError as exc:
                 if getattr(exc, "status_code", None) == 404:
                     raise RuntimeError(

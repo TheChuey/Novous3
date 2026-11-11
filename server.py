@@ -13,10 +13,10 @@ from modelProfiles.interface_modelProfiles import router as model_profiles_route
 from orchestration.interface_orchestration import router as orchestration_router
 from ragMemory.interface_ragMemory import router as rag_router
 from scratchpadMemory.interface_scratchpadMemory import router as scratchpad_router
+from squads.interface_squad_folders import router as squad_folders_router
 from squads.interface_squads import router as squads_router
 from test_environment.interface_test_environment import router as test_router
 from tools.interface_tools import router as tools_router
-from workspace.interface_workspace import router as workspace_router
 
 app = FastAPI(title="Novous AGENT FACTORY", version="4.0.0")
 
@@ -42,7 +42,7 @@ def migrate_sandbox_environment():
 app.include_router(tools_router)
 app.include_router(core_router)
 app.include_router(editor_router)
-app.include_router(workspace_router)
+app.include_router(squad_folders_router)
 app.include_router(test_router)
 app.include_router(codebuilder_router)
 app.include_router(file_manager_router)

@@ -1,8 +1,8 @@
 """Saved test suites: one JSON file per suite, grouped by category, plus run history.
 
 Layout:
-    workspace/saved_test_suites/<category>/<slug>.json          suite definition
-    workspace/saved_test_suites/results/<category>/<slug>.json  recent runs (newest first)
+    test_environment/data/saved_suites/<category>/<slug>.json          suite definition
+    test_environment/data/saved_suites/results/<category>/<slug>.json  recent runs (newest first)
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SUITES_ROOT = REPO_ROOT / "workspace" / "saved_test_suites"
+SUITES_ROOT = REPO_ROOT / "test_environment" / "data" / "saved_suites"
 CATEGORIES = ("squads", "tool_usage", "prompts")
 MAX_RUNS_KEPT = 20
 

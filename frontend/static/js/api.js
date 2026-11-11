@@ -55,17 +55,9 @@ export const Api = {
     return { filename, locationChosen: false };
   },
 
-  // --- Workspace & Health ---
+  // --- System ---
   async getHealth() {
     return get('/api/health');
-  },
-
-  async getProjectState() {
-    return get('/api/project');
-  },
-
-  async saveProjectState(patch) {
-    return send('POST', '/api/project', patch);
   },
 
   // --- Agents & Chat (Core Engine) ---

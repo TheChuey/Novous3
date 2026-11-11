@@ -7,7 +7,7 @@ import { Api } from './api.js';
 export const AppState = {
   activeTab: 'squads',
   agents: [],
-  project: null,
+  squads: [],
   health: null,
   currentPath: '',
   ragScanJob: null
@@ -34,9 +34,10 @@ export async function refreshAgents() {
   return AppState.agents;
 }
 
-export async function refreshProject() {
-  AppState.project = await Api.getProjectState();
-  return AppState.project;
+export async function refreshSquads() {
+  const data = await Api.getSquads();
+  AppState.squads = data.squads || [];
+  return AppState.squads;
 }
 
 export function updateHealthBadge(health) {

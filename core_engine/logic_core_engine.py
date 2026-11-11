@@ -45,11 +45,31 @@ FORCED_RETRIEVAL_AGENTS = frozenset({"rag-presenter", "knowledge"})
 _CURRENT_AGENT_ID: ContextVar[str] = ContextVar("current_agent_id", default="")
 # The chat session whose turn is running; chat scratchpad tools read and write under it.
 _CURRENT_SESSION_ID: ContextVar[str] = ContextVar("current_session_id", default="")
+MODEL_INFERENCE_LOCK = threading.RLock()
 
 # Scratchpad tools by store and direction. Agents address these by agent name and title.
 SCRATCHPAD_READ_TOOLS = ("read_coding_scratchpad", "read_chat_scratchpad", "read_squad_scratchpad")
 SCRATCHPAD_WRITE_TOOLS = ("write_coding_scratchpad", "write_chat_scratchpad", "write_squad_scratchpad")
 SCRATCHPAD_TOOLS = frozenset(SCRATCHPAD_READ_TOOLS + SCRATCHPAD_WRITE_TOOLS)
+
+
+def serialized_ollama_chat(**kwargs):
+    """Serialize local model inference while allowing a stream to hold the lock until it ends."""
+    client = importlib.import_module("ollama")
+    if kwargs.get("stream"):
+        def stream():
+            with MODEL_INFERENCE_LOCK:
+                yield from client.chat(**kwargs)
+
+        return stream()
+    with MODEL_INFERENCE_LOCK:
+        return client.chat(**kwargs)
+
+
+def serialized_ollama_embed(**kwargs):
+    """Serialize local embedding inference with chat and other embedding requests."""
+    with MODEL_INFERENCE_LOCK:
+        return importlib.import_module("ollama").embed(**kwargs)
 
 
 def wrap_flat_arguments(parameters: list[str], required: list[str], args: Any) -> Any:
@@ -1081,7 +1101,9 @@ class Agent:
 
         if self.profile.mode == "chat" or not self.tools:
             estimate = context_window.estimate_request(self.messages, "")
-            res = ollama.chat(model=self.model, messages=self.messages, options={"num_ctx": self.num_ctx})
+            res = serialized_ollama_chat(
+                model=self.model, messages=self.messages, options={"num_ctx": self.num_ctx}
+            )
             self._record_usage(res, estimate)
             reply = self._format_rag_presenter_reply(res["message"]["content"])
             self.messages.append({"role": "assistant", "content": reply})
@@ -1089,7 +1111,7 @@ class Agent:
 
         for _ in range(self.max_tool_rounds):
             estimate = context_window.estimate_request(self.messages, self.tool_schema_text())
-            res = ollama.chat(
+            res = serialized_ollama_chat(
                 model=self.model,
                 messages=self.messages,
                 tools=[self._ollama_schema(t) for t in self.tools.values()],
@@ -1130,8 +1152,10 @@ class Agent:
             native_calls: List[dict] = []
             estimate = context_window.estimate_request(self.messages, self.tool_schema_text())
             usage_chunk = None
-            for chunk in ollama.chat(model=self.model, messages=self.messages, stream=True,
-                                     options={"num_ctx": self.num_ctx}, **extra):
+            for chunk in serialized_ollama_chat(
+                model=self.model, messages=self.messages, stream=True,
+                options={"num_ctx": self.num_ctx}, **extra
+            ):
                 if context_window.read_field(chunk, "prompt_eval_count") is not None:
                     usage_chunk = chunk
                 msg = chunk["message"]
@@ -1261,7 +1285,7 @@ class ToolCatalog:
         "core_engine": "core_engine.interface_core_engine",
         "editor": "editor.interface_editor",
         "file_manager": "file_manager.interface_file_manager",
-        "workspace": "workspace.interface_workspace",
+        "workspace": "core_engine.interface_core_engine",
         "test_environment": "test_environment.interface_test_environment",
         "codebuilder": "codebuilder.interface_codebuilder",
         "orchestration": "orchestration.interface_orchestration",
@@ -2065,7 +2089,7 @@ def ask_user_questions(json_file_path: str, timeout_seconds: float = 300.0) -> s
 @tool_catalog.builtin(provider="workspace")
 def project_status() -> str:
     """Return the current project state metadata for this workspace."""
-    from workspace.logic_workspace import project_state
+    from core_engine.logic_system_state import project_state
 
     return json.dumps(project_state.get_project_state(), indent=2)
 

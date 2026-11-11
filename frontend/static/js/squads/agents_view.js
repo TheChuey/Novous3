@@ -4,6 +4,7 @@
  */
 import { Api } from '../api.js';
 import { esc, navigate, openInEditor } from '../shell.js';
+import { renderAgentLibrary } from '../views/agent_library.js';
 import { openSquadMap } from './squad_map.js';
 
 let kindFilter = 'all';
@@ -17,6 +18,10 @@ const SQUAD_COLORS = [
 export function renderAgentsView(container) {
   container.innerHTML = `
     <div class="sq-page">
+      <details class="card">
+        <summary>Agent library across environments</summary>
+        <section class="ov-agents" data-role="agent-library" aria-label="Agent library"></section>
+      </details>
       <header class="sq-page-head">
         <div>
           <h2>Agents</h2>
@@ -51,6 +56,7 @@ export function renderAgentsView(container) {
       <div class="sq-agent-groups" data-role="grid"><p class="text-muted small">Loading agents…</p></div>
     </div>`;
 
+  renderAgentLibrary(container.querySelector('[data-role="agent-library"]'));
   const grid = container.querySelector('[data-role="grid"]');
   const errorBox = container.querySelector('[data-role="error"]');
   const createForm = container.querySelector('[data-role="create"]');

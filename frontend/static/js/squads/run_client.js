@@ -1,21 +1,13 @@
 /**
- * Squad run client: starts an orchestration run and follows its SSE telemetry stream.
+ * Squad run client: starts an ordered orchestration run and follows its SSE telemetry stream.
  * Shared by the Runs section and anything else that launches a squad.
  */
 import { Api } from '../api.js';
 
 export const PATTERN_INFO = {
   sequential: {
-    label: 'Sequential',
-    summary: 'Members run one after another, then the lead synthesizes from the scratchpad.'
-  },
-  fanout: {
-    label: 'Fan-out',
-    summary: 'Members work on the same task in parallel (bounded), and the lead merges every output.'
-  },
-  router: {
-    label: 'Router',
-    summary: 'The lead picks which members should handle the task; only those run.'
+    label: 'Ordered workflow',
+    summary: 'Sub-agents run one at a time; each receives the previous handoff, then the lead synthesizes.'
   }
 };
 

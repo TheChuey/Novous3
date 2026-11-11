@@ -47,7 +47,7 @@ def isolated_squad_registry(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolated_test_suites(tmp_path, monkeypatch):
-    """Keep saved test suites and their run history out of the real workspace."""
+    """Keep saved test suites and their run history out of the real data directory."""
     from test_environment import logic_test_suites
 
     monkeypatch.setattr(logic_test_suites, "SUITES_ROOT", tmp_path / "saved_test_suites")

@@ -1,5 +1,5 @@
 /**
- * Agent library for the Overview: every agent across environments in one searchable,
+ * Agent library: every agent across environments in one searchable,
  * filterable list, grouped by environment, with chat/open, edit and delete actions.
  */
 import { Api } from '../api.js';
@@ -73,7 +73,7 @@ export function renderAgentLibrary(host) {
     <div class="ov-agents-head">
       <div>
         <h3>Agent library <span class="text-muted small" data-role="total"></span></h3>
-        <p class="text-muted small">Every agent in this workspace. Search by name, id, description, model or tool.</p>
+        <p class="text-muted small">Search agents across environments by name, id, description, model or tool.</p>
       </div>
       <button type="button" class="cb-btn cb-btn-primary" data-act="toggle-create">${iconSvg('plus')}<span>New agent</span></button>
     </div>

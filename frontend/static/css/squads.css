@@ -178,10 +178,7 @@
 .sq-node-sub { fill: var(--text-muted); font-size: 11px; }
 .sq-edge { fill: none; stroke: var(--text-muted); stroke-width: 1.5; opacity: 0.8; }
 .sq-edge-return { stroke: var(--accent); stroke-dasharray: 4 4; }
-.sq-edge-optional { stroke-dasharray: 2 4; }
 .sq-arrow-head { fill: var(--text-muted); }
-.sq-router { fill: rgba(245, 158, 11, 0.15); stroke: var(--warning); stroke-width: 1.5; }
-.sq-pattern-label { fill: var(--text-muted); font-size: 11px; text-anchor: middle; letter-spacing: 0.05em; }
 .sq-step { fill: var(--primary); font-size: 12px; font-weight: 700; }
 .sq-empty { fill: var(--text-muted); font-size: 13px; text-anchor: middle; }
 

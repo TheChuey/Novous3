@@ -27,7 +27,7 @@ export function renderSquadsView(container, payload = null) {
       <header class="sq-page-head">
         <div>
           <h2>Squads</h2>
-          <p class="text-muted">Put agents together, choose how they interact, give them tools, then run them.</p>
+          <p class="text-muted">Build an ordered workflow with one lead and sub-agent steps that pass results forward.</p>
         </div>
         <button type="button" class="btn btn-primary" data-act="new">+ New squad</button>
       </header>
@@ -92,19 +92,13 @@ export function renderSquadsView(container, payload = null) {
             <p class="text-muted small">${esc(blueprint.description || 'No description.')}</p>
           </div>
           <div class="sq-architect-actions">
-            <label class="sq-inline-select">
-              <span class="small text-muted">Pattern</span>
-              <select class="form-select" data-role="pattern" ${blueprint.dedicated_pipeline ? 'disabled' : ''}>
-                ${Object.entries(PATTERN_INFO).map(([key, info]) =>
-                  `<option value="${key}" ${blueprint.pattern === key ? 'selected' : ''}>${esc(info.label)}</option>`).join('')}
-              </select>
-            </label>
+            <span class="badge badge-accent">Ordered workflow</span>
             <button type="button" class="btn btn-sm" data-act="edit">Edit in builder</button>
             <button type="button" class="btn btn-sm btn-primary" data-act="run">▶ Run</button>
             <button type="button" class="btn btn-sm btn-danger" data-act="delete">Delete</button>
           </div>
         </div>
-        <p class="text-muted small sq-pattern-note">${esc(PATTERN_INFO[blueprint.pattern]?.summary || '')}
+        <p class="text-muted small sq-pattern-note">${esc(PATTERN_INFO.sequential.summary)}
           ${blueprint.dedicated_pipeline ? ' This squad uses its dedicated Plan → Build → Test → Fix pipeline.' : ''}
           ${missing ? ` <span class="text-danger">${missing} member definition(s) are missing.</span>` : ''}</p>
         <div class="sq-architect-body">
@@ -183,14 +177,6 @@ export function renderSquadsView(container, payload = null) {
       else if (button.dataset.act === 'tools') navigate('tools', { attachTo: node.id });
     });
 
-    detail.querySelector('[data-role="pattern"]').addEventListener('change', async event => {
-      try {
-        await Api.updateSquad(blueprint.squad_id, { default_pattern: event.target.value });
-        await load();
-      } catch (err) {
-        alert(`Could not change pattern: ${err.message}`);
-      }
-    });
     detail.querySelector('.sq-architect-actions').addEventListener('click', async event => {
       const act = event.target.closest('button')?.dataset.act;
       if (act === 'edit') openBuilder(blueprint);

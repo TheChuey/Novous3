@@ -1,8 +1,5 @@
 /**
- * Squad Architect canvas: draws a squad's lead, members and pattern-specific flow as inline SVG.
- *   sequential  lead → m1 → m2 → … → lead (synthesis)
- *   fanout      lead → every member in parallel → lead
- *   router      lead → route decision → chosen members → lead
+ * Squad Architect canvas: draws one lead and ordered sub-agent handoffs as inline SVG.
  */
 import { esc } from '../shell.js';
 
@@ -38,7 +35,6 @@ function edge(x1, y1, x2, y2, cls = '') {
 
 export function renderArchitectCanvas(host, blueprint, { selectedId = null, onSelect = () => {} } = {}) {
   const members = (blueprint.members || []).filter(Boolean);
-  const pattern = blueprint.pattern || 'sequential';
   const count = Math.max(members.length, 1);
   const width = Math.max(560, count * NODE_W + (count + 1) * GAP);
   const height = MEMBER_Y + NODE_H + 70;
@@ -51,34 +47,17 @@ export function renderArchitectCanvas(host, blueprint, { selectedId = null, onSe
   const edges = [];
   const extras = [];
   if (members.length) {
-    if (pattern === 'sequential') {
-      edges.push(edge(leadCenter - 30, leadBottom, memberX(0) + NODE_W / 2, MEMBER_Y));
-      members.forEach((_, i) => {
-        if (i === members.length - 1) return;
-        const y = MEMBER_Y + NODE_H / 2;
-        edges.push(`<path class="sq-edge" d="M${memberX(i) + NODE_W},${y} L${memberX(i + 1)},${y}" marker-end="url(#sq-arrow)"></path>`);
-      });
-      const last = memberX(members.length - 1) + NODE_W / 2;
-      edges.push(edge(last, MEMBER_Y, leadCenter + 30, leadBottom, 'sq-edge-return'));
-      members.forEach((_, i) => {
-        extras.push(`<text class="sq-step" x="${memberX(i) + NODE_W - 16}" y="${MEMBER_Y - 8}">${i + 1}</text>`);
-      });
-    } else if (pattern === 'fanout') {
-      members.forEach((_, i) => {
-        const cx = memberX(i) + NODE_W / 2;
-        edges.push(edge(leadCenter - 12, leadBottom, cx - 12, MEMBER_Y));
-        edges.push(edge(cx + 12, MEMBER_Y, leadCenter + 12, leadBottom, 'sq-edge-return'));
-      });
-      extras.push(`<text class="sq-pattern-label" x="${leadCenter}" y="${(leadBottom + MEMBER_Y) / 2}">parallel</text>`);
-    } else {
-      const dy = (leadBottom + MEMBER_Y) / 2;
-      extras.push(`<polygon class="sq-router" points="${leadCenter},${dy - 18} ${leadCenter + 26},${dy} ${leadCenter},${dy + 18} ${leadCenter - 26},${dy}"></polygon>`);
-      extras.push(`<text class="sq-pattern-label" x="${leadCenter + 34}" y="${dy + 4}" text-anchor="start">route</text>`);
-      edges.push(`<path class="sq-edge" d="M${leadCenter},${leadBottom} L${leadCenter},${dy - 18}" marker-end="url(#sq-arrow)"></path>`);
-      members.forEach((_, i) => {
-        edges.push(edge(leadCenter, dy + 18, memberX(i) + NODE_W / 2, MEMBER_Y, 'sq-edge-optional'));
-      });
-    }
+    edges.push(edge(leadCenter - 30, leadBottom, memberX(0) + NODE_W / 2, MEMBER_Y));
+    members.forEach((_, i) => {
+      if (i === members.length - 1) return;
+      const y = MEMBER_Y + NODE_H / 2;
+      edges.push(`<path class="sq-edge" d="M${memberX(i) + NODE_W},${y} L${memberX(i + 1)},${y}" marker-end="url(#sq-arrow)"></path>`);
+    });
+    const last = memberX(members.length - 1) + NODE_W / 2;
+    edges.push(edge(last, MEMBER_Y, leadCenter + 30, leadBottom, 'sq-edge-return'));
+    members.forEach((_, i) => {
+      extras.push(`<text class="sq-step" x="${memberX(i) + NODE_W - 16}" y="${MEMBER_Y - 8}">${i + 1}</text>`);
+    });
   }
 
   host.innerHTML = `

@@ -29,8 +29,7 @@ class OrchestrationRequest(BaseModel):
     pattern: Optional[Literal["sequential", "fanout", "router"]] = Field(
         default=None,
         description=(
-            "Execution strategy: 'sequential' (local LLM hardware safety), 'fanout', or 'router'. "
-            "Leave unset to use the registered squad's default_pattern."
+            "Legacy execution strategy. All accepted values run sequentially; leave unset for the squad default."
         ),
     )
     primary_agent: str = Field(
@@ -38,7 +37,7 @@ class OrchestrationRequest(BaseModel):
     )
     subagents: List[str] = Field(
         default_factory=list,
-        description="Ordered squad member IDs: sub-agents from subAgentLibrary/ or primary agents from library/",
+        description="Ordered sub-agent IDs from subAgentLibrary/.",
     )
     workflow_action: Literal["all", "plan", "build", "test", "fix", "troubleshoot"] = Field(
         default="all",
@@ -56,8 +55,14 @@ class SquadCreateRequest(BaseModel):
     description: str = Field(default="", max_length=500)
     primary_agent: str = Field(..., min_length=1, max_length=80)
     subagents: List[str] = Field(default_factory=list, max_length=20)
-    default_pattern: SquadPattern = "sequential"
-    max_parallel: int = Field(default=2, ge=1, le=4)
+    default_pattern: SquadPattern = Field(
+        default="sequential",
+        description="Execution is always sequential; fanout and router are accepted as legacy aliases.",
+    )
+    max_parallel: int = Field(
+        default=1, ge=1, le=4,
+        description="Deprecated compatibility field; squad steps always run sequentially.",
+    )
 
 
 class SquadUpdateRequest(BaseModel):
@@ -65,8 +70,13 @@ class SquadUpdateRequest(BaseModel):
     description: Optional[str] = Field(default=None, max_length=500)
     primary_agent: Optional[str] = Field(default=None, min_length=1, max_length=80)
     subagents: Optional[List[str]] = Field(default=None, max_length=20)
-    default_pattern: Optional[SquadPattern] = None
-    max_parallel: Optional[int] = Field(default=None, ge=1, le=4)
+    default_pattern: Optional[SquadPattern] = Field(
+        default=None,
+        description="Execution is always sequential; fanout and router are accepted as legacy aliases.",
+    )
+    max_parallel: Optional[int] = Field(
+        default=None, ge=1, le=4, description="Deprecated compatibility field; execution is sequential."
+    )
 
 
 class SubagentCreateRequest(BaseModel):

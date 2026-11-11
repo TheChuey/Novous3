@@ -5,7 +5,6 @@
 import { Api } from '../api.js';
 import { esc, navigate } from '../shell.js';
 import { renderArchitectCanvas } from './architect_canvas.js';
-import { PATTERN_INFO } from './run_client.js';
 
 const STEPS = ['Basics', 'Lead agent', 'Members', 'Tools', 'Review'];
 const LEAD_HANDOFF = 'read_squad_scratchpad';
@@ -28,16 +27,11 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
     squad_id: initial?.squad_id || null,
     name: initial?.name || '',
     description: initial?.description || '',
-    pattern: initial?.pattern || 'sequential',
-    max_parallel: initial?.max_parallel || 2,
+    pattern: 'sequential',
     lead: initial?.lead?.id || '',
-    members: (initial?.members || []).filter(Boolean).map(member => member.id),
-    tools: {},
-    lead_delegates: Boolean(
-      initial?.lead?.tools?.includes('call_subagent') && initial?.lead?.allowed_subagents?.length
-    )
+    members: (initial?.members || []).filter(member => member?.kind === 'subagent').map(member => member.id),
+    tools: {}
   };
-  const dedicated = Boolean(initial?.dedicated_pipeline);
   let step = 0;
   let validation = null;
 
@@ -54,10 +48,8 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
       name: draft.name.trim(),
       description: draft.description.trim(),
       pattern: draft.pattern,
-      max_parallel: Number(draft.max_parallel) || 2,
       lead: spec(draft.lead),
-      members: draft.members.map(spec),
-      lead_delegates: draft.lead_delegates
+      members: draft.members.map(spec)
     };
   }
 
@@ -73,7 +65,7 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
         <div class="card-head">
           <div>
             <h3>${draft.squad_id ? `Edit squad · ${esc(draft.name)}` : 'New squad'}</h3>
-            <p class="text-muted small">Design who works together, how they interact, and what tools they carry.</p>
+            <p class="text-muted small">Choose one lead and an ordered set of sub-agents. Each step runs once at a time and passes its result forward.</p>
           </div>
           <button type="button" class="btn btn-sm" data-act="cancel">Close</button>
         </div>
@@ -105,27 +97,12 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
           <input class="form-input" data-field="name" maxlength="80" value="${esc(draft.name)}" placeholder="e.g. Research Squad"></label>
         <label class="sq-field"><span>What does this squad do?</span>
           <input class="form-input" data-field="description" maxlength="500" value="${esc(draft.description)}"></label>
-        <div class="sq-field"><span>Interaction pattern</span>
-          <div class="sq-choice-grid">
-            ${Object.entries(PATTERN_INFO).map(([key, info]) => `
-              <label class="sq-choice ${draft.pattern === key ? 'is-selected' : ''}">
-                <input type="radio" name="pattern" value="${key}" ${draft.pattern === key ? 'checked' : ''}
-                  ${dedicated && key !== 'sequential' ? 'disabled' : ''}>
-                <strong>${esc(info.label)}</strong>
-                <span class="text-muted small">${esc(info.summary)}</span>
-              </label>`).join('')}
-          </div>
-          ${dedicated ? '<p class="text-muted small">This squad runs its own dedicated pipeline, so it stays sequential.</p>' : ''}
-        </div>
-        ${draft.pattern === 'fanout' ? `
-          <label class="sq-field sq-field-inline"><span>Members running at once</span>
-            <input class="form-input" type="number" min="1" max="4" data-field="max_parallel" value="${esc(draft.max_parallel)}">
-            <span class="text-muted small">Keep this low on a local Ollama host.</span></label>` : ''}`;
+        <p class="sq-field text-muted small">The workflow is always sequential to keep local model use predictable. You control the exact run order in the Members step.</p>`;
     }
     if (step === 1) {
       const primaries = agents.filter(agent => agent.kind === 'agent');
       return `
-        <p class="text-muted small">The lead is a primary agent. It receives the request, ${draft.pattern === 'router' ? 'decides which members run, ' : ''}and writes the final answer from its members' work.</p>
+        <p class="text-muted small">The lead receives the request and produces the final answer after sub-agents complete their ordered steps.</p>
         <div class="sq-choice-grid">
           ${primaries.map(agent => `
             <label class="sq-choice ${draft.lead === agent.id ? 'is-selected' : ''}">
@@ -135,14 +112,14 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
               <span class="sq-chip-row">${(agent.tools || []).slice(0, 4).map(t => `<span class="sq-chip">${esc(t)}</span>`).join('')}</span>
             </label>`).join('') || '<p class="text-muted">No primary agents yet.</p>'}
         </div>
-        ${createMemberForm('agent')}`;
+        ${createMemberForm('agent', true)}`;
     }
     if (step === 2) {
-      const candidates = agents.filter(agent => agent.id !== draft.lead);
-      const group = (kind, title, hint) => `
-        <h4 class="sq-group-title">${title} <span class="text-muted small">${hint}</span></h4>
+      const candidates = agents.filter(agent => agent.id !== draft.lead && agent.kind === 'subagent');
+      const group = `
+        <h4 class="sq-group-title">Sub-agents <span class="text-muted small">run one at a time and hand their result to the next step</span></h4>
         <div class="sq-choice-grid">
-          ${candidates.filter(agent => agent.kind === kind).map(agent => `
+          ${candidates.map(agent => `
             <label class="sq-choice ${draft.members.includes(agent.id) ? 'is-selected' : ''}">
               <input type="checkbox" name="member" value="${esc(agent.id)}" ${draft.members.includes(agent.id) ? 'checked' : ''}>
               <strong>${esc(agent.name)}</strong>
@@ -152,12 +129,11 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
       return `
         <div class="sq-two-col">
           <div>
-            ${group('subagent', 'Sub-agents', 'background workers that hand results to the lead')}
-            ${group('agent', 'Primary agents', 'peers that work alongside the lead')}
+            ${group}
             ${createMemberForm('subagent')}
           </div>
           <aside class="sq-order card">
-            <h4>${draft.pattern === 'sequential' ? 'Run order' : 'Members'}</h4>
+            <h4>Run order</h4>
             ${draft.members.length ? `<ol class="sq-order-list">
               ${draft.members.map((id, i) => `
                 <li><span>${esc(byId()[id]?.name || id)}</span>
@@ -166,10 +142,7 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
                     <button type="button" class="btn btn-sm btn-ghost" data-move="${i}:1" ${i === draft.members.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button>
                   </span></li>`).join('')}
             </ol>` : '<p class="text-muted small">Pick members on the left.</p>'}
-            <label class="sq-toggle">
-              <input type="checkbox" data-field="lead_delegates" ${draft.lead_delegates ? 'checked' : ''}>
-              <span>Lead may also call sub-agent members directly with <code>call_subagent</code> (restricted to this squad)</span>
-            </label>
+            <p class="text-muted small">Each step receives the task and the previous step's result—not the entire conversation.</p>
           </aside>
         </div>`;
     }
@@ -177,6 +150,7 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
       const ids = [draft.lead, ...draft.members];
       return `
         <p class="text-muted small">Tools decide what each agent can do. Assigning tools switches a chat-mode agent to agent mode.
+          Squad runs control the order and withhold direct sub-agent delegation.
           Need something new? <button type="button" class="btn btn-sm" data-act="build-tool">Build a tool in the workbench</button></p>
         <div class="sq-tool-table">
           ${ids.map((id, index) => toolRow(id, index === 0)).join('')}
@@ -216,14 +190,14 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
       </div>`;
   }
 
-  function createMemberForm(defaultKind) {
+  function createMemberForm(defaultKind, allowPrimary = false) {
     return `
       <details class="sq-create">
-        <summary>Create a new ${defaultKind === 'agent' ? 'primary agent' : 'agent or sub-agent'}</summary>
+        <summary>Create a new ${allowPrimary ? 'lead agent or sub-agent' : 'sub-agent'}</summary>
         <div class="form-row mt-2">
           <select class="form-select" data-new="kind" aria-label="Kind">
             <option value="subagent" ${defaultKind === 'subagent' ? 'selected' : ''}>Sub-agent (subAgentLibrary/*.yaml)</option>
-            <option value="agent" ${defaultKind === 'agent' ? 'selected' : ''}>Primary agent (library/*.md)</option>
+            ${allowPrimary ? `<option value="agent" ${defaultKind === 'agent' ? 'selected' : ''}>Primary agent (library/*.md)</option>` : ''}
           </select>
           <input class="form-input" data-new="id" placeholder="id (e.g. summarizer)" maxlength="64">
           <input class="form-input" data-new="name" placeholder="Display name" maxlength="100">
@@ -273,16 +247,14 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
   host.addEventListener('input', event => {
     const field = event.target.dataset.field;
     if (!field) return;
-    if (field === 'lead_delegates') draft.lead_delegates = event.target.checked;
-    else draft[field] = event.target.value;
+    draft[field] = event.target.value;
     const next = host.querySelector('[data-act="next"]');
     if (next) next.disabled = !canAdvance();
   });
 
   host.addEventListener('change', event => {
     const target = event.target;
-    if (target.name === 'pattern') { draft.pattern = target.value; render(); }
-    else if (target.name === 'lead') {
+    if (target.name === 'lead') {
       draft.lead = target.value;
       draft.members = draft.members.filter(id => id !== draft.lead);
       render();
@@ -332,7 +304,9 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
         const created = await Api.createSquadMember(value('kind'), value('id'), value('name') || value('id'), value('description'));
         agents = (await Api.getSquadsOverview()).agents || agents;
         if (step === 1 && created.kind === 'agent') draft.lead = created.id;
-        else if (created.id !== draft.lead && !draft.members.includes(created.id)) draft.members.push(created.id);
+        else if (created.kind === 'subagent' && created.id !== draft.lead && !draft.members.includes(created.id)) {
+          draft.members.push(created.id);
+        }
         render();
       } catch (err) {
         showError(err.message);

@@ -1,4 +1,4 @@
-"""Core-engine doorway: FastAPI router for /api/agents, /api/chat* and /api/models."""
+"""Core-engine doorway for agent, project-state, health, chat and model APIs."""
 
 import json
 
@@ -7,6 +7,8 @@ from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from core_engine.logic_core_engine import SessionNotFoundError, agent_library, chat_service, questionnaire
+from core_engine.logic_agent_management import agent_management
+from core_engine.logic_system_state import project_state, system_health
 from core_engine.schemas_core_engine import (
     AgentDefinitionKind,
     AgentEnvironment,
@@ -15,10 +17,28 @@ from core_engine.schemas_core_engine import (
     ChatRequest,
     CreateAgentRequest,
     ExportSessionRequest,
+    ProjectStateRequest,
 )
-from workspace.logic_workspace import workspace_workflow
 
 router = APIRouter()
+
+
+@router.get("/api/project")
+def api_get_project():
+    return project_state.get_project_state()
+
+
+@router.post("/api/project")
+def api_save_project(req: ProjectStateRequest):
+    try:
+        return project_state.save_project_state(req.model_dump())
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/api/health")
+def api_health():
+    return system_health.get_health()
 
 
 @router.get("/api/agents")
@@ -31,7 +51,7 @@ def api_list_agents(environment: AgentEnvironment = "workspace"):
 @router.post("/api/agents/create")
 def api_create_agent(req: CreateAgentRequest):
     try:
-        result = workspace_workflow.scaffold_agent(
+        result = agent_management.scaffold_agent(
             agent_id=req.agent_id.strip(),
             name=req.name.strip(),
             description=req.description.strip(),
@@ -48,11 +68,36 @@ def api_create_agent(req: CreateAgentRequest):
 @router.delete("/api/agents/{agent_id}")
 def api_delete_agent(agent_id: str, environment: str = "workspace"):
     try:
-        return workspace_workflow.delete_agent(agent_id, environment)
+        return agent_management.delete_agent(agent_id, environment)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/api/workspace/agents/scaffold")
+def api_scaffold_workspace_agent(req: CreateAgentRequest):
+    try:
+        return agent_management.scaffold_agent(
+            req.agent_id, req.name, req.description, req.mode, req.squad, "workspace",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/api/workspace/agents/{agent_id}")
+def api_update_workspace_agent(agent_id: str, req: dict):
+    try:
+        return agent_management.save_agent_meta(agent_id, req)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/api/workspace/agents/{agent_id}/squad")
+def api_agents_by_squad(squad: str = ""):
+    return {"squad": squad, "agents": agent_management.agents_for_squad(squad)}
 
 
 @router.get("/api/agent-tools/{kind}/{agent_id}")

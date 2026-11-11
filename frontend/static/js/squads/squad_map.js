@@ -50,23 +50,12 @@ function buildEdges(lead, members, blueprint) {
       }
     }
   }
-  const pattern = blueprint.pattern || 'sequential';
   const ac = 'var(--primary)';
   if (members.length) {
-    if (pattern === 'sequential') {
-      edges.push({ from: lead?.id, to: members[0]?.id, tool: null, label: 'start', color: ac, kind: 'flow' });
-      for (let i = 0; i < members.length - 1; i++)
-        edges.push({ from: members[i].id, to: members[i + 1].id, tool: null, label: `step ${i + 2}`, color: ac, kind: 'flow' });
-      edges.push({ from: members.at(-1)?.id, to: lead?.id, tool: null, label: 'synthesis', color: ac, kind: 'flow' });
-    } else if (pattern === 'fanout') {
-      for (const m of members) {
-        edges.push({ from: lead?.id, to: m.id, tool: null, label: 'parallel', color: ac, kind: 'flow' });
-        edges.push({ from: m.id, to: lead?.id, tool: null, label: 'merge', color: ac, kind: 'flow' });
-      }
-    } else if (pattern === 'router') {
-      for (const m of members)
-        edges.push({ from: lead?.id, to: m.id, tool: null, label: 'route?', color: ac, kind: 'flow' });
-    }
+    edges.push({ from: lead?.id, to: members[0]?.id, tool: null, label: 'start', color: ac, kind: 'flow' });
+    for (let i = 0; i < members.length - 1; i++)
+      edges.push({ from: members[i].id, to: members[i + 1].id, tool: null, label: `step ${i + 2}`, color: ac, kind: 'flow' });
+    edges.push({ from: members.at(-1)?.id, to: lead?.id, tool: null, label: 'synthesis', color: ac, kind: 'flow' });
   }
   return edges;
 }

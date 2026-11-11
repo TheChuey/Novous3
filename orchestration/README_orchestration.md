@@ -1,6 +1,6 @@
 # Sub-Agent Orchestration
 
-The orchestration pillar coordinates user-facing primary agents with single-purpose background sub-agents. It keeps complex utility work (retrieval, code analysis, security auditing, document processing) out of the primary conversation while preserving a shared, observable handoff.
+The orchestration pillar coordinates a primary lead and ordered, single-purpose background sub-agents. It keeps complex utility work (retrieval, code analysis, security auditing, document processing) out of the primary conversation while preserving a shared, observable handoff.
 
 ## Architecture
 
@@ -8,9 +8,9 @@ The orchestration pillar coordinates user-facing primary agents with single-purp
 server.py
   └── interface_orchestration.py        /api/orchestration/* (squads, runs, SSE stream)
         └── logic_orchestration.py
-              ├── PipelineRegistry       code-squad -> CodeSquadPipeline, else pattern -> strategy
-              ├── OrchestrationRunService  background runs (2 workers, 10 queued at most)
-              ├── SequentialPattern / FanOutPattern / RouterPattern   RAG and user-defined squads
+              ├── PipelineRegistry       code-squad -> CodeSquadPipeline; other squads -> ordered workflow
+              ├── OrchestrationRunService  serialized background runs
+              ├── Sequential squad workflow  lead -> ordered sub-agents -> lead synthesis
               ├── CodeSquadPipeline      plan -> build -> test -> fix for the CodeBuilder editor
               ├── SubAgentRunner         library/*.md and subAgentLibrary/*.yaml turns (+ streamed turns)
               │     └── core_engine (AgentLibrary, Agent, ToolCatalog)
@@ -32,7 +32,9 @@ server.py
 | Primary agent | `library/{agent_id}.md` | Markdown with YAML frontmatter | Handles the user conversation, synthesizes findings, and edits workspace files when asked. |
 | Sub-agent | `subAgentLibrary/{subagent_id}.yaml` | Pure YAML | Executes one background domain task and writes its payload to the shared scratchpad. |
 
-Primary agents can call `call_subagent` and read results with `read_agent_scratchpad`. Sub-agents write results with `write_agent_scratchpad` and do not edit workspace files directly.
+In a squad, the primary agent is the lead and is not one of the ordered member steps. Squad members are sub-agents, run one at a time; the orchestrator provides their task and the prior result handoff. Sub-agents write results with `write_agent_scratchpad` and do not edit workspace files directly.
+
+Outside a squad run, primary agents can call `call_subagent` and read results with `read_agent_scratchpad`.
 
 For regular `/api/chat` and `/api/chat/stream` turns with `rag-presenter`, the chat runtime
 executes `call_subagent("rag-retriever", ...)` and reads `latest_subagent_result` before
@@ -105,13 +107,19 @@ without relevant passages, or `error` when retrieval fails. Errors include a mes
 in the payload. Search skips incompatible legacy vectors while reporting their count;
 it fails explicitly if no indexed vectors are compatible with the query embedding.
 
-## Execution Patterns
+## Squad execution
 
-- **sequential** (default): runs each sub-agent one at a time, then the scratchpad barrier, then the primary agent. This is the safest choice for local VRAM and thread limits.
-- **fanout**: currently delegates to the sequential pipeline and reports `pattern="fanout"`.
-- **router**: currently delegates to the sequential pipeline and reports `pattern="router"`.
+Squads use one controlled workflow: the primary lead, ordered sub-agent steps, then lead synthesis.
+Only one orchestration run is active at a time, and Ollama chat and embedding requests share a
+process-wide inference lock. The legacy `fanout` and `router` values are accepted at older API
+boundaries but normalized to sequential execution; the builder no longer exposes those choices.
 
-All patterns emit a colorized terminal trace with one step per sub-agent, a scratchpad inspection step, and a primary synthesis step. They serve the RAG squad and user-defined squads, and reject any `workflow_action` other than `all`.
+Each sub-agent receives the task and, after the first step, only the immediately preceding
+sub-agent's `result` handoff. If the sub-agent does not write that handoff, the orchestrator records
+its returned text under the sub-agent ID and the title `result`. The lead receives the final
+handoff, not the full conversation or the entire scratchpad. Full run entries remain available in
+the scratchpad viewer. Dynamic `call_subagent` tool use is withheld during squad runs; the
+orchestrator owns the order. The model prompts remain editable for experimentation.
 
 ## Code Development Squad pipeline
 

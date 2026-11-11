@@ -30,9 +30,9 @@ Every squad run, including CodeBuilder runs, has a separate scratchpad in
 responses, code workflow entries and user notes, with the same 200-entry and
 20,000-character-per-entry limits as the coding scratchpad. It does not replace
 the general or coding scratchpads, nor change how agents use those scratchpads.
-Sequential squad members and the lead receive a bounded excerpt of recent entries
-from their own run. CodeBuilder's plan, build, test and fix steps also receive recent
-notes from the run; fan-out members start independently and the lead sees their results.
+Each sequential squad member receives the prior member's bounded `result` handoff,
+and the lead receives the final member's handoff rather than the full run transcript.
+CodeBuilder's plan, build, test and fix steps also receive recent notes from the run.
 Tool-capable agents can additionally be assigned `read_squad_scratchpad`,
 `post_squad_scratchpad` and `clear_squad_scratchpad` in the agent tool settings.
 These tools operate only on the current squad run and report an error outside one.

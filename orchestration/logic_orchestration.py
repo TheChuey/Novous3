@@ -1,8 +1,7 @@
 """Orchestration domain logic: live telemetry, run results and CodeBuilder run state,
 the squad registry with persistent health metrics, the sub-agent runner, the
-deterministic RAG retriever worker, the execution patterns (sequential / fan-out /
-router), the Code Development Squad pipeline, the pipeline registry that dispatches
-orchestration requests and the background run service.
+deterministic RAG retriever worker, the ordered squad workflow, the Code Development
+Squad pipeline, the pipeline registry and the serialized background run service.
 
 Module singletons (bottom of file): ``telemetry_bus``, ``run_results``,
 ``codebuilder_run_state``, ``squad_registry``, ``code_handoffs``, ``subagent_runner``,
@@ -20,7 +19,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from collections import OrderedDict, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -31,7 +30,13 @@ from typing import Any, Callable, Dict, Iterator, Tuple, Type
 import yaml
 
 from core_engine import logic_context_window as context_window
-from core_engine.logic_core_engine import Agent, agent_library, apply_model_limits, tool_catalog
+from core_engine.logic_core_engine import (
+    Agent,
+    agent_library,
+    apply_model_limits,
+    serialized_ollama_chat,
+    tool_catalog,
+)
 from modelProfiles.logic_modelProfiles import model_profiles
 from core_engine.schemas_core_engine import AgentProfile
 from orchestration.schemas_orchestration import (
@@ -45,9 +50,7 @@ from scratchpadMemory.logic_scratchpadMemory import code_scratchpad, scratchpad,
 
 RAG_RETRIEVER_ID = "rag-retriever"
 CODE_SQUAD_ID = "code-squad"
-# Fan-out concurrency bounds; local Ollama hosts rarely serve more than a few turns at once.
-DEFAULT_MAX_PARALLEL = 2
-MAX_PARALLEL_LIMIT = 4
+DEFAULT_MAX_PARALLEL = 1
 COMPONENT_ROOT = Path(__file__).resolve().parent
 LEGACY_DATA_DIR = COMPONENT_ROOT.parent / "agentMemory" / "data"
 MAX_EDITOR_CONTENT_BYTES = 1_000_000
@@ -136,7 +139,7 @@ _COUNT_KEYS = {
 }
 _ERROR_KINDS = {"unknown_tool", "bad_arguments", "tool_error", "model_error"}
 # Handoff tools a squad agent always keeps, however small its model's tool limit is.
-SQUAD_PINNED_TOOLS = ("read_squad_scratchpad", "write_squad_scratchpad", "call_subagent")
+SQUAD_PINNED_TOOLS = ("read_squad_scratchpad", "write_squad_scratchpad")
 _TRACE_CONTEXT: ContextVar[tuple[str, str] | None] = ContextVar(
     "orchestration_trace_context", default=None
 )
@@ -764,6 +767,15 @@ class SquadRegistry:
             if not isinstance(definition, dict):
                 raise RuntimeError(f"Invalid squad definition for '{squad_id}'.")
             definitions[squad_id] = dict(definition)
+            definitions[squad_id]["default_pattern"] = self.normalize_pattern(
+                definitions[squad_id].get("default_pattern", "sequential")
+            )
+            definitions[squad_id]["max_parallel"] = 1
+            if definitions[squad_id].get("primary_agent"):
+                definitions[squad_id]["subagents"] = [
+                    member_id for member_id in definitions[squad_id].get("subagents", [])
+                    if member_id != definitions[squad_id]["primary_agent"]
+                ]
         self._migrate_code_squad_topology(definitions.get(CODE_SQUAD_ID))
         return definitions
 
@@ -849,7 +861,13 @@ class SquadRegistry:
             None,
         )
 
-    SQUAD_PATTERNS = ("sequential", "fanout", "router")
+    SQUAD_PATTERNS = ("sequential",)
+
+    @classmethod
+    def normalize_pattern(cls, pattern: str | None) -> str:
+        if pattern in {"sequential", "fanout", "router"}:
+            return "sequential"
+        raise ValueError(f"Pattern must be one of: {', '.join(cls.SQUAD_PATTERNS)}")
 
     def _validate_definition(self, name: str, primary_agent: str, subagents: list[str]) -> None:
         """Members may be sub-agents or other primary agents; the lead cannot be its own member."""
@@ -859,20 +877,21 @@ class SquadRegistry:
         agent_ids = {agent["id"] for agent in catalog["agents"]}
         if primary_agent not in agent_ids:
             raise ValueError(f"Primary agent is not available: {primary_agent}")
-        catalog_ids = agent_ids | {agent["id"] for agent in catalog["subagents"]}
+        subagent_ids = {agent["id"] for agent in catalog["subagents"]}
         if len(set(subagents)) != len(subagents):
             raise ValueError("Sub-agent selections must not contain duplicates.")
         if primary_agent in subagents:
             raise ValueError("The primary agent cannot also be a squad member.")
-        unknown = [agent_id for agent_id in subagents if agent_id not in catalog_ids]
+        unknown = [agent_id for agent_id in subagents if agent_id not in subagent_ids]
         if unknown:
-            raise ValueError(f"Sub-agent definitions are not available: {', '.join(unknown)}")
+            raise ValueError(
+                f"Squad members must be sub-agents; members not available as sub-agents: {', '.join(unknown)}"
+            )
 
     def _validate_runtime(self, pattern: str, max_parallel: int) -> None:
-        if pattern not in self.SQUAD_PATTERNS:
-            raise ValueError(f"Pattern must be one of: {', '.join(self.SQUAD_PATTERNS)}")
-        if not 1 <= int(max_parallel) <= MAX_PARALLEL_LIMIT:
-            raise ValueError(f"max_parallel must be between 1 and {MAX_PARALLEL_LIMIT}.")
+        self.normalize_pattern(pattern)
+        if int(max_parallel) < 1:
+            raise ValueError("max_parallel must be at least 1.")
 
     def create_squad(
         self,
@@ -885,6 +904,7 @@ class SquadRegistry:
     ) -> dict[str, Any]:
         clean_name = name.strip()
         self._validate_definition(clean_name, primary_agent, subagents)
+        default_pattern = self.normalize_pattern(default_pattern)
         self._validate_runtime(default_pattern, max_parallel)
         base_id = re.sub(r"[^a-z0-9]+", "-", clean_name.lower()).strip("-")
         if not base_id:
@@ -903,7 +923,7 @@ class SquadRegistry:
                 "primary_agent": primary_agent,
                 "subagents": list(subagents),
                 "default_pattern": default_pattern,
-                "max_parallel": int(max_parallel),
+                "max_parallel": 1,
             }
             _write_json_atomic(self.SQUADS_PATH, definitions)
         return self.get_squad(squad_id)
@@ -921,14 +941,13 @@ class SquadRegistry:
                 return None
             updated = {**definitions[squad_id], **{k: v for k, v in fields.items() if v is not None}}
             updated["subagents"] = list(updated.get("subagents") or [])
-            if squad_id == CODE_SQUAD_ID and updated["default_pattern"] != "sequential":
-                raise ValueError("code-squad always runs its dedicated sequential pipeline.")
+            updated["default_pattern"] = self.normalize_pattern(updated.get("default_pattern", "sequential"))
             self._validate_definition(
                 str(updated.get("name") or ""), str(updated.get("primary_agent") or ""), updated["subagents"]
             )
             updated["name"] = str(updated["name"]).strip()
             updated["description"] = str(updated.get("description") or "").strip()
-            updated.setdefault("max_parallel", DEFAULT_MAX_PARALLEL)
+            updated["max_parallel"] = 1
             self._validate_runtime(updated.get("default_pattern", "sequential"), updated["max_parallel"])
             definitions[squad_id] = updated
             _write_json_atomic(self.SQUADS_PATH, definitions)
@@ -1330,8 +1349,6 @@ class SubAgentRunner:
         Code-squad agents answer with prose and fenced code; the orchestrator applies
         the code itself, so no tool calls are offered to the model here.
         """
-        import ollama
-
         meta, body = self.load_agent(agent_id)
         profile = self._build_profile(agent_id, meta, body)
         messages = [
@@ -1344,7 +1361,7 @@ class SubAgentRunner:
         last_flush = time.monotonic()
         resolved_model = model or profile.model or "qwen2.5-coder:latest"
         num_ctx = model_profiles.effective(resolved_model)["num_ctx"]
-        stream = ollama.chat(
+        stream = serialized_ollama_chat(
             model=resolved_model,
             messages=messages,
             stream=True,
@@ -1472,6 +1489,14 @@ class SubAgentRunner:
             meta, body = self.load_agent(agent_id)
             profile = self._build_profile(agent_id, meta, body)
             auto_started = self._ensure_squad_run(trace_id, agent_id, meta, profile, prompt_input)
+            squad_run = squad_scratchpad.get(trace_id) if trace_id else None
+            if squad_run:
+                profile.tools = [name for name in profile.tools if name != "call_subagent"]
+                profile.system_prompt += (
+                    "\n\n## Squad run constraint\n"
+                    "Do not call or delegate to other agents. The orchestrator controls the "
+                    "workflow order; complete only your assigned step using the supplied handoff."
+                )
             model = profile.model or "qwen2.5-coder:latest"
             agent_instance = Agent(model=model, tools=[], profile=profile)
             if profile.mode == "agent" and profile.tools:
@@ -1625,18 +1650,25 @@ class BasePattern(ABC):
         """Run the squad members; returns extra synthesis context and an optional result payload."""
 
     @staticmethod
-    def _run_scratchpad_context(trace_id: str) -> str:
+    def _run_scratchpad_context(
+        trace_id: str, author: str | None = None, title: str = "result"
+    ) -> str:
         run = squad_scratchpad.get(trace_id)
         if not run:
             raise RuntimeError(f"Squad scratchpad not found for run '{trace_id}'.")
-        entries = run["entries"][:3]
-        if not entries:
+        entry = next(
+            (item for item in run["entries"]
+             if item["title"] == title and (author is None or item["author"] == author)),
+            None,
+        )
+        if entry is None:
             return ""
-        lines = [
-            f"- {entry['author']} ({entry['kind']}): {entry['content'][:1200]}"
-            for entry in reversed(entries)
-        ]
-        return "\n\nRecent entries from this run's squad scratchpad:\n" + "\n".join(lines)
+        return (
+            "\n\nPrevious step handoff:\n"
+            f"Agent: {entry['author']}\n"
+            f"Title: {entry['title']}\n"
+            f"Result:\n{entry['content'][:3000]}"
+        )
 
     def execute(self, request: OrchestrationRequest) -> OrchestrationResponse:
         if request.squad_id == CODE_SQUAD_ID:
@@ -1695,7 +1727,9 @@ class BasePattern(ABC):
             payload = {**extra_payload, "scratchpad_payload": payload}
         return self._finish(run, status, final_answer, payload, scratchpad_snapshot)
 
-    def _run_member(self, run: _PatternRun, member_id: str) -> tuple[str | None, Exception | None]:
+    def _run_member(
+        self, run: _PatternRun, member_id: str, previous_member: str | None = None
+    ) -> tuple[str | None, Exception | None]:
         """Run one member turn with telemetry; never raises."""
         _print_trace(f" ├── Executing member '\033[93m{member_id}\033[0m'...")
         telemetry_bus.log_event(
@@ -1706,13 +1740,23 @@ class BasePattern(ABC):
         if member_id == RAG_RETRIEVER_ID:
             prompt = request.user_query
         else:
-            prompt = f"Task: '{request.user_query}'. Parameters: {request.parameters}"
-            if self.name == "sequential":
-                prompt += self._run_scratchpad_context(run.trace_id)
+            prompt = (
+                f"Task: {request.user_query}\n"
+                f"Parameters: {json.dumps(request.parameters, ensure_ascii=False, default=str)}\n"
+                "Work only on this assigned step. If a prior handoff is included, use its relevant "
+                "information and add your step's result. Keep the handoff concise, and write it to "
+                "the squad scratchpad with your agent ID and the title 'result'."
+            )
+        if previous_member:
+            prompt += self._run_scratchpad_context(
+                run.trace_id, author=previous_member, title="result"
+            )
         try:
             output = subagent_runner.run_agent_turn(
                 member_id, prompt, request.parameters, trace_id=run.trace_id
             )
+            if not output or not output.strip():
+                raise RuntimeError(f"Sub-agent '{member_id}' returned an empty result.")
         except Exception as exc:
             squad_scratchpad.post(run.trace_id, member_id, "note", "Member failed", str(exc))
             _print_trace(f" │   \033[91m[ERROR]\033[0m Member '{member_id}' failed: {exc}")
@@ -1721,7 +1765,13 @@ class BasePattern(ABC):
                 {"error": f"Sub-agent '{member_id}' failed: {exc}", "status": "error"},
             )
             return None, exc
-        squad_scratchpad.post(run.trace_id, member_id, "note", "Member response", output)
+        run_data = squad_scratchpad.get(run.trace_id)
+        has_result = bool(run_data) and any(
+            entry["author"] == member_id and entry["title"] == "result"
+            for entry in run_data["entries"]
+        )
+        if not has_result:
+            squad_scratchpad.post(run.trace_id, member_id, "note", "result", output)
         telemetry_bus.log_event(
             run.trace_id, "AGENT_MESSAGE", member_id, "orchestrator",
             {"summary": "Sub-agent phase completed", "status": "success"},
@@ -1744,13 +1794,13 @@ class BasePattern(ABC):
             {"summary": "Primary synthesis started", "status": "running"},
         )
         prompt = (
-            f"User request: '{run.request.user_query}'. "
-            "Read each member's result with read_squad_scratchpad, using the member's agent name "
-            "and the title 'result', then synthesize the final output in clear, user-facing prose."
+            f"User request: {run.request.user_query}\n"
+            "Use the selected scratchpad handoffs below to produce the final answer in clear, "
+            "user-facing prose. The orchestrator owns the workflow; do not delegate or start "
+            "additional agent work."
         )
         if context:
             prompt += f"\n\n{context}"
-        prompt += self._run_scratchpad_context(run.trace_id)
         final_answer = subagent_runner.run_agent_turn(run.primary_id, prompt, trace_id=run.trace_id)
         squad_scratchpad.post(run.trace_id, run.primary_id, "summary", "Primary synthesis", final_answer)
         run.add_step(
@@ -1799,13 +1849,6 @@ class BasePattern(ABC):
         return response
 
 
-def _member_outputs_context(outputs: dict[str, str]) -> str:
-    lines = ["Squad member outputs:"]
-    for member_id, output in outputs.items():
-        lines.append(f"--- {member_id} ---\n{str(output).strip()[:4000]}")
-    return "\n".join(lines)
-
-
 class SequentialPattern(BasePattern):
     """Executes squad members one after another to avoid local LLM hardware bottlenecks.
     Stops early if a member fails validation (missing expected scratchpad output)."""
@@ -1817,6 +1860,7 @@ class SequentialPattern(BasePattern):
     }
 
     def run_members(self, run: _PatternRun) -> tuple[str, dict[str, Any] | None]:
+        previous_member = None
         for member_id in run.members:
             handler_name = self._PROGRAMMATIC_STEPS.get(member_id)
             if handler_name:
@@ -1830,9 +1874,10 @@ class SequentialPattern(BasePattern):
                             f"Programmatic step '{member_id}' failed — skipping remaining members."
                         )
                         break
+                    previous_member = member_id
                     continue
 
-            output, error = self._run_member(run, member_id)
+            output, error = self._run_member(run, member_id, previous_member)
             self._record_member(run, member_id, error)
             if error:
                 _print_trace(
@@ -1840,13 +1885,18 @@ class SequentialPattern(BasePattern):
                     f"Member '{member_id}' raised an error — skipping remaining members."
                 )
                 break
+            previous_member = member_id
             if output and '"error"' in output and "finished without writing" in output:
                 _print_trace(
                     f" │   \033[91m[PIPELINE STOPPED]\033[0m "
                     f"Member '{member_id}' failed validation — skipping remaining members."
                 )
                 break
-        return "", None
+        context = (
+            self._run_scratchpad_context(run.trace_id, author=previous_member)
+            if previous_member else ""
+        )
+        return context, None
 
     @staticmethod
     def _run_questionnaire_step(run: _PatternRun) -> Exception | None:
@@ -1906,123 +1956,6 @@ class SequentialPattern(BasePattern):
             squad_scratchpad.post(run.trace_id, "questionnaire", "note", "Member failed", str(exc))
             _print_trace(f" │   \033[91m[QUESTIONNAIRE ERROR]\033[0m {exc}")
             return exc
-
-
-class FanOutPattern(BasePattern):
-    """Runs every squad member on the same task concurrently (bounded by ``max_parallel``)
-    and hands all of their outputs to the primary agent for synthesis."""
-
-    name = "fanout"
-
-    @staticmethod
-    def max_parallel(run: _PatternRun) -> int:
-        value = run.request.parameters.get("max_parallel")
-        if value is None and run.squad_id:
-            value = (squad_registry.get_squad(run.squad_id) or {}).get("max_parallel")
-        try:
-            limit = int(value or DEFAULT_MAX_PARALLEL)
-        except (TypeError, ValueError):
-            limit = DEFAULT_MAX_PARALLEL
-        return max(1, min(limit, MAX_PARALLEL_LIMIT))
-
-    def run_members(self, run: _PatternRun) -> tuple[str, dict[str, Any] | None]:
-        outputs: dict[str, str] = {}
-        errors: dict[str, str] = {}
-        with ThreadPoolExecutor(
-            max_workers=self.max_parallel(run), thread_name_prefix="squad-fanout"
-        ) as pool:
-            futures = {pool.submit(self._run_member, run, member_id): member_id for member_id in run.members}
-            for future in as_completed(futures):
-                member_id = futures[future]
-                output, error = future.result()
-                self._record_member(run, member_id, error)
-                if error is None:
-                    outputs[member_id] = str(output or "")
-                else:
-                    errors[member_id] = str(error)
-        ordered = {member_id: outputs[member_id] for member_id in run.members if member_id in outputs}
-        return _member_outputs_context(ordered), {"fanout_results": ordered, "fanout_errors": errors}
-
-
-def _parse_routing_reply(reply: str, allowed: list[str]) -> tuple[list[str], str]:
-    """Pull ``{"subagents": [...], "reason": ...}`` out of a model reply; unknown ids are dropped."""
-    match = re.search(r"\{.*\}", str(reply or ""), re.DOTALL)
-    if not match:
-        return [], ""
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return [], ""
-    if not isinstance(data, dict):
-        return [], ""
-    picked = data.get("subagents") or data.get("members") or []
-    if isinstance(picked, str):
-        picked = [picked]
-    chosen: list[str] = []
-    for member_id in picked if isinstance(picked, list) else []:
-        member_id = str(member_id).strip()
-        if member_id in allowed and member_id not in chosen:
-            chosen.append(member_id)
-    return chosen, str(data.get("reason") or "")[:500]
-
-
-class RouterPattern(BasePattern):
-    """The primary agent picks which squad members handle the task, then only those run
-    (sequentially) before the primary agent synthesizes."""
-
-    name = "router"
-
-    @staticmethod
-    def _member_descriptions(members: list[str]) -> dict[str, str]:
-        try:
-            catalog = squad_registry.list_agent_catalog()
-        except RuntimeError:
-            return {}
-        known = {item["id"]: item["description"] for item in catalog["agents"] + catalog["subagents"]}
-        return {member_id: known.get(member_id, "") for member_id in members}
-
-    def route(self, run: _PatternRun) -> tuple[list[str], str]:
-        descriptions = self._member_descriptions(run.members)
-        listing = "\n".join(
-            f"- {member_id}: {descriptions.get(member_id) or 'no description'}" for member_id in run.members
-        )
-        prompt = (
-            f"You are routing a task to members of your squad. Task: '{run.request.user_query}'.\n"
-            f"Available members:\n{listing}\n\n"
-            'Reply with JSON only: {"subagents": ["<member id>", ...], "reason": "<one sentence>"}. '
-            "Choose only ids from the list, in the order they should run."
-        )
-        telemetry_bus.log_event(
-            run.trace_id, "AGENT_MESSAGE", "orchestrator", run.primary_id,
-            {"summary": "Routing decision started", "status": "running"},
-        )
-        try:
-            reply = subagent_runner.run_agent_turn(run.primary_id, prompt, trace_id=run.trace_id)
-            squad_scratchpad.post(run.trace_id, run.primary_id, "plan", "Routing decision", reply)
-            chosen, reason = _parse_routing_reply(reply, run.members)
-        except Exception as exc:
-            squad_scratchpad.post(run.trace_id, run.primary_id, "note", "Routing failed", str(exc))
-            chosen, reason = [], f"Routing turn failed: {exc}"
-        if not chosen:
-            chosen = run.members[:1]
-            reason = f"Fallback to first member. {reason}".strip()
-        run.add_step(run.primary_id, "ROUTING", "SUCCESS", f"Routed to {', '.join(chosen)}. {reason}".strip())
-        telemetry_bus.log_event(
-            run.trace_id, "AGENT_MESSAGE", run.primary_id, "orchestrator",
-            {"summary": f"Routed to {', '.join(chosen)}", "status": "success"},
-        )
-        return chosen, reason
-
-    def run_members(self, run: _PatternRun) -> tuple[str, dict[str, Any] | None]:
-        chosen, reason = self.route(run)
-        outputs: dict[str, str] = {}
-        for member_id in chosen:
-            output, error = self._run_member(run, member_id)
-            self._record_member(run, member_id, error)
-            if error is None:
-                outputs[member_id] = str(output or "")
-        routing = {"chosen": chosen, "reason": reason, "skipped": [m for m in run.members if m not in chosen]}
-        return _member_outputs_context(outputs), {"routing": routing, "member_results": outputs}
 
 
 # --- Code Development Squad pipeline ---------------------------------------------------
@@ -2507,29 +2440,26 @@ class CodeSquadPipeline:
 # --- Dispatch and background runs ------------------------------------------------------
 
 class PipelineRegistry:
-    """Maps pattern names to execution strategies and runs orchestration requests.
+    """Runs the controlled sequential workflow and handles legacy pattern aliases.
 
     Requests for ``code-squad`` always go to the Code Development Squad pipeline.
     """
 
     PATTERNS: Dict[str, Type[BasePattern]] = {
         "sequential": SequentialPattern,
-        "fanout": FanOutPattern,
-        "router": RouterPattern,
     }
 
     def get_pattern(self, pattern_name: str | None) -> BasePattern:
-        key = (pattern_name or "sequential").lower().strip()
-        pattern_cls = self.PATTERNS.get(key, SequentialPattern)
-        return pattern_cls()
+        key = squad_registry.normalize_pattern((pattern_name or "sequential").lower().strip())
+        return self.PATTERNS[key]()
 
     @staticmethod
     def resolve_pattern(request: OrchestrationRequest) -> str:
         """A run's explicit pattern wins; otherwise the registered squad's default applies."""
         if request.pattern:
-            return request.pattern
+            return squad_registry.normalize_pattern(request.pattern)
         squad = squad_registry.get_squad(request.squad_id or "") if request.squad_id else None
-        return str((squad or {}).get("default_pattern") or "sequential")
+        return squad_registry.normalize_pattern(str((squad or {}).get("default_pattern") or "sequential"))
 
     def run_orchestration(self, request: OrchestrationRequest) -> OrchestrationResponse:
         if request.squad_id == CODE_SQUAD_ID:
@@ -2539,9 +2469,9 @@ class PipelineRegistry:
 
 
 class OrchestrationRunService:
-    """Starts orchestration runs on a small background pool, bounded by a capacity limit."""
+    """Runs one squad workflow at a time and bounds the accepted queue."""
 
-    def __init__(self, max_workers: int = 2, capacity: int = 10):
+    def __init__(self, max_workers: int = 1, capacity: int = 10):
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="orchestration")
         self._capacity = BoundedSemaphore(capacity)
 
@@ -2550,6 +2480,9 @@ class OrchestrationRunService:
         squad = squad_registry.get_squad(request.squad_id or "")
         if squad is None:
             raise ValueError("A registered squad_id is required.")
+        squad_registry._validate_definition(
+            squad["name"], squad["primary_agent"], list(squad.get("subagents") or [])
+        )
         if request.workflow_action != "all" and squad["squad_id"] != CODE_SQUAD_ID:
             raise ValueError("Plan, Build, Test, and Fix actions are only available for code-squad.")
         editor_code = request.parameters.get("editor_code", "")
@@ -2557,12 +2490,10 @@ class OrchestrationRunService:
             raise ValueError("The editor_code parameter must be text.")
         if len(editor_code.encode("utf-8")) > MAX_EDITOR_CONTENT_BYTES:
             raise EditorBufferTooLargeError("The CodeBuilder editor buffer exceeds the 1 MB workflow limit.")
-        if request.pattern and request.pattern not in PipelineRegistry.PATTERNS:
-            raise ValueError(f"Unknown pattern: {request.pattern}")
+        request.pattern = squad_registry.normalize_pattern(request.pattern or squad["default_pattern"])
         if not self._capacity.acquire(blocking=False):
             raise RunCapacityError("Orchestration capacity is full. Try again after a run completes.")
         request.trace_id = f"tr_{uuid.uuid4().hex}"
-        request.pattern = request.pattern or squad["default_pattern"]
         try:
             codebuilder_run_state.begin(
                 request.trace_id,

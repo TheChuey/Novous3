@@ -33,6 +33,14 @@ class CreateAgentRequest(BaseModel):
     environment_name: str = Field("", max_length=64)
 
 
+class ProjectStateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    default_model: str | None = None
+    active_agent: str | None = None
+    squad_root: str | None = None
+
+
 AgentDefinitionKind = Literal["prompt", "subagent"]
 
 

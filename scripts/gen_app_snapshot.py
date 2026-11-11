@@ -24,8 +24,9 @@ interface_<component>.py (FastAPI router / doorway, no domain logic), schemas_<c
 with module-level singletons).
 
 - server.py: FastAPI app entrypoint serving the static UI and mounting every component router
-- core_engine/: agent library, Think-Act-Observe runtime, tool catalog with built-in tools, HITL questionnaires, chat sessions
-- orchestration/: sub-agent runner, deterministic RAG retriever, execution patterns, the Code Development Squad pipeline, squad registry with health metrics, live telemetry (SSE) and the pipeline registry
+- core_engine/: agent runtime, tool catalog, model integration and chat APIs
+- orchestration/: sequential squad execution, deterministic RAG retriever, the Code Development Squad pipeline, squad registry, live telemetry (SSE) and the pipeline registry
+- squads/: squad definitions and squad-folder management
 - subAgentLibrary/: pure-YAML definitions for background sub-agents
 - editor/: workspace file operations and the editor session event bus (REST + WebSocket)
 - ragMemory/: named knowledge sources, isolated SQLite indexes, document indexer, background scanner, semantic search
@@ -35,12 +36,16 @@ with module-level singletons).
 - tools/: unified workspace file tools, custom-tool promotion, and the agent-facing tool functions
 - frontend/: static assets and HTML pages
 - library/: centralized primary-agent definitions, including rag-presenter
-- workspace/: project configuration, squads and agent scaffolding
 - test_environment/: sandbox virtualenv, folder allow-list and the Tool Workbench
 - tests/: the full pytest suite for every component
 - about/: app identity source synced to the index page and app documentation
 - scripts/: documentation and migration generators
-- app_documentation/: generated snapshot and master copy documents"""
+- app_documentation/: maintained application guide and generated source snapshots
+
+Squad runs use one lead and ordered sub-agent steps. Each step receives the task
+and only the preceding step's result handoff; the lead synthesizes the final
+result. Orchestration runs are serialized and Ollama chat and embedding requests
+share a process-local inference lock."""
 
 
 def get_lang(ext: str) -> str:
@@ -89,7 +94,7 @@ def main():
         f.write("Description: Self-contained reference for an AI agent. Captures Novous app purpose, architecture, file structure, and complete source code. Designed for grounding/understanding without repo access.\n\n")
         f.write("# NOVOUS APPLICATION SNAPSHOT\n\n")
         f.write("## 1) Overview\n\n")
-        f.write("Novous is an agent orchestration/workspace system with a FastAPI backend, a static frontend, a core engine for agents and tools, a sub-agent orchestration pillar with enforced RAG retrieval, editor integration, shared agent memory, a code builder, a sandboxed file manager, a repository-root agent library, and a test environment.\n\n")
+        f.write("Novous is a local-first agent workspace with a FastAPI backend and static frontend. It provides agent and tool management, knowledge retrieval, scratchpad memory, sandboxed file utilities, and a CodeBuilder pipeline. Squad runs use an ordered lead-and-sub-agent workflow designed to keep model context focused and serialize local inference work.\n\n")
         f.write(f"Key components:\n{KEY_COMPONENTS}\n\n")
         f.write("## 2) Table of Contents\n\n")
         f.write("1. Overview\n")

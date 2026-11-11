@@ -232,7 +232,7 @@ export function openTestSuiteRunner({
 
   sourceLabel.textContent = filePath
     ? `Imported from To-Do file: ${filePath}`
-    : 'Saved suites are stored in workspace/saved_test_suites.';
+    : 'Saved suites are stored in test_environment/data/saved_suites.';
   agentSelect.replaceChildren(...agents.map(agent => {
     const option = document.createElement('option');
     option.value = agent.id;

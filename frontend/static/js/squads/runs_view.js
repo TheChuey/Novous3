@@ -1,6 +1,5 @@
 /**
- * Runs section: start a squad run (optionally overriding its pattern), follow the live
- * trace, then inspect the final answer, routing / fan-out details, steps and scratchpad.
+ * Runs section: start a squad workflow, follow the live trace and inspect handoffs.
  */
 import { Api } from '../api.js';
 import { esc, navigate } from '../shell.js';
@@ -63,7 +62,7 @@ export function renderRunsView(container, payload = null) {
       <header class="sq-page-head">
         <div>
           <h2>Runs</h2>
-          <p class="text-muted">Run a squad on a real request and watch how its agents hand work to each other.</p>
+          <p class="text-muted">Run one controlled workflow at a time and watch each handoff.</p>
         </div>
         <button type="button" class="btn" data-act="squad-scratchpads">Squad scratchpads</button>
       </header>
@@ -71,10 +70,6 @@ export function renderRunsView(container, payload = null) {
         <section class="card sq-run-form">
           <label class="sq-field"><span>Squad</span>
             <select class="form-select" data-role="squad"><option>Loading…</option></select></label>
-          <label class="sq-field"><span>Pattern for this run</span>
-            <select class="form-select" data-role="pattern"></select></label>
-          <label class="sq-field hidden" data-role="parallel-field"><span>Members at once</span>
-            <input class="form-input" type="number" min="1" max="4" value="2" data-role="parallel"></label>
           <p class="text-muted small" data-role="squad-summary"></p>
           <label class="sq-field"><span>Request</span>
             <textarea class="form-input" rows="5" data-role="query" placeholder="Describe the work for this squad"></textarea></label>
@@ -99,9 +94,6 @@ export function renderRunsView(container, payload = null) {
     </div>`;
 
   const squadSelect = container.querySelector('[data-role="squad"]');
-  const patternSelect = container.querySelector('[data-role="pattern"]');
-  const parallelField = container.querySelector('[data-role="parallel-field"]');
-  const parallelInput = container.querySelector('[data-role="parallel"]');
   const summary = container.querySelector('[data-role="squad-summary"]');
   const query = container.querySelector('[data-role="query"]');
   const status = container.querySelector('[data-role="status"]');
@@ -126,20 +118,13 @@ export function renderRunsView(container, payload = null) {
     const squad = currentSquad();
     if (!squad) return;
     lastSquadId = squad.squad_id;
-    const dedicated = squad.squad_id === 'code-squad';
-    patternSelect.innerHTML = `
-      <option value="">Squad default · ${esc(PATTERN_INFO[squad.default_pattern]?.label || squad.default_pattern)}</option>
-      ${dedicated ? '' : Object.entries(PATTERN_INFO).map(([key, info]) => `<option value="${key}">${esc(info.label)}</option>`).join('')}`;
-    parallelInput.value = squad.max_parallel || 2;
     syncPattern();
   }
 
   function syncPattern() {
     const squad = currentSquad();
-    const pattern = patternSelect.value || squad?.default_pattern;
-    parallelField.classList.toggle('hidden', pattern !== 'fanout');
     summary.textContent = squad
-      ? `${squad.primary_agent} leads ${squad.subagents.join(', ') || 'no members'}. ${PATTERN_INFO[pattern]?.summary || ''}`
+      ? `${squad.primary_agent} leads ${squad.subagents.join(', ') || 'no members'}. ${PATTERN_INFO.sequential.summary}`
       : '';
   }
 
@@ -231,7 +216,6 @@ export function renderRunsView(container, payload = null) {
     if (trace) showResult(trace);
   });
   squadSelect.addEventListener('change', syncSquad);
-  patternSelect.addEventListener('change', syncPattern);
 
   runButton.addEventListener('click', async () => {
     const squad = currentSquad();
@@ -244,18 +228,15 @@ export function renderRunsView(container, payload = null) {
     meters.reset();
     runButton.disabled = true;
     setStatus('Starting run…');
-    const pattern = patternSelect.value || null;
-    const parameters = (pattern || squad.default_pattern) === 'fanout'
-      ? { max_parallel: Number(parallelInput.value) || 2 } : {};
+    const parameters = {};
     const record = {
-      squadName: squad.name, pattern: pattern || squad.default_pattern, status: 'running',
+      squadName: squad.name, pattern: 'sequential', status: 'running',
       time: new Date().toLocaleTimeString(), traceId: ''
     };
     try {
       activeRun = await startSquadRun({
         squadId: squad.squad_id,
         query: text,
-        pattern,
         parameters,
         onEvent: addTimelineEvent,
         onComplete: async (traceId, detail) => {

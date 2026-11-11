@@ -739,8 +739,9 @@ class ToolWorkbench:
         # Use the same context size the agent would use with this model.
         num_ctx = model_profiles.effective(model).get("num_ctx")
         try:
-            import ollama
-            response = ollama.chat(
+            from core_engine.logic_core_engine import serialized_ollama_chat
+
+            response = serialized_ollama_chat(
                 model=model,
                 messages=[{"role": "user", "content": user_prompt}],
                 tools=[schema],

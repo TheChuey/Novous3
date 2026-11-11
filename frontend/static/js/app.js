@@ -3,8 +3,10 @@ import { renderEditorView } from './editor.js';
 import { renderChatView } from './chat.js';
 import { renderPromptCreationView } from './prompt_creation.js';
 import { renderCodeBuilderView } from './codebuilder/codebuilder.js';
-import { AppState, esc, refreshAgents, refreshProject, updateHealthBadge } from './shell.js';
+import { AppState, esc, refreshAgents, refreshSquads, updateHealthBadge } from './shell.js';
 import { renderWorkspaceView } from './views/workspace_view.js';
+import { renderFileManagerView } from './views/file_manager_view.js';
+import { renderKnowledgeView } from './views/knowledge_view.js';
 import { renderSquadsView } from './squads/squads_view.js';
 import { renderAgentsView } from './squads/agents_view.js';
 import { renderToolsView } from './squads/tools_view.js';
@@ -20,6 +22,8 @@ const views = {
   models: renderModelsView,
   runs: renderRunsView,
   dashboard: renderWorkspaceView,
+  files: renderFileManagerView,
+  knowledge: renderKnowledgeView,
   editor: renderEditorView,
   codebuilder: renderCodeBuilderView,
   chat: renderChatView,
@@ -59,7 +63,7 @@ async function boot() {
   });
 
   try {
-    await Promise.all([refreshAgents(), refreshProject()]);
+    await Promise.all([refreshAgents(), refreshSquads()]);
   } catch (err) {
     document.getElementById('view-container').innerHTML =
       `<div class="error-panel">Failed to load workspace: ${esc(err.message)}</div>`;

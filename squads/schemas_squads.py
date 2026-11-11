@@ -1,5 +1,4 @@
-"""Pydantic schemas for design-time squad blueprints (who is in a squad, how they interact,
-and which tools each member carries)."""
+"""Pydantic schemas for a lead, ordered sub-agent members and their tool assignments."""
 
 from typing import List, Literal, Optional
 
@@ -20,13 +19,15 @@ class SquadBlueprint(BaseModel):
     squad_id: Optional[str] = Field(default=None, description="Existing squad to update; None creates one")
     name: str = Field(..., min_length=1, max_length=80)
     description: str = Field(default="", max_length=500)
-    pattern: SquadPattern = "sequential"
-    max_parallel: int = Field(default=2, ge=1, le=4)
+    pattern: SquadPattern = Field(
+        default="sequential",
+        description="Execution is sequential; fanout and router are accepted as legacy aliases.",
+    )
     lead: SquadMember
     members: List[SquadMember] = Field(default_factory=list, max_length=20)
     lead_delegates: bool = Field(
         default=False,
-        description="Give the lead call_subagent, restricted to the squad's sub-agent members",
+        description="Deprecated; dynamic delegation is disabled during squad runs.",
     )
 
 

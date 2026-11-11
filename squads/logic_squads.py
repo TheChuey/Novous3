@@ -1,27 +1,25 @@
-"""Squad Architect: design-time composition of agent squads.
+"""Squad Architect: design-time composition of a lead and ordered sub-agent steps.
 
-A blueprint names a lead agent, its members (sub-agents or other primary agents), the
-interaction pattern and the tools each member carries. This service checks a blueprint and
-applies it through the packages that own each concern; it never runs an LLM itself:
+A blueprint names a lead agent, its ordered sub-agent members and the tools each member
+carries. This service checks a blueprint and applies it through the packages that own
+each concern; it never runs an LLM itself:
 
 - squad registration and patterns  -> ``orchestration.squad_registry``
 - agent files, tools, allow-lists  -> ``core_engine.agent_library``
-- new primary agents               -> ``workspace.workspace_workflow``
+- new primary agents               -> ``core_engine.agent_management``
 - registered tools                 -> ``core_engine.tool_catalog``
 """
 
 from typing import Any
 
 from core_engine.logic_core_engine import agent_library, tool_catalog
+from core_engine.logic_agent_management import agent_management
 from orchestration.logic_orchestration import CODE_SQUAD_ID, squad_registry
 from squads.schemas_squads import BlueprintValidation, SquadBlueprint, SquadMember
-from workspace.logic_workspace import workspace_workflow
 
-# Tools the orchestration patterns expect: the lead reads the scratchpad during synthesis and
-# sub-agents hand their structured results back through it.
+# Tools the workflow uses for scratchpad inspection and member handoffs.
 LEAD_HANDOFF_TOOL = "read_squad_scratchpad"
 MEMBER_HANDOFF_TOOL = "write_squad_scratchpad"
-DELEGATION_TOOL = "call_subagent"
 
 _KIND_BY_DEFINITION = {"prompt": "agent", "subagent": "subagent"}
 
@@ -118,7 +116,6 @@ class SquadArchitect:
             "name": squad["name"],
             "description": squad.get("description", ""),
             "pattern": squad["default_pattern"],
-            "max_parallel": squad["max_parallel"],
             "lead": self.describe_agent(squad["primary_agent"]),
             "members": [self.describe_agent(member_id) for member_id in squad["subagents"]],
             "metrics": squad["metrics"],
@@ -148,6 +145,8 @@ class SquadArchitect:
             node = self._describe_or_none(member_id)
             if node is None:
                 errors.append(f"Member not found: {member_id}")
+            elif node["kind"] != "subagent":
+                errors.append(f"Squad member must be a sub-agent, not a primary agent: {member_id}")
             else:
                 members[member_id] = node
 
@@ -156,26 +155,20 @@ class SquadArchitect:
             if unknown:
                 errors.append(f"{node_spec.agent_id}: unknown tools {', '.join(unknown)}")
 
-        if blueprint.squad_id == CODE_SQUAD_ID and blueprint.pattern != "sequential":
-            errors.append("code-squad always runs its dedicated sequential pipeline.")
-        if blueprint.pattern == "router" and len(member_ids) < 2:
-            errors.append("The router pattern needs at least two members to choose between.")
-        if blueprint.pattern == "fanout" and len(member_ids) < 2:
-            warnings.append("Fan-out with fewer than two members behaves like sequential.")
+        if blueprint.lead_delegates:
+            errors.append("Squad runs are orchestrated in order; dynamic agent delegation is disabled.")
         if not member_ids:
             warnings.append("No members: the lead will answer alone after an empty scratchpad barrier.")
 
         if lead is not None:
-            lead_tools = self._final_tools(blueprint.lead, lead, blueprint.lead_delegates)
+            lead_tools = self._final_tools(blueprint.lead, lead)
             if LEAD_HANDOFF_TOOL not in lead_tools:
                 warnings.append(f"The lead has no {LEAD_HANDOFF_TOOL}, so it cannot read member handoffs.")
             if lead_tools and lead["mode"] != "agent":
                 warnings.append("The lead is in chat mode; it will be switched to agent mode so its tools run.")
-            if blueprint.lead_delegates and not any(n["kind"] == "subagent" for n in members.values()):
-                warnings.append("Delegation is on but the squad has no sub-agent members to call.")
         for member_id, node in members.items():
             spec = next(m for m in blueprint.members if m.agent_id == member_id)
-            tools = self._final_tools(spec, node, False)
+            tools = self._final_tools(spec, node)
             if node["kind"] == "subagent" and MEMBER_HANDOFF_TOOL not in tools:
                 warnings.append(f"{member_id} has no {MEMBER_HANDOFF_TOOL}, so its result will not reach the lead.")
         return BlueprintValidation(ok=not errors, errors=errors, warnings=warnings)
@@ -188,6 +181,7 @@ class SquadArchitect:
         if not validation.ok:
             raise ValueError("; ".join(validation.errors))
 
+        pattern = squad_registry.normalize_pattern(blueprint.pattern)
         member_ids = [member.agent_id for member in blueprint.members]
         if blueprint.squad_id:
             squad = squad_registry.update_squad(
@@ -196,15 +190,15 @@ class SquadArchitect:
                 description=blueprint.description,
                 primary_agent=blueprint.lead.agent_id,
                 subagents=member_ids,
-                default_pattern=blueprint.pattern,
-                max_parallel=blueprint.max_parallel,
+                default_pattern=pattern,
+                max_parallel=1,
             )
             if squad is None:
                 raise LookupError(f"Squad not found: {blueprint.squad_id}")
         else:
             squad = squad_registry.create_squad(
                 blueprint.name, blueprint.description, blueprint.lead.agent_id,
-                member_ids, blueprint.pattern, blueprint.max_parallel,
+                member_ids, pattern, 1,
             )
 
         for spec in blueprint.members:
@@ -217,33 +211,18 @@ class SquadArchitect:
         }
 
     def _apply_lead(self, blueprint: SquadBlueprint) -> None:
-        """Write the lead's tools; with delegation on, its '## Sub-agents' allow-list becomes
-        exactly the squad's sub-agent members (keeping any usage notes already written)."""
-        if blueprint.lead.tools is None and not blueprint.lead_delegates:
+        """Persist explicit lead tool changes; the orchestrator controls all squad handoffs."""
+        if blueprint.lead.tools is None:
             return
         lead = self.describe_agent(blueprint.lead.agent_id)
-        tools = self._final_tools(blueprint.lead, lead, blueprint.lead_delegates)
-        allow_list = None
-        if blueprint.lead_delegates:
-            usage = {
-                entry["id"]: entry["usage"]
-                for entry in agent_library.get_agent_tools("prompt", lead["id"])["subagents"]
-            }
-            allow_list = [
-                {"id": member.agent_id, "usage": usage.get(member.agent_id, "")}
-                for member in blueprint.members
-                if agent_library.definition_kind(member.agent_id) == "subagent"
-            ]
+        tools = self._final_tools(blueprint.lead, lead)
         agent_library.set_agent_tools(
-            "prompt", lead["id"], tools, mode="agent" if tools else None, subagents=allow_list
+            "prompt", lead["id"], tools, mode="agent" if tools else None
         )
 
     @staticmethod
-    def _final_tools(spec: SquadMember, node: dict[str, Any], delegates: bool) -> list[str]:
-        tools = list(spec.tools) if spec.tools is not None else list(node["tools"])
-        if delegates and DELEGATION_TOOL not in tools:
-            tools.append(DELEGATION_TOOL)
-        return tools
+    def _final_tools(spec: SquadMember, node: dict[str, Any]) -> list[str]:
+        return list(spec.tools) if spec.tools is not None else list(node["tools"])
 
     def _describe_or_none(self, agent_id: str) -> dict[str, Any] | None:
         try:
@@ -279,7 +258,7 @@ class SquadArchitect:
     def create_member(self, kind: str, agent_id: str, name: str, description: str = "") -> dict[str, Any]:
         """Scaffold a new primary agent (library/*.md) or sub-agent (subAgentLibrary/*.yaml)."""
         if kind == "agent":
-            created = workspace_workflow.scaffold_agent(agent_id, name, description, mode="agent")
+            created = agent_management.scaffold_agent(agent_id, name, description, mode="agent")
             return self.describe_agent(created["agent_id"])
         if kind == "subagent":
             created = squad_registry.create_subagent(agent_id, name, description)
