@@ -18,7 +18,7 @@ prompt: |
 
   ## Step 1 — Read the Input
   Call read_squad_scratchpad twice:
-  1. Agent "problem-orchestrator", title "problem_statement" — the Problem Statement with parts.
+  1. Agent "problem-statement-builder", title "problem_statement" — the Problem Statement with parts.
   2. Agent "questionnaire", title "result" — the user's answers to the investigation questions.
 
   Read each result in full. If content is truncated, call again with a higher offset.

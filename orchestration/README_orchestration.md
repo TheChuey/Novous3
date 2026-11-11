@@ -121,6 +121,12 @@ handoff, not the full conversation or the entire scratchpad. Full run entries re
 the scratchpad viewer. Dynamic `call_subagent` tool use is withheld during squad runs; the
 orchestrator owns the order. The model prompts remain editable for experimentation.
 
+The analysis workflow runs `problem-statement-builder` before `inquisitive`, followed by the
+reserved programmatic `questionnaire` step, `problem-analyst`, and `problem-report-builder`.
+The questionnaire is not a prompt-based agent: it presents the questions, collects the user's
+answers, and stores the `questionnaire` / `result` handoff. The primary `problem-orchestrator`
+then synthesizes the completed report. Legacy Thinker registrations are normalized to this order.
+
 ## Code Development Squad pipeline
 
 `code-squad` (primary agent `code-planer`, sub-agents `code-builder` → `tester` → `code-troubleshooter`) runs through `CodeSquadPipeline`, not the patterns above. It drives the CodeBuilder editor:

@@ -17,7 +17,7 @@ prompt: |
   You read the Problem Statement and generate numbered questions to investigate its root cause parts.
 
   ## Step 1 — Read the Problem Statement
-  Call read_squad_scratchpad with agent "problem-orchestrator" and title "problem_statement".
+  Call read_squad_scratchpad with agent "problem-statement-builder" and title "problem_statement".
   Read the full result. If it is truncated, call again with a higher offset until you have everything.
 
   ## Step 2 — Generate Questions

@@ -54,6 +54,16 @@ DEFAULT_MAX_PARALLEL = 1
 COMPONENT_ROOT = Path(__file__).resolve().parent
 LEGACY_DATA_DIR = COMPONENT_ROOT.parent / "agentMemory" / "data"
 MAX_EDITOR_CONTENT_BYTES = 1_000_000
+PROGRAMMATIC_SQUAD_STEPS: dict[str, str] = {
+    "questionnaire": "_run_questionnaire_step",
+}
+THINKER_PIPELINE_STEPS = (
+    "problem-statement-builder",
+    "inquisitive",
+    "questionnaire",
+    "problem-analyst",
+    "problem-report-builder",
+)
 
 
 class EditorBufferTooLargeError(ValueError):
@@ -66,6 +76,10 @@ class RunCapacityError(RuntimeError):
 
 class AgentTurnCancelled(Exception):
     """Raised when a streamed agent turn is stopped by the user."""
+
+
+class AgentOutputValidationError(RuntimeError):
+    """Raised when a squad agent omits a required scratchpad handoff."""
 
 
 class PipelineCancelled(Exception):
@@ -771,6 +785,8 @@ class SquadRegistry:
                 definitions[squad_id].get("default_pattern", "sequential")
             )
             definitions[squad_id]["max_parallel"] = 1
+            if squad_id == "thinker":
+                self._migrate_thinker_topology(definitions[squad_id])
             if definitions[squad_id].get("primary_agent"):
                 definitions[squad_id]["subagents"] = [
                     member_id for member_id in definitions[squad_id].get("subagents", [])
@@ -778,6 +794,21 @@ class SquadRegistry:
                 ]
         self._migrate_code_squad_topology(definitions.get(CODE_SQUAD_ID))
         return definitions
+
+    @staticmethod
+    def _migrate_thinker_topology(thinker: dict[str, Any]) -> None:
+        """Normalize the legacy Thinker squad to its complete ordered workflow."""
+        if thinker.get("primary_agent") != "problem-orchestrator":
+            return
+        subagents = thinker.get("subagents")
+        if not isinstance(subagents, list):
+            subagents = []
+        pipeline_steps = set(THINKER_PIPELINE_STEPS)
+        extras = [
+            member_id for member_id in subagents
+            if member_id != "problem-orchestrator" and member_id not in pipeline_steps
+        ]
+        thinker["subagents"] = [*THINKER_PIPELINE_STEPS, *extras]
 
     @staticmethod
     def _migrate_code_squad_topology(code_squad: dict[str, Any] | None) -> None:
@@ -870,7 +901,7 @@ class SquadRegistry:
         raise ValueError(f"Pattern must be one of: {', '.join(cls.SQUAD_PATTERNS)}")
 
     def _validate_definition(self, name: str, primary_agent: str, subagents: list[str]) -> None:
-        """Members may be sub-agents or other primary agents; the lead cannot be its own member."""
+        """Members must be sub-agents or known orchestrator-owned steps."""
         if not name.strip():
             raise ValueError("Squad name is required.")
         catalog = self.list_agent_catalog()
@@ -882,10 +913,14 @@ class SquadRegistry:
             raise ValueError("Sub-agent selections must not contain duplicates.")
         if primary_agent in subagents:
             raise ValueError("The primary agent cannot also be a squad member.")
-        unknown = [agent_id for agent_id in subagents if agent_id not in subagent_ids]
+        unknown = [
+            agent_id for agent_id in subagents
+            if agent_id not in subagent_ids and agent_id not in PROGRAMMATIC_SQUAD_STEPS
+        ]
         if unknown:
             raise ValueError(
-                f"Squad members must be sub-agents; members not available as sub-agents: {', '.join(unknown)}"
+                "Squad members must be sub-agents or supported programmatic steps; "
+                f"members not available to the orchestrator: {', '.join(unknown)}"
             )
 
     def _validate_runtime(self, pattern: str, max_parallel: int) -> None:
@@ -1419,6 +1454,9 @@ class SubAgentRunner:
     )
 
     _EXPECTED_OUTPUT: dict[str, tuple[str, str, str]] = {
+        "problem-statement-builder": (
+            "problem-statement-builder", "problem_statement", "Problem Statement"
+        ),
         "inquisitive":          ("inquisitive",          "questions", "investigation questions"),
         "questionnaire":        ("questionnaire",        "result",    "questionnaire answers"),
         "problem-analyst":      ("problem-analyst",      "result",    "analysis report"),
@@ -1441,15 +1479,14 @@ class SubAgentRunner:
         if found:
             return reply
         error_msg = (
-            f'{{"error": "Agent \\"{agent_id}\\" finished without writing its expected output '
-            f'({description}) to the scratchpad. The investigation cannot continue.", '
-            f'"agent": "{agent_id}", "expected_agent": "{sp_agent}", "expected_title": "{sp_title}"}}'
+            f'Agent "{agent_id}" finished without writing its expected output ({description}) '
+            f'to the scratchpad. The investigation cannot continue.'
         )
         _print_trace(
             f"\033[91m[VALIDATION] {agent_id} did not write {sp_agent}/{sp_title} "
             f"— stopping chain.\033[0m"
         )
-        return error_msg
+        raise AgentOutputValidationError(error_msg)
 
     def _ensure_squad_run(
         self, trace_id: str | None, agent_id: str, meta: dict, profile: Any, prompt_input: str
@@ -1512,7 +1549,12 @@ class SubAgentRunner:
                     squad_scratchpad.finish(trace_id, "error")
                 raise
             self._emit_usage(trace_id, agent_id, agent_instance)
-            reply = self._validate_agent_output(agent_id, trace_id, reply)
+            try:
+                reply = self._validate_agent_output(agent_id, trace_id, reply)
+            except AgentOutputValidationError:
+                if auto_started and trace_id:
+                    squad_scratchpad.finish(trace_id, "error")
+                raise
 
             if auto_started and trace_id:
                 squad_scratchpad.finish(trace_id, "completed")
@@ -1685,33 +1727,39 @@ class BasePattern(ABC):
             f"\n\033[94m[ORCHESTRATION TRACE: {run.trace_id}]\033[0m Starting {self.name} pipeline."
         )
         extra_payload = None
+        scratchpad_entry: dict[str, Any] = {}
+        scratchpad_snapshot: dict[str, Any] = {}
         try:
             context, extra_payload = self.run_members(run)
-            scratchpad_entry = subagent_runner.read_latest_subagent_scratchpad()
-            scratchpad_snapshot = subagent_runner.read_scratchpad_snapshot()
-            status = (
-                str(scratchpad_entry.get("status") or "success")
-                if scratchpad_entry
-                else "no_context_found"
-            )
-            if extra_payload and status == "no_context_found":
-                status = "success"
-            telemetry_bus.log_event(
-                run.trace_id, "SCRATCHPAD_HANDOFF", "orchestrator", "scratchpad",
-                {
-                    "status": status,
-                    "subagent_id": scratchpad_entry.get("subagent_id", ""),
-                    "result_count": _result_count(scratchpad_entry),
-                    "direction": "read",
-                },
-            )
-            run.add_step(
-                "scratchpad", "SCRATCHPAD_BARRIER", status,
-                "Retrieved latest sub-agent payload from scratchpad",
-            )
-            final_answer = self._synthesize(run, context)
-            if any(step.status == "ERROR" for step in run.steps):
+            failed_step = next((step for step in run.steps if step.status == "ERROR"), None)
+            if failed_step:
                 status = "error"
+                reason = failed_step.error_reason or failed_step.details
+                final_answer = f"Workflow stopped at '{failed_step.agent_id}': {reason}"
+            else:
+                scratchpad_entry = subagent_runner.read_latest_subagent_scratchpad()
+                scratchpad_snapshot = subagent_runner.read_scratchpad_snapshot()
+                status = (
+                    str(scratchpad_entry.get("status") or "success")
+                    if scratchpad_entry
+                    else "no_context_found"
+                )
+                if extra_payload and status == "no_context_found":
+                    status = "success"
+                telemetry_bus.log_event(
+                    run.trace_id, "SCRATCHPAD_HANDOFF", "orchestrator", "scratchpad",
+                    {
+                        "status": status,
+                        "subagent_id": scratchpad_entry.get("subagent_id", ""),
+                        "result_count": _result_count(scratchpad_entry),
+                        "direction": "read",
+                    },
+                )
+                run.add_step(
+                    "scratchpad", "SCRATCHPAD_BARRIER", status,
+                    "Retrieved latest sub-agent payload from scratchpad",
+                )
+                final_answer = self._synthesize(run, context)
         except Exception as exc:
             status = "error"
             final_answer = f"Workflow failed: {exc}"
@@ -1855,9 +1903,7 @@ class SequentialPattern(BasePattern):
 
     name = "sequential"
 
-    _PROGRAMMATIC_STEPS: dict[str, str] = {
-        "questionnaire": "_run_questionnaire_step",
-    }
+    _PROGRAMMATIC_STEPS = PROGRAMMATIC_SQUAD_STEPS
 
     def run_members(self, run: _PatternRun) -> tuple[str, dict[str, Any] | None]:
         previous_member = None
@@ -1886,12 +1932,6 @@ class SequentialPattern(BasePattern):
                 )
                 break
             previous_member = member_id
-            if output and '"error"' in output and "finished without writing" in output:
-                _print_trace(
-                    f" │   \033[91m[PIPELINE STOPPED]\033[0m "
-                    f"Member '{member_id}' failed validation — skipping remaining members."
-                )
-                break
         context = (
             self._run_scratchpad_context(run.trace_id, author=previous_member)
             if previous_member else ""

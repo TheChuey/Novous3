@@ -1090,6 +1090,71 @@ def test_squad_default_pattern_applies_unless_the_run_overrides_it(monkeypatch):
         squad_registry.create_squad("Mixed", "", "lead", ["peer"])
 
 
+def test_squad_accepts_orchestrator_owned_questionnaire_step(monkeypatch):
+    monkeypatch.setattr(
+        squad_registry,
+        "list_agent_catalog",
+        lambda: {
+            "agents": [{"id": "problem-orchestrator", "name": "Lead", "description": ""}],
+            "subagents": [
+                {"id": "problem-statement-builder", "name": "Statement Builder", "description": ""},
+                {"id": "inquisitive", "name": "Questioner", "description": ""},
+                {"id": "problem-analyst", "name": "Analyst", "description": ""},
+            ],
+        },
+    )
+
+    squad_registry._validate_definition(
+        "Thinker",
+        "problem-orchestrator",
+        ["problem-statement-builder", "inquisitive", "questionnaire", "problem-analyst"],
+    )
+
+
+@pytest.mark.parametrize(
+    "legacy_members",
+    [
+        [
+            "problem-orchestrator",
+            "inquisitive",
+            "questionnaire",
+            "problem-analyst",
+            "problem-report-builder",
+        ],
+        ["inquisitive", "problem-analyst", "problem-report-builder"],
+    ],
+)
+def test_legacy_thinker_topology_migrates_to_the_complete_workflow(
+    legacy_members, tmp_path, monkeypatch
+):
+    import json
+
+    path = tmp_path / "orchestration_squads.json"
+    path.write_text(
+        json.dumps({
+            "thinker": {
+                "squad_id": "thinker",
+                "name": "Thinker",
+                "description": "",
+                "primary_agent": "problem-orchestrator",
+                "subagents": legacy_members,
+            }
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(squad_registry, "SQUADS_PATH", path)
+
+    thinker = squad_registry._read_definitions()["thinker"]
+
+    assert thinker["subagents"] == [
+        "problem-statement-builder",
+        "inquisitive",
+        "questionnaire",
+        "problem-analyst",
+        "problem-report-builder",
+    ]
+
+
 def test_legacy_squad_definitions_normalize_patterns_and_remove_duplicate_leads():
     import json
 
@@ -1264,7 +1329,7 @@ def test_squad_catalog_includes_new_code_subagents():
     agent_ids = {agent["id"] for agent in catalog["agents"]}
     subagent_ids = {agent["id"] for agent in catalog["subagents"]}
     assert "code-planer" in agent_ids
-    assert {"code-builder", "tester", "code-troubleshooter"} <= subagent_ids
+    assert {"code-builder", "tester", "code-troubleshooter", "problem-statement-builder"} <= subagent_ids
 
 
 def test_code_subagents_are_text_only_and_return_one_python_block():
@@ -1827,6 +1892,105 @@ def test_generic_squad_captures_each_agent(pattern):
     assert run["status"] == "success"
     assert {entry["author"] for entry in run["entries"]} == {"lead", "worker-a", "worker-b"}
     assert any(entry["content"] == "response from worker-a" for entry in run["entries"])
+
+
+def test_missing_expected_handoff_fails_without_primary_synthesis():
+    from orchestration.logic_orchestration import AgentOutputValidationError
+
+    request = OrchestrationRequest(
+        primary_agent="lead",
+        subagents=["inquisitive"],
+        user_query="Investigate a problem",
+    )
+    calls = []
+
+    def failed_turn(agent_id, prompt, parameters=None, trace_id=None):
+        calls.append(agent_id)
+        raise AgentOutputValidationError("missing investigation questions")
+
+    with patch.object(subagent_runner, "run_agent_turn", side_effect=failed_turn):
+        response = pipeline_registry.run_orchestration(request)
+
+    run = squad_scratchpad.get(response.trace_id)
+    assert calls == ["inquisitive"]
+    assert response.status == "error"
+    assert "Workflow stopped at 'inquisitive'" in response.final_answer
+    assert run["status"] == "error"
+    assert not any(
+        entry["author"] == "lead" and entry["title"] == "Primary synthesis"
+        for entry in run["entries"]
+    )
+
+
+def test_missing_expected_agent_output_raises_validation_error(monkeypatch):
+    from orchestration.logic_orchestration import AgentOutputValidationError
+
+    monkeypatch.setattr(squad_scratchpad, "get", lambda trace_id: {"entries": []})
+
+    with pytest.raises(AgentOutputValidationError, match="expected output"):
+        subagent_runner._validate_agent_output("inquisitive", "trace", "No handoff was written")
+
+
+def test_thinker_pipeline_runs_setup_questionnaire_analysis_and_report_in_order():
+    import json
+
+    squad_registry.SQUADS_PATH.write_text(
+        json.dumps({
+            "thinker": {
+                "squad_id": "thinker",
+                "name": "Thinker",
+                "description": "",
+                "primary_agent": "problem-orchestrator",
+                "subagents": ["inquisitive", "problem-analyst", "problem-report-builder"],
+            }
+        }),
+        encoding="utf-8",
+    )
+    request = OrchestrationRequest(squad_id="thinker", user_query="Investigate a problem")
+    calls = []
+    prompts = {}
+    handoffs = {
+        "problem-statement-builder": (
+            "problem_statement", {"problem": "A problem", "parts": []}
+        ),
+        "inquisitive": ("questions", {"q1": "When did this begin?"}),
+        "problem-analyst": ("result", {"conclusion": {"selected_part": "A"}}),
+        "problem-report-builder": ("result", {"report_summary": "Likely cause A"}),
+    }
+
+    def fake_turn(agent_id, prompt, parameters=None, trace_id=None):
+        calls.append(agent_id)
+        prompts[agent_id] = prompt
+        if agent_id == "problem-orchestrator":
+            return "The investigation points to cause A."
+        title, payload = handoffs[agent_id]
+        squad_scratchpad.post(
+            trace_id, agent_id, "note", title, json.dumps(payload)
+        )
+        return "handoff saved"
+
+    with patch.object(subagent_runner, "run_agent_turn", side_effect=fake_turn), \
+         patch.object(subagent_runner, "read_latest_subagent_scratchpad", return_value={"status": "success"}), \
+         patch.object(subagent_runner, "read_scratchpad_snapshot", return_value={}), \
+         patch("tools.promoted_tools.ask_user_window", return_value=json.dumps({
+             "status": "success", "answers": {"q1": "Three days ago"}
+         })):
+        response = pipeline_registry.run_orchestration(request)
+
+    run = squad_scratchpad.get(response.trace_id)
+    assert calls == [
+        "problem-statement-builder",
+        "inquisitive",
+        "problem-analyst",
+        "problem-report-builder",
+        "problem-orchestrator",
+    ]
+    assert "Agent: problem-statement-builder" in prompts["inquisitive"]
+    assert "Agent: questionnaire" in prompts["problem-analyst"]
+    assert "Agent: problem-report-builder" in prompts["problem-orchestrator"]
+    assert any(entry["author"] == "questionnaire" for entry in run["entries"])
+    assert response.status == "success"
+    assert response.final_answer == "The investigation points to cause A."
 
 
 def test_code_squad_captures_steps_and_keeps_coding_scratchpad():
