@@ -50,11 +50,18 @@ prompt: |
   ## Available Tools
 
   ### read_squad_scratchpad
-  - Provider: scratchpadMemory
-  - Signature: (agent: str, title: str, index: str = '0', offset: str = '0') -> str
-  Read one entry from the current squad run's scratchpad by agent name and title. index 0 is the newest match; use offset to read the rest of long content.
+  Read one entry from the current squad run's scratchpad by agent name and title. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist.
+
+  Parameters:
+  - agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
+  - title (required): The title the entry was saved under, for example result.
+  - index: 0 for the newest matching entry, 1 for the one before it. Default 0.
+  - offset: Character position to start reading at; use next_offset from the previous result. Default 0.
 
   ### write_squad_scratchpad
-  - Provider: scratchpadMemory
-  - Signature: (agent: str, title: str, content: str) -> str
-  Save content to the current squad run's scratchpad under an agent name and a title.
+  Save content to the current squad run's scratchpad under an agent name and a title. Read it back with read_squad_scratchpad using the same agent and title.
+
+  Parameters:
+  - agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
+  - title (required): The title the entry was saved under, for example result.
+  - content (required): The text to save.

@@ -7,6 +7,7 @@ import { esc, navigate, openInEditor } from '../shell.js';
 import { renderArchitectCanvas } from './architect_canvas.js';
 import { renderBuilder } from './builder_steps.js';
 import { PATTERN_INFO } from './run_client.js';
+import { toolOptionGroups } from '../tool_categories.js';
 
 let selectedSquadId = null;
 let selectedNodeId = null;
@@ -27,7 +28,7 @@ export function renderSquadsView(container, payload = null) {
       <header class="sq-page-head">
         <div>
           <h2>Squads</h2>
-          <p class="text-muted">Build an ordered workflow with one lead and sub-agent steps that pass results forward.</p>
+          <p class="text-muted">Build an ordered workflow with sub-agent steps that pass results forward, and an optional lead for synthesis.</p>
         </div>
         <button type="button" class="btn btn-primary" data-act="new">+ New squad</button>
       </header>
@@ -57,7 +58,9 @@ export function renderSquadsView(container, payload = null) {
         <span class="sq-card-head"><strong>${esc(squad.name)}</strong>${healthBadge(squad.metrics?.last_status)}</span>
         <span class="sq-card-flow">
           <span class="badge badge-accent">${esc(PATTERN_INFO[squad.default_pattern]?.label || squad.default_pattern)}</span>
-          ${esc(squad.primary_agent)} → ${squad.subagents.length} member${squad.subagents.length === 1 ? '' : 's'}
+          ${squad.primary_agent
+            ? `${esc(squad.primary_agent)} → ${squad.subagents.length} member${squad.subagents.length === 1 ? '' : 's'}`
+            : `${squad.subagents.length} member${squad.subagents.length === 1 ? '' : 's'} (no lead)`}
         </span>
         <span class="text-muted small">${esc(metricsLine(squad.metrics))}</span>
       </button>`).join('') || `
@@ -136,7 +139,7 @@ export function renderSquadsView(container, payload = null) {
         </div>
         <select class="form-select mt-2" data-role="attach" aria-label="Attach a tool">
           <option value="">+ Attach tool…</option>
-          ${available.map(tool => `<option value="${esc(tool.name)}">${esc(tool.name)} · ${esc(tool.provider)}</option>`).join('')}
+          ${toolOptionGroups(available)}
         </select>
         ${node.allowed_subagents?.length ? `
           <h4>May call</h4>

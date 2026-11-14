@@ -1,0 +1,9 @@
+id: '001'
+name: testsquad
+start: ''
+agents:
+- id: 001-01
+  kind: agent
+- id: 001-02
+  kind: subagent
+routes: []

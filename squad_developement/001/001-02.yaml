@@ -1,0 +1,36 @@
+id: 001-02
+name: Query Decomposer
+mode: agent
+model: qwen2.5-coder:latest
+tools: []
+type: subagent
+prompt: '# AGENT DEFINITION
+
+
+  ## 1. ROLE
+
+  Who the agent is and its responsibilities.
+
+
+  ## 2. PURPOSE
+
+  What the agent must accomplish.
+
+
+  ## 3. INSTRUCTIONS
+
+  How the agent performs its tasks.
+
+  Rules, boundaries, and workflow.
+
+
+  ## 4. TOOLS
+
+  Available tools and when to use them.
+
+
+  ## 5. CONTEXT & MEMORY
+
+  Where the agent gets its information.
+
+  What information it can read and write.'

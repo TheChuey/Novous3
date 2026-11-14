@@ -23,16 +23,31 @@ export function loadMonaco() {
   return monacoPromise;
 }
 
-function createTextareaEditor(element, initialValue) {
+function createTextareaEditor(element, initialValue, ariaLabel) {
   const textarea = document.createElement('textarea');
   textarea.className = 'codebuilder-textarea';
   textarea.value = initialValue;
-  textarea.setAttribute('aria-label', 'Python source code');
+  textarea.setAttribute('aria-label', ariaLabel);
   element.replaceChildren(textarea);
   let runHandler = null;
   let saveHandler = null;
   let changeHandler = null;
   let positionHandler = null;
+  let pasteHandler = null;
+  let transformPaste = null;
+  textarea.addEventListener('paste', event => {
+    if (!pasteHandler || textarea.readOnly || !event.clipboardData?.types.includes('text/plain')) return;
+    event.preventDefault();
+    const text = event.clipboardData.getData('text/plain');
+    const fullDocument = textarea.selectionStart === 0 && textarea.selectionEnd === textarea.value.length;
+    const normalized = text.replace(/\r\n?/g, '\n');
+    const formatted = transformPaste ? transformPaste(normalized) : normalized;
+    if (!document.execCommand('insertText', false, formatted)) {
+      textarea.setRangeText(formatted, textarea.selectionStart, textarea.selectionEnd, 'end');
+      changeHandler?.();
+    }
+    pasteHandler({ fullDocument, snapshot: textarea.value, formatted: formatted !== normalized });
+  });
   textarea.addEventListener('input', () => changeHandler?.());
   textarea.addEventListener('keyup', () => positionHandler?.());
   textarea.addEventListener('click', () => positionHandler?.());
@@ -72,6 +87,16 @@ function createTextareaEditor(element, initialValue) {
     setSaveHandler: (handler) => { saveHandler = handler; },
     onChange: (handler) => { changeHandler = handler; },
     onPosition: (handler) => { positionHandler = handler; },
+    onPaste: (handler, transform) => { pasteHandler = handler; transformPaste = transform; },
+    replaceIfUnchanged: (snapshot, value) => {
+      if (textarea.value !== snapshot || document.activeElement !== textarea) return false;
+      textarea.select();
+      if (!document.execCommand('insertText', false, value)) {
+        textarea.setRangeText(value, 0, textarea.value.length, 'end');
+        changeHandler?.();
+      }
+      return true;
+    },
     revealLine: (line) => {
       const lineStart = textarea.value.split('\n').slice(0, Math.max(0, line - 1)).join('\n').length;
       textarea.focus();
@@ -87,7 +112,8 @@ function createTextareaEditor(element, initialValue) {
 export async function attachCodeBuilderEditor(
   element,
   initialValue = "print('Hello from Novous CodeBuilder!')\n",
-  language = 'python'
+  language = 'python',
+  ariaLabel = 'Python code editor'
 ) {
   if (!element) {
     throw new Error('The CodeBuilder editor container was not found.');
@@ -100,7 +126,7 @@ export async function attachCodeBuilderEditor(
       language,
       theme: 'vs-dark',
       automaticLayout: true,
-      ariaLabel: 'Python code editor',
+      ariaLabel,
       accessibilitySupport: 'auto',
       bracketPairColorization: { enabled: true },
       cursorBlinking: 'smooth',
@@ -127,6 +153,25 @@ export async function attachCodeBuilderEditor(
     let saveHandler = null;
     let changeHandler = null;
     let positionHandler = null;
+    let pasteHandler = null;
+    let transformPaste = null;
+    const handlePaste = event => {
+      if (!pasteHandler || !element.contains(event.target) || editor.getOption(monaco.editor.EditorOption.readOnly) || !event.clipboardData?.types.includes('text/plain')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const model = editor.getModel();
+      const selection = editor.getSelection();
+      if (!model || !selection) return;
+      const fullDocument = model.getOffsetAt(selection.getStartPosition()) === 0
+        && model.getOffsetAt(selection.getEndPosition()) === model.getValueLength();
+      const normalized = event.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n');
+      const text = transformPaste ? transformPaste(normalized) : normalized;
+      editor.pushUndoStop();
+      editor.executeEdits('studio-paste', [{ range: selection, text, forceMoveMarkers: true }]);
+      editor.pushUndoStop();
+      pasteHandler({ fullDocument, snapshot: editor.getValue(), formatted: text !== normalized });
+    };
+    window.addEventListener('paste', handlePaste, true);
     editor.onDidChangeModelContent(() => changeHandler?.());
     editor.onDidChangeCursorPosition(() => positionHandler?.());
     editor.addAction({
@@ -162,6 +207,15 @@ export async function attachCodeBuilderEditor(
       },
       onChange: (handler) => { changeHandler = handler; },
       onPosition: (handler) => { positionHandler = handler; },
+      onPaste: (handler, transform) => { pasteHandler = handler; transformPaste = transform; },
+      replaceIfUnchanged: (snapshot, value) => {
+        const model = editor.getModel();
+        if (!model || editor.getValue() !== snapshot) return false;
+        editor.pushUndoStop();
+        editor.executeEdits('studio-format-paste', [{ range: model.getFullModelRange(), text: value }]);
+        editor.pushUndoStop();
+        return true;
+      },
       revealLine: (line) => {
         editor.revealLineInCenter(line);
         editor.setPosition({ lineNumber: line, column: 1 });
@@ -243,10 +297,10 @@ export async function attachCodeBuilderEditor(
         const model = editor.getModel();
         if (model) editor.revealLine(model.getLineCount());
       },
-      dispose: () => editor.dispose(),
+      dispose: () => { window.removeEventListener('paste', handlePaste, true); editor.dispose(); },
     };
   } catch (error) {
-    console.error('Monaco Editor could not be loaded; using the basic Python editor instead.', error);
-    return createTextareaEditor(element, initialValue);
+    console.error('Monaco Editor could not be loaded; using the basic editor instead.', error);
+    return createTextareaEditor(element, initialValue, ariaLabel);
   }
 }

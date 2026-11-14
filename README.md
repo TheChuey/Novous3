@@ -21,9 +21,14 @@ interface and non-inference features can be explored without running a squad.
 ## What’s included
 
 - **Agents and tools:** Configure primary agents, sub-agents, prompts, and tools.
+  The tool catalog and selectors group tools by purpose; unknown or newly promoted
+  tools appear under Other tools. Categories do not change tool permissions.
 - **Squads:** Build an ordered workflow with one lead and sequential sub-agent
   steps. Each step receives the task and the preceding step’s result, rather
   than the full conversation history. The lead synthesizes the final result.
+- **Squad Development:** Create squad-local agents, edit generic prompts and tools,
+  design outcome-based handoffs and callbacks, and run saved flows with a three-step limit.
+  Skill ideas in the lab are notes, not executable skills.
 - **CodeBuilder:** Plan, build, test, and troubleshoot code through a controlled
   pipeline.
 - **Knowledge and memory:** Search indexed knowledge sources and use scratchpads
@@ -42,6 +47,7 @@ do not coordinate with other Novous processes or external Ollama clients.
 | `core_engine/` | Agent runtime, tools, model integration, and core APIs |
 | `orchestration/` | Ordered squad execution, CodeBuilder pipeline, and run telemetry |
 | `squads/` | Squad definitions and squad-folder management |
+| `squad_developement/` | Squad Development API, design modules, and local squad files |
 | `library/`, `subAgentLibrary/` | Primary-agent and sub-agent definitions |
 | `ragMemory/` | Knowledge-source indexing and retrieval |
 | `scratchpadMemory/` | Agent, coding, and squad-run scratchpads |
@@ -61,5 +67,7 @@ python -m pytest
 
 The orchestration component has additional design and API notes in
 [orchestration/README_orchestration.md](orchestration/README_orchestration.md).
+The Squad Development workflow is described in
+[squad_developement/README.md](squad_developement/README.md).
 The maintained application overview is in
 [app_documentation/README.md](app_documentation/README.md).

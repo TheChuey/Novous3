@@ -304,12 +304,20 @@ function renderToolWorkbench(container, toolPayload = null) {
     const details = viewedDetails;
     if (!details) return;
     const wording = text.trim().replace(/\s+/g, ' ') || details.docstring;
-    promptPreview.textContent = [
-      `### ${details.name}`,
-      `- Provider: ${details.provider}`,
-      `- Signature: ${details.signature}`,
-      wording,
-    ].filter(Boolean).join('\n');
+    const parts = [`### ${details.name}`];
+    if (wording) parts.push(wording);
+    if (details.parameters && details.parameters.length > 0) {
+      parts.push('', 'Parameters:');
+      for (const p of details.parameters) {
+        const label = p.required ? `${p.name} (required)` : p.name;
+        let desc = p.description || '';
+        if (!p.required && p.default && desc && !desc.includes(`Default ${p.default}`)) {
+          desc += ` Default ${p.default}.`;
+        }
+        parts.push(desc ? `- ${label}: ${desc}` : `- ${label}`);
+      }
+    }
+    promptPreview.textContent = parts.join('\n');
   }
   function setCodeEditing(editing) {
     dialogEditor.classList.toggle('hidden', !editing);

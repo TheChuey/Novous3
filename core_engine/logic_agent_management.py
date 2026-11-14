@@ -15,8 +15,7 @@ class AgentManagementService:
         "calculator",
         "read_file",
         "write_file",
-        "create_file",
-        "list_directory",
+        "map_files",
         "project_status",
         "read_chat_scratchpad",
         "write_chat_scratchpad",
@@ -30,8 +29,7 @@ class AgentManagementService:
         "calculator",
         "read_file",
         "write_file",
-        "create_file",
-        "list_directory",
+        "map_files",
         "run_python_code",
         "send_code_to_editor",
         "run_code_in_editor",
@@ -42,6 +40,58 @@ class AgentManagementService:
         "list_knowledge_branch_documents",
         "read_knowledge_branch_document",
     ]
+
+    @staticmethod
+    def render_scaffold_prompt(
+        name: str,
+        description: str = "",
+        mode: str = "chat",
+        environment: str = "workspace",
+        environment_name: str = "",
+    ) -> str:
+        """Render the prompt body used by ``scaffold_agent`` without writing a file."""
+        environment_name = " ".join(str(environment_name or "").split())[:64]
+        purpose = description.strip() or (
+            f"Serve as the {name.strip()} for the {environment_name or environment} environment."
+        )
+        purpose += " Act strategically toward that goal and always deliver a clear, structured result."
+        agent_template = AGENT_MD_TEMPLATE
+        if environment == "codebuilder":
+            agent_template = AGENT_MD_TEMPLATE.replace(
+                "Novous workspace agent",
+                "Novous CodeBuilder agent",
+            )
+            if mode == "agent":
+                agent_template += """
+
+## codebuilder editor workflow
+Whenever you provide or revise Python code, call `send_code_to_editor` with the complete code so it is placed in the active Monaco editor. Also include a fenced `python` code block in your reply so the user can review it and send it manually if needed. When the user asks to run the code, send any changed code first, then call `run_code_in_editor`.
+"""
+        return agent_template.format(name=name.strip(), purpose=purpose)
+
+    def render_prompt_starter_definition(self) -> dict:
+        """Render the generated Novous agent definition with an empty, editable tool list."""
+        name = "[AGENT NAME]"
+        metadata = {
+            "id": "[AGENT ID]",
+            "name": name,
+            "description": "",
+            "mode": "agent",
+            "model": "qwen2.5-coder:latest",
+            "squad": "",
+            "tools": [],
+            "environment": "workspace",
+            "environment_name": "",
+            "version": 1,
+        }
+        frontmatter = self._render_frontmatter(metadata)
+        frontmatter = frontmatter.replace("id: [AGENT ID]", 'id: "[AGENT ID]"')
+        frontmatter = frontmatter.replace("name: [AGENT NAME]", 'name: "[AGENT NAME]"')
+        lines = frontmatter.splitlines()
+        lines.insert(len(lines) - 1, "tools: []")
+        frontmatter = "\n".join(lines) + "\n"
+        prompt = self.render_scaffold_prompt(name, mode="agent")
+        return {"prompt": frontmatter + "\n" + prompt + "\n"}
 
     def _validate_id(self, agent_id: str, environment: str = "workspace") -> str:
         agent_id = agent_id.strip().lower()
@@ -146,24 +196,9 @@ class AgentManagementService:
             "version": 1,
         }
 
-        purpose = description.strip() or (
-            f"Serve as the {name.strip()} for the {environment_name or environment} environment."
+        markdown = self.render_scaffold_prompt(
+            name, description, mode, environment, environment_name
         )
-        purpose += " Act strategically toward that goal and always deliver a clear, structured result."
-        agent_template = AGENT_MD_TEMPLATE
-        if environment == "codebuilder":
-            agent_template = AGENT_MD_TEMPLATE.replace(
-                "Novous workspace agent",
-                "Novous CodeBuilder agent",
-            )
-            if mode == "agent":
-                agent_template += """
-
-## codebuilder editor workflow
-Whenever you provide or revise Python code, call `send_code_to_editor` with the complete code so it is placed in the active Monaco editor. Also include a fenced `python` code block in your reply so the user can review it and send it manually if needed. When the user asks to run the code, send any changed code first, then call `run_code_in_editor`.
-"""
-
-        markdown = agent_template.format(name=name.strip(), purpose=purpose)
         rendered = self._render_frontmatter(meta) + "\n" + markdown + "\n"
         library_path.write_text(rendered, encoding="utf-8")
 

@@ -89,6 +89,15 @@ def current_agent_id() -> str:
 def current_session_id() -> str:
     return _CURRENT_SESSION_ID.get()
 
+
+def set_current_session_id(session_id: str):
+    """Set the session for tools invoked by an agent turn; return a reset token."""
+    return _CURRENT_SESSION_ID.set(session_id)
+
+
+def reset_current_session_id(token) -> None:
+    _CURRENT_SESSION_ID.reset(token)
+
 AGENT_MD_TEMPLATE = """# {name}
 
 ## role
@@ -100,7 +109,7 @@ You are {name}, a Novous workspace agent. You act as a specialist in your domain
 ## boundaries
 - Stay within the scope described in your purpose.
 - Do not fabricate facts, citations, or tool results.
-- Treat the workspace directory as the default destination for files. File tool paths are relative to the workspace root: use a bare filename for a file in its root, and do not add a `workspace/` prefix.
+- Treat the workspace directory as the default destination for files. File tool paths are relative to the workspace root: use a bare filename for a file in its root, and do not add a workspace/ prefix.
 - For file requests, use write_file with the requested content; use create_file only for an intentionally empty file.
 - Treat tool errors as failures, never as success. Claim a file was created or updated only after the write tool reports success.
 - Never share secrets, credentials, or private user data.
@@ -322,11 +331,11 @@ class AgentLibrary:
         body = "\n".join(lines[end_index + 1:]).strip("\n")
         return frontmatter, body
 
-    def load_agent_definition_from_md(self, md_path: Path) -> AgentProfile:
+    def load_agent_definition_from_md(self, md_path: Path, metadata_override: dict | None = None) -> AgentProfile:
         if not md_path.is_file():
             raise FileNotFoundError(f"Agent markdown file not found: {md_path}")
         raw_text = md_path.read_text(encoding="utf-8")
-        frontmatter = parse_yaml_frontmatter(raw_text)
+        frontmatter = metadata_override if metadata_override is not None else parse_yaml_frontmatter(raw_text)
         body = raw_text
         if raw_text.startswith("---"):
             _, body = self._read_agent_markdown(md_path)
@@ -358,8 +367,12 @@ class AgentLibrary:
             f"BOUNDARIES:\n{profile.boundaries}" if profile.boundaries else "",
         ]
 
+        skip_sections = {"role", "purpose", "boundaries"}
+        if profile.mode == "agent" and profile.tools:
+            skip_sections.add("available tools")
+
         for title, content in sections.items():
-            if title not in ("role", "purpose", "boundaries") and content:
+            if title not in skip_sections and content:
                 prompt_parts.append(f"{title.upper()}:\n{content}")
 
         if profile.mode != "agent" or not profile.tools:
@@ -521,9 +534,9 @@ class AgentLibrary:
 
     @staticmethod
     def _render_tools_section(tools: list[str]) -> list[str]:
-        """The same '## Available Tools' layout Prompt Creation writes: name, provider, signature, description."""
+        """Render '## Available Tools' with description and a Parameters block for each tool."""
         catalog = {meta["name"]: meta for meta in tool_catalog.list_tools()}
-        entries = []
+        entries: list[list[str]] = []
         for name in tools:
             meta = catalog.get(name)
             if meta is None:
@@ -532,9 +545,19 @@ class AgentLibrary:
             description = tool_catalog.prompt_text(name) or meta.get("description") or ""
             if isinstance(description, list):
                 description = " ".join(description)
-            entry = [f"### {name}", f"- Provider: {meta['provider']}", f"- Signature: {meta['signature']}"]
+            entry = [f"### {name}"]
             if description.strip():
                 entry.append(description.strip())
+            params = tool_catalog.tool_parameters(name)
+            if params:
+                entry.append("")
+                entry.append("Parameters:")
+                for p in params:
+                    label = f"{p['name']} (required)" if p["required"] else p["name"]
+                    desc = p.get("description", "")
+                    if not p["required"] and "default" in p and desc and f"Default {p['default']}" not in desc:
+                        desc += f" Default {p['default']}."
+                    entry.append(f"- {label}: {desc}" if desc else f"- {label}")
             entries.append(entry)
         lines = [AgentLibrary.TOOLS_SECTION_HEADING]
         for entry in entries:
@@ -546,7 +569,7 @@ class AgentLibrary:
         lines = [
             self.SUBAGENTS_SECTION_HEADING,
             "",
-            "Delegate work with `call_subagent(subagent_id, task_prompt, parameters)`. "
+            "Delegate work with call_subagent. "
             "Only call the sub-agents listed here, using the exact ID.",
         ]
         for entry in subagents:
@@ -673,6 +696,31 @@ class AgentLibrary:
             refreshed.append(agent_id)
         return refreshed
 
+    def refresh_all_tool_sections(self) -> list[str]:
+        """Re-render the '## Available Tools' section in every agent and sub-agent."""
+        targets = [("prompt", path.stem) for path in sorted(self.LIBRARY_ROOT.glob("*.md"))]
+        if self.SUBAGENT_LIBRARY_ROOT.is_dir():
+            targets += [("subagent", path.stem) for path in sorted(self.SUBAGENT_LIBRARY_ROOT.glob("*.yaml"))]
+        refreshed = []
+        for kind, agent_id in targets:
+            try:
+                tools = self.get_agent_tools(kind, agent_id)["tools"]
+                if not tools:
+                    continue
+                path = self._definition_file(kind, agent_id)
+                text = path.read_text(encoding="utf-8")
+                prefix, body, layout = self._split_prompt_body(kind, text.splitlines())
+            except (OSError, ValueError, yaml.YAMLError):
+                continue
+            if body is None:
+                continue
+            newline = "\r\n" if "\r\n" in text else "\n"
+            body = self._apply_section(body, self.TOOLS_HEADING_PATTERN, self._render_tools_section(tools))
+            lines = self._join_prompt_body(prefix, body, layout)
+            path.write_text(newline.join(lines) + (newline if text.endswith(("\n", "\r")) else ""), encoding="utf-8", newline="")
+            refreshed.append(agent_id)
+        return refreshed
+
     def set_agent_tools(self, kind: str, agent_id: str, tools: list[str], mode: str | None = None,
                         subagents: list[dict] | None = None) -> dict:
         """Rewrite the ``tools`` (and optionally ``mode``) keys plus the prompt's generated
@@ -727,22 +775,6 @@ class Agent:
     MAX_TOOL_ROUNDS = 6
     MAX_TOOL_STATS = 20
     TOOL_FAILURE_KINDS = ("unknown_tool", "bad_arguments", "tool_error")
-    PARAMETER_DESCRIPTIONS = {
-        "payload": (
-            "JSON object string containing the structured handoff fields. "
-            "Never use triple-quoted strings."
-        ),
-        "status": "One of: success, nothing_found, error.",
-        "subagent_id": "The canonical sub-agent ID.",
-        "task_type": "The task type requested by orchestration.",
-        "proposed_content": "The complete proposed file or editor content.",
-        "agent": "The agent name the entry was saved under, for example rag-retriever.",
-        "title": "The title the entry was saved under, for example result.",
-        "content": "The text to save.",
-        "index": "0 for the newest matching entry, 1 for the one before it. Default 0.",
-        "offset": "Character position to start reading at; use next_offset from the previous result. Default 0.",
-        "questions": 'JSON object where each key is a short id and each value is the question text, for example: {"q1": "What error do you see?", "q2": "When did it start?"}',
-    }
 
     def __init__(self, model: str | None, tools: List[Callable], profile: AgentProfile, session=None):
         self.model = model or profile.model or "qwen2.5-coder:latest"
@@ -1211,7 +1243,7 @@ class Agent:
                     "properties": {
                         param: {
                             "type": "string",
-                            "description": cls.PARAMETER_DESCRIPTIONS.get(param, f"Parameter {param}"),
+                            "description": tool_catalog.PARAMETER_DESCRIPTIONS.get(param, f"Parameter {param}"),
                         }
                         for param in parameters
                     },
@@ -1252,6 +1284,42 @@ class ToolCatalog:
     PROMPT_DESCRIPTIONS_PATH = TOOLS_DIR / "data" / "tool_prompts.json"
     _prompt_lock = threading.Lock()
 
+    PARAMETER_DESCRIPTIONS: dict[str, str] = {
+        "payload": (
+            "JSON object string containing the structured handoff fields. "
+            "Never use triple-quoted strings."
+        ),
+        "status": "One of: success, nothing_found, error.",
+        "subagent_id": "The canonical sub-agent ID.",
+        "task_type": "The task type requested by orchestration.",
+        "proposed_content": "The complete proposed file or editor content.",
+        "agent": "Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.",
+        "title": "The title the entry was saved under, for example result.",
+        "content": "The text to save.",
+        "index": "0 for the newest matching entry, 1 for the one before it. Default 0.",
+        "offset": "Character position to start reading at; use next_offset from the previous result. Default 0.",
+        "questions": 'JSON object where each key is a short id and each value is the question text, for example: {"q1": "What error do you see?", "q2": "When did it start?"}',
+        "path": "The file or folder path, relative to the workspace root.",
+        "request": "An optional question or focus area to guide what is returned.",
+        "action": "The editor action to perform: open, read, apply, or close.",
+        "expression": "The arithmetic expression to evaluate.",
+        "query": "The search query text.",
+        "task_prompt": "Instructions for the sub-agent describing the work to perform.",
+        "parameters": "JSON string of key-value pairs passed to the sub-agent.",
+        "kind": "Entry kind to filter by, or empty for all kinds.",
+        "author": "Entry author to filter by, or empty for all authors.",
+        "knowledge_branch_id": "The branch ID from the knowledge catalog.",
+        "document_path": "Path of the indexed document within the knowledge branch.",
+        "top_k": "Maximum number of results to return. Default 5.",
+        "relative_path": "File path relative to the workspace root to limit the search scope.",
+        "agent_id": "The agent ID to look up.",
+        "extension": "File extension to filter by, for example .py. Default .py.",
+        "code": "The Python source code to run or insert.",
+        "json_file_path": "Path to a JSON file in the workspace containing the questions.",
+        "timeout_seconds": "How long to wait for an answer in seconds. Default 300.",
+        "max_bytes": "Maximum number of bytes to read.",
+    }
+
     def prompt_overrides(self) -> dict[str, str]:
         """Return the saved prompt descriptions, keyed by tool name (empty when none saved)."""
         try:
@@ -1281,6 +1349,23 @@ class ToolCatalog:
             temp_path = self.PROMPT_DESCRIPTIONS_PATH.with_suffix(".tmp")
             temp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             temp_path.replace(self.PROMPT_DESCRIPTIONS_PATH)
+
+    def tool_parameters(self, name: str) -> list[dict]:
+        """Return parameter details for a registered tool: name, required, description, default."""
+        meta = self.registry.get(name)
+        if not meta or "function" not in meta:
+            return []
+        sig = inspect.signature(meta["function"])
+        params = []
+        for pname, param in sig.parameters.items():
+            required = param.default == inspect.Parameter.empty
+            desc = self.PARAMETER_DESCRIPTIONS.get(pname, "")
+            entry: dict = {"name": pname, "required": required, "description": desc}
+            if not required and param.default is not None and str(param.default) != "":
+                entry["default"] = str(param.default)
+            params.append(entry)
+        return params
+
     PROVIDER_BINDINGS = {
         "core_engine": "core_engine.interface_core_engine",
         "editor": "editor.interface_editor",

@@ -6,6 +6,7 @@ import { Api } from '../api.js';
 import { esc, navigate, openInEditor } from '../shell.js';
 import { renderAgentLibrary } from '../views/agent_library.js';
 import { openSquadMap } from './squad_map.js';
+import { toolOptionGroups } from '../tool_categories.js';
 
 let kindFilter = 'all';
 let search = '';
@@ -109,7 +110,7 @@ export function renderAgentsView(container) {
         </div>
         <select class="form-select" data-attach aria-label="Attach a tool to ${esc(agent.name)}">
           <option value="">+ Attach tool…</option>
-          ${available.map(tool => `<option value="${esc(tool.name)}">${esc(tool.name)} · ${esc(tool.provider)}</option>`).join('')}
+          ${toolOptionGroups(available)}
         </select>
         <details class="sq-prompt-viewer" data-prompt-for="${esc(agent.id)}">
           <summary class="sq-prompt-toggle">View prompt</summary>

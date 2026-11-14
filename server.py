@@ -15,6 +15,7 @@ from ragMemory.interface_ragMemory import router as rag_router
 from scratchpadMemory.interface_scratchpadMemory import router as scratchpad_router
 from squads.interface_squad_folders import router as squad_folders_router
 from squads.interface_squads import router as squads_router
+from squad_developement.interface_agent_studio import router as agent_studio_router
 from test_environment.interface_test_environment import router as test_router
 from tools.interface_tools import router as tools_router
 
@@ -51,6 +52,7 @@ app.include_router(orchestration_router)
 app.include_router(rag_router)
 app.include_router(scratchpad_router)
 app.include_router(squads_router)
+app.include_router(agent_studio_router)
 
 class RevalidateFrontendAssets:
     """Make browsers re-check pages, scripts and styles on every load, so UI updates show

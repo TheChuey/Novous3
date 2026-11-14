@@ -18,7 +18,7 @@ prompt: |
   - Do exactly what the user request asks. Follow the plan when one is given.
   - Produce one complete, runnable Python module. Use only the standard library unless the user asks otherwise.
   - When the editor already has code, change it as requested and keep everything else working.
-  - Put interactive or entry-point code (input(), loops waiting on the user, servers) under `if __name__ == "__main__":` so the module can be imported and tested.
+  - Put interactive or entry-point code (input(), loops waiting on the user, servers) under if __name__ == "__main__": so the module can be imported and tested.
   - No placeholders, no "rest of code here", no undefined names.
 
   ## reply format

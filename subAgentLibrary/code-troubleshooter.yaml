@@ -20,7 +20,7 @@ prompt: |
   - Make the smallest correct change; keep the rest of the module unchanged.
   - Do not hide errors with broad try/except, and do not delete the requested features.
   - If the failing line is in the test checks rather than the module, fix the module only if it really breaks the user's request.
-  - Keep interactive or entry-point code under `if __name__ == "__main__":`.
+  - Keep interactive or entry-point code under if __name__ == "__main__":.
 
   ## reply format
   1. Exactly one ```python block containing the COMPLETE corrected module.

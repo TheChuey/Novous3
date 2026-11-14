@@ -34,7 +34,9 @@ from core_engine.logic_core_engine import (
     Agent,
     agent_library,
     apply_model_limits,
+    reset_current_session_id,
     serialized_ollama_chat,
+    set_current_session_id,
     tool_catalog,
 )
 from modelProfiles.logic_modelProfiles import model_profiles
@@ -887,8 +889,11 @@ class SquadRegistry:
         return next((squad for squad in self.list_squads() if squad["squad_id"] == squad_id), None)
 
     def get_squad_id_for_primary_agent(self, agent_id: str) -> str | None:
+        if not agent_id:
+            return None
         return next(
-            (squad["squad_id"] for squad in self.list_squads() if squad["primary_agent"] == agent_id),
+            (squad["squad_id"] for squad in self.list_squads()
+             if squad.get("primary_agent") and squad["primary_agent"] == agent_id),
             None,
         )
 
@@ -904,15 +909,18 @@ class SquadRegistry:
         """Members must be sub-agents or known orchestrator-owned steps."""
         if not name.strip():
             raise ValueError("Squad name is required.")
+        if not primary_agent and not subagents:
+            raise ValueError("A squad must have at least a primary agent or sub-agent members.")
         catalog = self.list_agent_catalog()
-        agent_ids = {agent["id"] for agent in catalog["agents"]}
-        if primary_agent not in agent_ids:
-            raise ValueError(f"Primary agent is not available: {primary_agent}")
+        if primary_agent:
+            agent_ids = {agent["id"] for agent in catalog["agents"]}
+            if primary_agent not in agent_ids:
+                raise ValueError(f"Primary agent is not available: {primary_agent}")
+            if primary_agent in subagents:
+                raise ValueError("The primary agent cannot also be a squad member.")
         subagent_ids = {agent["id"] for agent in catalog["subagents"]}
         if len(set(subagents)) != len(subagents):
             raise ValueError("Sub-agent selections must not contain duplicates.")
-        if primary_agent in subagents:
-            raise ValueError("The primary agent cannot also be a squad member.")
         unknown = [
             agent_id for agent_id in subagents
             if agent_id not in subagent_ids and agent_id not in PROGRAMMATIC_SQUAD_STEPS
@@ -1004,20 +1012,15 @@ class SquadRegistry:
     SUBAGENT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
     SUBAGENT_DEFAULT_TOOLS = ("read_squad_scratchpad", "write_squad_scratchpad")
 
-    def create_subagent(self, subagent_id: str, name: str, description: str = "") -> dict[str, Any]:
-        """Scaffold ``subAgentLibrary/<id>.yaml`` with the standard role/purpose/handoff prompt."""
+    def render_subagent_definition(self, subagent_id: str, name: str, description: str = "") -> str:
+        """Render the standard sub-agent YAML definition without writing a file."""
         clean = str(subagent_id or "").strip().lower()
         if not self.SUBAGENT_ID_PATTERN.match(clean):
             raise ValueError("Sub-agent file name must be lowercase letters, digits, '-' or '_' (max 64).")
-        # Prompt text lives inside a YAML block, so keep these to single lines.
         clean_name = " ".join(str(name or "").split())
         clean_description = " ".join(str(description or "").split())
         if not clean_name:
             raise ValueError("Sub-agent name must not be empty.")
-        path = agent_library.SUBAGENT_LIBRARY_ROOT / f"{clean}.yaml"
-        if path.exists():
-            raise FileExistsError(f"Sub-agent already exists: subAgentLibrary/{clean}.yaml")
-
         role = clean_description or f"Complete the background tasks assigned to the {clean_name}."
         lines = [
             f"id: {clean}",
@@ -1054,6 +1057,26 @@ class SquadRegistry:
         definition = yaml.safe_load(text)
         if definition.get("id") != clean or definition.get("name") != clean_name:
             raise ValueError("Could not build a valid sub-agent definition from that name.")
+        return text
+
+    def default_subagent_template(self) -> dict[str, str]:
+        """Return the generated YAML scaffold and its editable prompt body."""
+        definition = self.render_subagent_definition(
+            "novous-subagent", "[SUB-AGENT NAME]"
+        )
+        prompt = yaml.safe_load(definition)["prompt"]
+        return {
+            "yaml": definition,
+            "prompt": prompt.replace('agent: "novous-subagent"', 'agent: "[SUB-AGENT ID]"'),
+        }
+
+    def create_subagent(self, subagent_id: str, name: str, description: str = "") -> dict[str, Any]:
+        """Scaffold ``subAgentLibrary/<id>.yaml`` with the standard role/purpose/handoff prompt."""
+        clean = str(subagent_id or "").strip().lower()
+        text = self.render_subagent_definition(clean, name, description)
+        path = agent_library.SUBAGENT_LIBRARY_ROOT / f"{clean}.yaml"
+        if path.exists():
+            raise FileExistsError(f"Sub-agent already exists: subAgentLibrary/{clean}.yaml")
         agent_library.SUBAGENT_LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
         with path.open("x", encoding="utf-8") as handle:
             handle.write(text)
@@ -1353,16 +1376,24 @@ class SubAgentRunner:
     def read_scratchpad_snapshot(self) -> dict[str, Any]:
         return scratchpad.read_memory()
 
+    _AVAILABLE_TOOLS_RE = re.compile(
+        r"(?m)^##\s+available\s+tools\s*\n[\s\S]*?(?=^##\s|\Z)", re.IGNORECASE
+    )
+
     def _build_profile(self, agent_id: str, meta: dict[str, Any], body: str) -> AgentProfile:
         tools = meta.get("tools") or []
         if not isinstance(tools, list):
             tools = [tools]
+        mode = str(meta.get("mode") or "agent")
+        prompt = body
+        if mode == "agent" and tools:
+            prompt = self._AVAILABLE_TOOLS_RE.sub("", body).rstrip()
         return AgentProfile(
             id=str(meta.get("id") or agent_id),
             name=str(meta.get("name") or agent_id),
             description=str(meta.get("description") or ""),
-            mode=str(meta.get("mode") or "agent"),
-            system_prompt=body,
+            mode=mode,
+            system_prompt=prompt,
             role=str(meta.get("role") or ""),
             purpose=str(meta.get("purpose") or ""),
             boundaries=str(meta.get("boundaries") or ""),
@@ -1667,7 +1698,7 @@ class _PatternRun:
         self.request = request
         self.trace_id = request.trace_id or ""
         self.squad_id = squad_id
-        self.primary_id = request.primary_agent or "rag-presenter"
+        self.primary_id = request.primary_agent or ""
         self.members = list(request.subagents or [RAG_RETRIEVER_ID])
         self.steps: list[TraceStep] = []
         self.started = time.perf_counter()
@@ -1720,7 +1751,7 @@ class BasePattern(ABC):
         run = _PatternRun(request, _squad_for_request(request))
         squad_scratchpad.begin(run.trace_id, run.squad_id or "unregistered", request.user_query)
         telemetry_bus.log_event(
-            run.trace_id, "RUN_STARTED", "orchestrator", run.squad_id or run.primary_id,
+            run.trace_id, "RUN_STARTED", "orchestrator", run.squad_id or run.primary_id or "orchestrator",
             {"squad_id": run.squad_id or "unregistered", "pattern": self.name},
         )
         _print_trace(
@@ -1759,14 +1790,25 @@ class BasePattern(ABC):
                     "scratchpad", "SCRATCHPAD_BARRIER", status,
                     "Retrieved latest sub-agent payload from scratchpad",
                 )
-                final_answer = self._synthesize(run, context)
+                if run.primary_id:
+                    final_answer = self._synthesize(run, context)
+                else:
+                    final_answer = context or str(
+                        scratchpad_entry.get("payload", {}).get("result", "")
+                        if isinstance(scratchpad_entry.get("payload"), dict)
+                        else scratchpad_entry.get("payload", "")
+                    ) if scratchpad_entry else ""
+                    run.add_step(
+                        "orchestrator", "SKIP_SYNTHESIS", "SUCCESS",
+                        "No lead agent; using last member's output as final answer.",
+                    )
         except Exception as exc:
             status = "error"
             final_answer = f"Workflow failed: {exc}"
             squad_scratchpad.post(run.trace_id, "orchestrator", "note", "Workflow error", str(exc))
             scratchpad_entry, scratchpad_snapshot = {}, {}
             telemetry_bus.log_event(
-                run.trace_id, "ERROR", "orchestrator", run.squad_id or run.primary_id,
+                run.trace_id, "ERROR", "orchestrator", run.squad_id or run.primary_id or "orchestrator",
                 {"error": final_answer, "status": "error"},
             )
 
@@ -1889,7 +1931,7 @@ class BasePattern(ABC):
             },
         )
         telemetry_bus.log_event(
-            run.trace_id, "RUN_COMPLETE", "orchestrator", run.squad_id or run.primary_id,
+            run.trace_id, "RUN_COMPLETE", "orchestrator", run.squad_id or run.primary_id or "orchestrator",
             {"status": status, "duration_ms": duration_ms},
         )
         telemetry_bus.finish_trace(run.trace_id)
@@ -2514,6 +2556,99 @@ class OrchestrationRunService:
     def __init__(self, max_workers: int = 1, capacity: int = 10):
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="orchestration")
         self._capacity = BoundedSemaphore(capacity)
+
+    def start_rule_flow(self, squad_id: str, query: str, flow: dict,
+                        profiles: dict[str, AgentProfile], max_steps: int) -> dict[str, str]:
+        """Queue a saved rule-based flow on the same worker as existing squads."""
+        if not self._capacity.acquire(blocking=False):
+            raise RunCapacityError("Orchestration capacity is full. Try again after a run completes.")
+        trace_id = f"tr_{uuid.uuid4().hex}"
+        try:
+            telemetry_bus.initialize_trace(trace_id)
+            self._executor.submit(self._run_rule_flow, trace_id, squad_id, query, flow, profiles, max_steps)
+        except Exception:
+            self._capacity.release()
+            raise
+        return {"trace_id": trace_id, "squad_id": squad_id}
+
+    def _run_rule_flow(self, trace_id: str, squad_id: str, query: str, flow: dict,
+                       profiles: dict[str, AgentProfile], max_steps: int) -> None:
+        steps = []
+        current = flow["start"]
+        handoff = ""
+        status = "error"
+        answer = "Workflow did not complete."
+        started = time.monotonic()
+        scratchpad_started = False
+        try:
+            squad_scratchpad.begin(trace_id, squad_id, query)
+            scratchpad_started = True
+            telemetry_bus.log_event(trace_id, "RUN_STARTED", "orchestrator", squad_id,
+                                    {"squad_id": squad_id, "pattern": "rules"})
+            for number in range(1, max_steps + 1):
+                profile = profiles[current]
+                telemetry_bus.log_event(trace_id, "AGENT_MESSAGE", "orchestrator", current,
+                                        {"summary": "Agent step started", "status": "running"})
+                try:
+                    agent = Agent(model=profile.model, tools=[], profile=profile, session=trace_id)
+                    if profile.mode == "agent" and profile.tools:
+                        apply_model_limits(agent, profile, agent.model)
+                        if agent.tools_missing or agent.tools_dropped:
+                            raise ValueError("Model cannot access all configured tools: " +
+                                             ", ".join(agent.tools_missing + agent.tools_dropped))
+                    else:
+                        agent.num_ctx = model_profiles.effective(agent.model)["num_ctx"]
+                    prompt = f"User request:\n{query}"
+                    if handoff:
+                        prompt += f"\n\nPrevious step handoff:\n{handoff}"
+                    session_token = set_current_session_id(trace_id)
+                    try:
+                        with telemetry_bus.agent_context(trace_id, current):
+                            answer = str(agent.think(prompt)).strip()
+                    finally:
+                        reset_current_session_id(session_token)
+                    if not answer:
+                        raise RuntimeError("Agent returned an empty result.")
+                    if agent.failures:
+                        raise RuntimeError(f"Agent reported failures: {agent.failures}")
+                    outcome = "success"
+                except Exception as exc:
+                    outcome = "failure"
+                    answer = f"{type(exc).__name__}: {exc}"
+                steps.append({"step_number": number, "agent_id": current, "status": outcome,
+                              "result": answer})
+                telemetry_bus.log_event(trace_id, "AGENT_MESSAGE", current, "orchestrator",
+                                        {"summary": f"Agent step {outcome}", "status": outcome})
+                handoff = f"Agent: {current}\nOutcome: {outcome}\nResult:\n{answer}"
+                route = next((r for r in flow["routes"] if r["from"] == current and r["on"] == outcome), None)
+                if route is None:
+                    status = "success" if outcome == "success" else "error"
+                    break
+                if number == max_steps:
+                    answer = f"Step limit ({max_steps}) reached before routing to {route['to']}.\n\nLast result:\n{answer}"
+                    status = "error"
+                    break
+                current = route["to"]
+        except Exception as exc:
+            answer = f"Workflow failed: {type(exc).__name__}: {exc}"
+            status = "error"
+        finally:
+            try:
+                if scratchpad_started:
+                    try:
+                        squad_scratchpad.finish(trace_id, status)
+                    except (OSError, ValueError, KeyError) as exc:
+                        status = "error"
+                        answer = f"Could not finish the run scratchpad: {exc}\n\nLast result:\n{answer}"
+                run_results.save(trace_id, {
+                    "trace_id": trace_id, "squad_id": squad_id, "pattern": "rules",
+                    "status": status, "final_answer": answer, "execution_trace": steps,
+                })
+                telemetry_bus.log_event(trace_id, "RUN_COMPLETE", "orchestrator", squad_id,
+                                        {"status": status, "duration_ms": int((time.monotonic() - started) * 1000)})
+                telemetry_bus.finish_trace(trace_id)
+            finally:
+                self._capacity.release()
 
     def start(self, request: OrchestrationRequest) -> dict[str, str]:
         """Validate and queue a run; returns its new ``trace_id`` and ``squad_id``."""

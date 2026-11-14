@@ -7,7 +7,7 @@ import { Api } from '../api.js';
 export const PATTERN_INFO = {
   sequential: {
     label: 'Ordered workflow',
-    summary: 'Sub-agents run one at a time; each receives the previous handoff, then the lead synthesizes.'
+    summary: 'Sub-agents run one at a time; each receives the previous handoff. If a lead is assigned, it synthesizes the final answer.'
   }
 };
 

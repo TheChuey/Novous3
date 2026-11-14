@@ -605,5 +605,29 @@ export const Api = {
     return send('POST', '/api/testing/tool-workbench/promote', {
       tool_code: toolCode, function_input: functionInput, timeout_seconds: timeoutSeconds
     });
-  }
+  },
+
+  // --- Prompt Starter Templates ---
+  async getStarterDefaults() {
+    return get('/api/squad-development/prompt-starter/defaults');
+  },
+  async parseStarterAgentDefinition(content) {
+    return send('POST', '/api/squad-development/prompt-starter/parse-agent', { content });
+  },
+  async getStarterTemplates() {
+    return get('/api/squad-development/prompt-starter/templates');
+  },
+  async getStarterToolInstructions(tool) {
+    return get(`/api/squad-development/tools/${encodeURIComponent(tool)}/instructions`);
+  },
+  async saveStarterTemplate(name, body) {
+    return send('POST', '/api/squad-development/prompt-starter/templates', { name, body });
+  },
+  async deleteStarterTemplate(name) {
+    return send('DELETE', `/api/squad-development/prompt-starter/templates/${encodeURIComponent(name)}`);
+  },
+  async getGenericPrompt() {
+    return get('/api/squad-development/template');
+  },
+
 };

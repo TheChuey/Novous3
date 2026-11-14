@@ -47,14 +47,18 @@ export function renderArchitectCanvas(host, blueprint, { selectedId = null, onSe
   const edges = [];
   const extras = [];
   if (members.length) {
-    edges.push(edge(leadCenter - 30, leadBottom, memberX(0) + NODE_W / 2, MEMBER_Y));
+    if (blueprint.lead) {
+      edges.push(edge(leadCenter - 30, leadBottom, memberX(0) + NODE_W / 2, MEMBER_Y));
+    }
     members.forEach((_, i) => {
       if (i === members.length - 1) return;
       const y = MEMBER_Y + NODE_H / 2;
       edges.push(`<path class="sq-edge" d="M${memberX(i) + NODE_W},${y} L${memberX(i + 1)},${y}" marker-end="url(#sq-arrow)"></path>`);
     });
-    const last = memberX(members.length - 1) + NODE_W / 2;
-    edges.push(edge(last, MEMBER_Y, leadCenter + 30, leadBottom, 'sq-edge-return'));
+    if (blueprint.lead) {
+      const last = memberX(members.length - 1) + NODE_W / 2;
+      edges.push(edge(last, MEMBER_Y, leadCenter + 30, leadBottom, 'sq-edge-return'));
+    }
     members.forEach((_, i) => {
       extras.push(`<text class="sq-step" x="${memberX(i) + NODE_W - 16}" y="${MEMBER_Y - 8}">${i + 1}</text>`);
     });
@@ -71,7 +75,7 @@ export function renderArchitectCanvas(host, blueprint, { selectedId = null, onSe
       ${extras.join('')}
       ${blueprint.lead ? nodeSvg(blueprint.lead, leadX, LEAD_Y, { role: 'lead', selected: selectedId === blueprint.lead.id }) : ''}
       ${members.map((m, i) => nodeSvg(m, memberX(i), MEMBER_Y, { role: 'member', selected: selectedId === m.id })).join('')}
-      ${members.length ? '' : `<text class="sq-empty" x="${leadCenter}" y="${MEMBER_Y + 30}">No members yet — the lead works alone.</text>`}
+      ${members.length ? '' : `<text class="sq-empty" x="${leadCenter}" y="${MEMBER_Y + 30}">${blueprint.lead ? 'No members yet — the lead works alone.' : 'Add members to build a workflow.'}</text>`}
     </svg>`;
 
   const select = target => {

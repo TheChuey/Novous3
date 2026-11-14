@@ -1,5 +1,6 @@
 import { Api } from './api.js';
 import { appendMarkdown } from './markdown.js';
+import { navigate } from './shell.js';
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({
@@ -14,6 +15,7 @@ export function renderPromptCreationView(container) {
         <div class="codebuilder-chat-heading">
           <h2 id="pc-chat-title">Chat Agent</h2>
           <span id="pc-chat-status" class="text-muted small">Loading agents…</span>
+          <button type="button" class="btn btn-sm" id="pc-squad-development">Squad Development</button>
           <span class="prompt-chat-font-controls" role="group" aria-label="Chat text size">
             <button type="button" class="btn btn-sm" id="pc-font-smaller" title="Smaller text" aria-label="Decrease chat text size">A−</button>
             <button type="button" class="btn btn-sm" id="pc-font-larger" title="Larger text" aria-label="Increase chat text size">A+</button>
@@ -54,6 +56,7 @@ export function renderPromptCreationView(container) {
   const chatStatus = container.querySelector('#pc-chat-status');
   const chatForm = container.querySelector('#pc-chat-form');
   const flow = container.querySelector('.prompt-creation-flow');
+  container.querySelector('#pc-squad-development').addEventListener('click', () => navigate('squad-development'));
 
   let promptAgents = [];
   let selectedChatAgent = null;

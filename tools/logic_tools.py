@@ -620,6 +620,7 @@ class ToolRegistryService:
             "docstring": docstring,
             "prompt_description": tool_catalog.prompt_overrides().get(name, ""),
             "prompt_preview": tool_catalog.prompt_text(name) or docstring,
+            "parameters": tool_catalog.tool_parameters(name),
         }
 
     def set_prompt_description(self, name: str, text: str) -> dict:

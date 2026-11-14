@@ -1,0 +1,17 @@
+{
+  "id": "logic-test-1",
+  "name": "logic test 1",
+  "category": "squads",
+  "description": "",
+  "agent_id": "problem-orchestrator",
+  "model": "qwen2.5-coder:14b",
+  "steps": [
+    {
+      "text": "i want to get better at creating process for my agent orchestration wheree one agent depends onthe work of another sub agent",
+      "enabled": true,
+      "expect": null
+    }
+  ],
+  "created": "2026-11-12T05:22:06+00:00",
+  "updated": "2026-11-12T05:22:06+00:00"
+}

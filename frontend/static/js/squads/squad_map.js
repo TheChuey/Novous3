@@ -32,7 +32,7 @@ function dedup(lead, rawMembers) {
 /* ── Edge data ───────────────────────────────────────────────────── */
 
 function buildEdges(lead, members, blueprint) {
-  const allNodes = [lead, ...members].filter(Boolean);
+  const allNodes = [...members, lead].filter(Boolean);
   const edges = [];
   for (const node of allNodes) {
     const isLead = node.id === lead?.id;
@@ -42,8 +42,8 @@ function buildEdges(lead, members, blueprint) {
       if (tool === 'call_subagent') {
         for (const tid of node.allowed_subagents || [])
           edges.push({ from: node.id, to: tid, tool, label: info.label, color: info.color, kind: 'delegation' });
-      } else if (tool === 'write_squad_scratchpad' && !isLead) {
-        edges.push({ from: node.id, to: lead?.id, tool, label: info.label, color: info.color, kind: 'handoff' });
+      } else if (tool === 'write_squad_scratchpad' && !isLead && lead) {
+        edges.push({ from: node.id, to: lead.id, tool, label: info.label, color: info.color, kind: 'handoff' });
       } else if (tool === 'read_squad_scratchpad' && isLead) {
         for (const m of members)
           edges.push({ from: m.id, to: node.id, tool, label: info.label, color: info.color, kind: 'handoff' });
@@ -52,10 +52,11 @@ function buildEdges(lead, members, blueprint) {
   }
   const ac = 'var(--primary)';
   if (members.length) {
-    edges.push({ from: lead?.id, to: members[0]?.id, tool: null, label: 'start', color: ac, kind: 'flow' });
     for (let i = 0; i < members.length - 1; i++)
       edges.push({ from: members[i].id, to: members[i + 1].id, tool: null, label: `step ${i + 2}`, color: ac, kind: 'flow' });
-    edges.push({ from: members.at(-1)?.id, to: lead?.id, tool: null, label: 'synthesis', color: ac, kind: 'flow' });
+    if (lead) {
+      edges.push({ from: members.at(-1)?.id, to: lead.id, tool: null, label: 'synthesis', color: ac, kind: 'flow' });
+    }
   }
   return edges;
 }
@@ -63,7 +64,7 @@ function buildEdges(lead, members, blueprint) {
 /* ── SVG — vertical layout for the side panel ────────────────────── */
 
 function renderGraph(lead, members, edges, squadColor) {
-  const allNodes = [lead, ...members].filter(Boolean);
+  const allNodes = [...members, lead].filter(Boolean);
   if (!allNodes.length) return '<p class="text-muted small">No agents.</p>';
 
   const svgW = 200;
@@ -119,7 +120,7 @@ function renderGraph(lead, members, edges, squadColor) {
           fill="var(--bg-card)" stroke="${isLead ? squadColor : 'var(--border-color)'}" stroke-width="${isLead ? 2 : 1.5}"
           ${!isLead && node.kind === 'subagent' ? 'stroke-dasharray="5 3"' : ''}/>
         <text x="${x + 8}" y="${y + 19}" fill="var(--text-main)" font-size="11" font-weight="600">${esc(clip(node.name, 18))}</text>
-        <text x="${x + 8}" y="${y + 34}" fill="var(--text-muted)" font-size="9">${isLead ? 'lead' : node.kind} · ${(node.tools || []).length} tools</text>
+        <text x="${x + 8}" y="${y + 34}" fill="var(--text-muted)" font-size="9">${isLead ? 'synthesis' : `step ${i + 1}`} · ${(node.tools || []).length} tools</text>
       </g>`;
   }
 
@@ -289,6 +290,7 @@ export async function openSquadMap(squadId, squadColor, overview) {
   const dirty = new Map();
   const editors = new Map(); // agentId → monaco editor instance
   let liveNodes = [];
+  let leadNode = null;
   let blueprint = null;
 
   function applyFontSize() {
@@ -306,7 +308,7 @@ export async function openSquadMap(squadId, squadColor, overview) {
   }
 
   function refreshGraph() {
-    const lead = liveNodes[0], members = liveNodes.slice(1);
+    const lead = leadNode, members = liveNodes.filter(n => n.id !== lead?.id);
     const edges = buildEdges(lead, members, blueprint);
     graphHost.innerHTML = renderGraph(lead, members, edges, squadColor);
 
@@ -344,7 +346,7 @@ export async function openSquadMap(squadId, squadColor, overview) {
       const fromNode = liveNodes.find(n => n.id === fromId);
       const toNode = liveNodes.find(n => n.id === toId);
       if (fromNode && toNode) {
-        const lead = liveNodes[0], members = liveNodes.slice(1);
+        const lead = leadNode, members = liveNodes.filter(n => n.id !== lead?.id);
         const edges = buildEdges(lead, members, blueprint);
         openEdgePopout(dialog, fromNode, toNode, edges, liveNodes, blueprint, squadColor, refreshGraph, showStatus);
       }
@@ -473,7 +475,8 @@ export async function openSquadMap(squadId, squadColor, overview) {
     blueprint = await Api.getSquadBlueprint(squadId);
     const lead = blueprint.lead;
     const members = dedup(lead, blueprint.members);
-    liveNodes = [lead, ...members].filter(Boolean);
+    leadNode = lead;
+    liveNodes = [...members, lead].filter(Boolean);
 
     subtitle.textContent = `${blueprint.name} · ${blueprint.pattern} · ${liveNodes.length} agent${liveNodes.length !== 1 ? 's' : ''}`;
 
@@ -487,7 +490,7 @@ export async function openSquadMap(squadId, squadColor, overview) {
         <section class="sq-map-prompt-col" data-col="${esc(node.id)}">
           <header class="sq-map-prompt-header" style="border-top: 3px solid ${node.id === lead?.id ? squadColor : 'var(--border-color)'}">
             <strong>${esc(node.name)}</strong>
-            <span class="badge">${node.id === lead?.id ? 'lead' : node.kind}</span>
+            <span class="badge">${node.id === lead?.id ? 'lead · synthesis' : `step ${i + 1}`}</span>
             <span class="badge" style="opacity:0.6">${node.path?.endsWith('.yaml') || node.path?.endsWith('.yml') ? 'yaml' : 'md'}</span>
             <span class="sq-map-dirty-dot" data-dirty="${esc(node.id)}" hidden title="Unsaved changes"></span>
             <button type="button" class="cb-btn cb-btn-sm" data-act="save" data-agent="${esc(node.id)}">Save</button>

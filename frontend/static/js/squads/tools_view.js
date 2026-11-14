@@ -5,6 +5,7 @@
 import { Api } from '../api.js';
 import { esc } from '../shell.js';
 import { renderTestingView } from '../testing.js';
+import { groupTools, toolCategory } from '../tool_categories.js';
 
 export function renderToolsView(container, payload = null) {
   let attachTo = payload?.attachTo || '';
@@ -42,8 +43,11 @@ export function renderToolsView(container, payload = null) {
   function render() {
     const term = filter.toLowerCase();
     const tools = overview.tools.filter(tool =>
-      !term || `${tool.name} ${tool.provider} ${tool.description}`.toLowerCase().includes(term));
-    catalog.innerHTML = tools.map(tool => {
+      !term || `${tool.name} ${tool.provider} ${tool.description} ${toolCategory(tool)}`.toLowerCase().includes(term));
+    catalog.innerHTML = groupTools(tools).map(([category, items]) => `
+      <section class="sq-tool-category" aria-label="${esc(category)}">
+      <h4>${esc(category)} <span class="text-muted small">(${items.length})</span></h4>
+      ${items.map(tool => {
       const users = overview.agents.filter(agent => agent.tools.includes(tool.name));
       const description = Array.isArray(tool.description) ? tool.description.join(' ') : (tool.description || '');
       return `
@@ -64,7 +68,8 @@ export function renderToolsView(container, payload = null) {
             </span>
           </div>
         </div>`;
-    }).join('') || '<p class="text-muted small">No tools match.</p>';
+      }).join('')}
+      </section>`).join('') || '<p class="text-muted small">No tools match.</p>';
   }
 
   async function load() {

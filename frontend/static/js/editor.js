@@ -1,6 +1,7 @@
 import { Api } from './api.js';
 import { attachCodeBuilderEditor } from './codebuilder/codebuilder_editor.js';
 import { renderTree } from './tree.js';
+import { groupTools } from './tool_categories.js';
 
 const fileSelectionListeners = new WeakMap();
 
@@ -327,34 +328,11 @@ export function renderEditorView(container, initialPath = null) {
   // The catalog sends each description as a list of lines; older entries may be a plain string.
   const toolSummary = tool => (Array.isArray(tool.description) ? tool.description.join(' ') : String(tool.description || '')).trim();
 
-  const CATALOG_LABELS = {
-    tools: 'Files',
-    file_manager: 'File manager',
-    editor: 'Editor',
-    workspace: 'Workspace',
-    codebuilder: 'CodeBuilder',
-    core_engine: 'Core engine',
-    orchestration: 'Orchestration',
-    ragMemory: 'Knowledge (RAG)',
-    scratchpadMemory: 'Scratchpad memory'
-  };
-  const catalogLabel = provider => CATALOG_LABELS[provider]
-    || String(provider || 'Other').replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2')
-      .replace(/^./, c => c.toUpperCase());
-
   function renderToolOptions(catalog, selected) {
     const known = new Set(catalog.map(tool => tool.name));
     // Keep tools the file lists but the catalog lacks, so saving never drops them silently.
     const missing = selected.filter(name => !known.has(name)).map(name => ({ name, missing: true }));
-    const groups = new Map();
-    for (const tool of catalog) {
-      const label = catalogLabel(tool.provider);
-      if (!groups.has(label)) groups.set(label, []);
-      groups.get(label).push(tool);
-    }
-    const sections = [...groups.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([label, tools]) => [label, tools.sort((left, right) => left.name.localeCompare(right.name))]);
+    const sections = groupTools(catalog);
     if (missing.length) sections.unshift(['Not registered', missing]);
     toolsList.replaceChildren(...sections.map(([label, tools]) => renderToolGroup(label, tools, selected)));
     // Unfold the group holding call_subagent when it is already on, so its sub-agent picker is visible.
@@ -454,16 +432,16 @@ export function renderEditorView(container, initialPath = null) {
     count.className = 'editor-tool-group-count text-muted small';
     summary.append(groupCheck, title, count);
     group.append(summary, ...tools.flatMap(tool => tool.name === SUBAGENT_TOOL && !tool.missing
-      ? [renderToolOption(tool, selected), renderSubagentPanel()]
-      : [renderToolOption(tool, selected)]));
+      ? [renderToolOption(tool, selected, label), renderSubagentPanel()]
+      : [renderToolOption(tool, selected, label)]));
     return group;
   }
 
-  function renderToolOption(tool, selected) {
+  function renderToolOption(tool, selected, category) {
     const label = document.createElement('label');
     label.className = 'editor-tool-option';
     const summary = toolSummary(tool);
-    label.dataset.search = `${tool.name} ${summary}`.toLowerCase();
+    label.dataset.search = `${tool.name} ${tool.provider || ''} ${category} ${summary}`.toLowerCase();
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.name = 'tools';

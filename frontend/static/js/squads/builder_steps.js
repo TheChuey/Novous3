@@ -5,6 +5,7 @@
 import { Api } from '../api.js';
 import { esc, navigate } from '../shell.js';
 import { renderArchitectCanvas } from './architect_canvas.js';
+import { toolOptionGroups } from '../tool_categories.js';
 
 const STEPS = ['Basics', 'Lead agent', 'Members', 'Tools', 'Review'];
 const LEAD_HANDOFF = 'read_squad_scratchpad';
@@ -48,14 +49,14 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
       name: draft.name.trim(),
       description: draft.description.trim(),
       pattern: draft.pattern,
-      lead: spec(draft.lead),
+      lead: draft.lead ? spec(draft.lead) : null,
       members: draft.members.map(spec)
     };
   }
 
   function canAdvance() {
     if (step === 0) return draft.name.trim().length > 0;
-    if (step === 1) return Boolean(draft.lead);
+    if (step === 1) return true;
     return true;
   }
 
@@ -65,7 +66,7 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
         <div class="card-head">
           <div>
             <h3>${draft.squad_id ? `Edit squad · ${esc(draft.name)}` : 'New squad'}</h3>
-            <p class="text-muted small">Choose one lead and an ordered set of sub-agents. Each step runs once at a time and passes its result forward.</p>
+            <p class="text-muted small">Choose an optional lead and an ordered set of sub-agents. Each step runs once at a time and passes its result forward.</p>
           </div>
           <button type="button" class="btn btn-sm" data-act="cancel">Close</button>
         </div>
@@ -102,20 +103,26 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
     if (step === 1) {
       const primaries = agents.filter(agent => agent.kind === 'agent');
       return `
-        <p class="text-muted small">The lead receives the request and produces the final answer after sub-agents complete their ordered steps.</p>
+        <p class="text-muted small">The lead produces the final answer after sub-agents complete.
+          <strong>Optional:</strong> skip if the last member already produces the final output.</p>
         <div class="sq-choice-grid">
+          <label class="sq-choice ${!draft.lead ? 'is-selected' : ''}">
+            <input type="radio" name="lead" value="" ${!draft.lead ? 'checked' : ''}>
+            <strong>No lead</strong>
+            <span class="text-muted small">The last member's output becomes the final answer (no synthesis step).</span>
+          </label>
           ${primaries.map(agent => `
             <label class="sq-choice ${draft.lead === agent.id ? 'is-selected' : ''}">
               <input type="radio" name="lead" value="${esc(agent.id)}" ${draft.lead === agent.id ? 'checked' : ''}>
               <strong>${esc(agent.name)}</strong>
               <span class="text-muted small">${esc(agent.description || agent.id)}</span>
               <span class="sq-chip-row">${(agent.tools || []).slice(0, 4).map(t => `<span class="sq-chip">${esc(t)}</span>`).join('')}</span>
-            </label>`).join('') || '<p class="text-muted">No primary agents yet.</p>'}
+            </label>`).join('')}
         </div>
         ${createMemberForm('agent', true)}`;
     }
     if (step === 2) {
-      const candidates = agents.filter(agent => agent.id !== draft.lead && agent.kind === 'subagent');
+      const candidates = agents.filter(agent => (!draft.lead || agent.id !== draft.lead) && agent.kind === 'subagent');
       const group = `
         <h4 class="sq-group-title">Sub-agents <span class="text-muted small">run one at a time and hand their result to the next step</span></h4>
         <div class="sq-choice-grid">
@@ -147,7 +154,7 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
         </div>`;
     }
     if (step === 3) {
-      const ids = [draft.lead, ...draft.members];
+      const ids = [draft.lead, ...draft.members].filter(Boolean);
       return `
         <p class="text-muted small">Tools decide what each agent can do. Assigning tools switches a chat-mode agent to agent mode.
           Squad runs control the order and withhold direct sub-agent delegation.
@@ -183,7 +190,7 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
         <div class="sq-tool-add">
           <select class="form-select" data-add-tool="${esc(id)}" aria-label="Add a tool to ${esc(agent.name)}">
             <option value="">+ Add tool…</option>
-            ${available.map(tool => `<option value="${esc(tool.name)}" title="${esc(tool.description || '')}">${esc(tool.name)} · ${esc(tool.provider)}</option>`).join('')}
+            ${toolOptionGroups(available)}
           </select>
           ${missingHandoff ? `<button type="button" class="btn btn-sm" data-quick-tool="${esc(id)}|${handoff}">Add ${handoff}</button>` : ''}
         </div>
@@ -213,7 +220,7 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
     const preview = host.querySelector('[data-role="preview"]');
     renderArchitectCanvas(preview, {
       pattern: draft.pattern,
-      lead: nodeFor(draft.lead),
+      lead: draft.lead ? nodeFor(draft.lead) : null,
       members: draft.members.map(nodeFor)
     });
     const box = host.querySelector('[data-role="validation"]');
@@ -256,7 +263,7 @@ export function renderBuilder(host, { overview, initial = null, onSaved, onCance
     const target = event.target;
     if (target.name === 'lead') {
       draft.lead = target.value;
-      draft.members = draft.members.filter(id => id !== draft.lead);
+      if (draft.lead) draft.members = draft.members.filter(id => id !== draft.lead);
       render();
     } else if (target.name === 'member') {
       draft.members = target.checked

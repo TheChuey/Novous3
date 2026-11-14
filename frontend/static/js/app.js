@@ -12,6 +12,7 @@ import { renderAgentsView } from './squads/agents_view.js';
 import { renderToolsView } from './squads/tools_view.js';
 import { renderRunsView, stopRunStream } from './squads/runs_view.js';
 import { renderModelsView } from './views/models_view.js';
+import { leaveSquadDevelopment, renderSquadDevelopment } from './squad_development.js';
 
 export { AppState };
 
@@ -27,6 +28,7 @@ const views = {
   editor: renderEditorView,
   codebuilder: renderCodeBuilderView,
   chat: renderChatView,
+  'squad-development': renderSquadDevelopment,
   'prompt-creation': renderPromptCreationView
 };
 
@@ -36,6 +38,7 @@ const TAB_ALIASES = { testing: 'tools' };
 export function switchTab(tab, payload = null) {
   tab = TAB_ALIASES[tab] || tab;
   if (!Object.prototype.hasOwnProperty.call(views, tab)) tab = 'squads';
+  if (AppState.activeTab === 'squad-development' && !leaveSquadDevelopment()) return;
   if (tab !== 'runs') stopRunStream();
   AppState.activeTab = tab;
   document.querySelectorAll('.nav-btn').forEach(b =>

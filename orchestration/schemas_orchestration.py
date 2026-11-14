@@ -33,7 +33,7 @@ class OrchestrationRequest(BaseModel):
         ),
     )
     primary_agent: str = Field(
-        default="rag-presenter", description="Main user-facing agent ID from library/"
+        default="", description="Main user-facing agent ID from library/; empty for leadless squads"
     )
     subagents: List[str] = Field(
         default_factory=list,
@@ -53,7 +53,7 @@ SquadPattern = Literal["sequential", "fanout", "router"]
 class SquadCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=80)
     description: str = Field(default="", max_length=500)
-    primary_agent: str = Field(..., min_length=1, max_length=80)
+    primary_agent: str = Field(default="", max_length=80, description="Primary agent; empty for leadless squads")
     subagents: List[str] = Field(default_factory=list, max_length=20)
     default_pattern: SquadPattern = Field(
         default="sequential",
@@ -68,7 +68,7 @@ class SquadCreateRequest(BaseModel):
 class SquadUpdateRequest(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=80)
     description: Optional[str] = Field(default=None, max_length=500)
-    primary_agent: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    primary_agent: Optional[str] = Field(default=None, max_length=80)
     subagents: Optional[List[str]] = Field(default=None, max_length=20)
     default_pattern: Optional[SquadPattern] = Field(
         default=None,

@@ -254,9 +254,10 @@ def test_prompt_tools_are_replaced_without_touching_the_rest(libraries):
     text = (library / "helper.md").read_text(encoding="utf-8")
     assert "  - map_files" not in text
     assert "skills:\n  - summarize\n---" in text
-    assert "# Helper\n\nBody text with tools: mentioned inline.\n\n## Available Tools\n\n### write_file\n- Provider:" in text
+    assert "# Helper\n\nBody text with tools: mentioned inline.\n\n## Available Tools\n\n### write_file\n" in text
     assert text.index("### write_file") < text.index("### read_file")
-    assert "- Signature: (path: str" in text
+    assert "Parameters:\n" in text
+    assert "- path (required):" in text
 
 
 def test_existing_tools_section_is_replaced_and_later_sections_kept(libraries):
@@ -298,7 +299,8 @@ def test_subagent_tools_leave_prompt_block_alone(libraries):
     assert "    - not_a_real_key" in text
     data, body = agent_library.parse_subagent_yaml("worker")
     assert data["name"] == "Worker"
-    assert "## Available Tools\n\n### read_file\n- Provider:" in body
+    assert "## Available Tools\n\n### read_file\n" in body
+    assert "Parameters:\n" in body
     assert "### write_squad_scratchpad" in body
     assert "  ## Available Tools\n" in text
 
@@ -319,7 +321,7 @@ def test_call_subagent_writes_a_subagents_section_that_reads_back(libraries):
         {"id": "worker", "usage": "Use it when the task matches what this sub-agent does."},
     ]
     text = (library / "helper.md").read_text(encoding="utf-8")
-    assert "## Sub-agents\n\nDelegate work with `call_subagent" in text
+    assert "## Sub-agents\n\nDelegate work with call_subagent" in text
     assert "### rag-retriever\n- Name: RAG Retriever\n- What it does: Finds indexed passages.\n- When to use:\n" in text
     assert text.index("## Available Tools") < text.index("## Sub-agents")
 
@@ -919,7 +921,7 @@ def test_rag_presenter_delegates_to_retriever_and_reads_scratchpad(tmp_path, mon
     prompt = (REPO_ROOT / "library" / "rag-presenter.md").read_text(
         encoding="utf-8"
     )
-    assert "Novous chat runtime calls `call_subagent`" in prompt
+    assert "Novous chat runtime calls call_subagent" in prompt
     assert "do not call the sub-agent a second time" in prompt.lower()
 
     monkeypatch.setattr(scratchpad, "DATA_DIR", tmp_path)

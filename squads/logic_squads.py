@@ -116,7 +116,7 @@ class SquadArchitect:
             "name": squad["name"],
             "description": squad.get("description", ""),
             "pattern": squad["default_pattern"],
-            "lead": self.describe_agent(squad["primary_agent"]),
+            "lead": self.describe_agent(squad["primary_agent"]) if squad.get("primary_agent") else None,
             "members": [self.describe_agent(member_id) for member_id in squad["subagents"]],
             "metrics": squad["metrics"],
             "dedicated_pipeline": squad["squad_id"] == CODE_SQUAD_ID,
@@ -129,16 +129,19 @@ class SquadArchitect:
         warnings: list[str] = []
         known_tools = {meta["name"] for meta in tool_catalog.list_tools()}
 
-        lead = self._describe_or_none(blueprint.lead.agent_id)
-        if lead is None:
-            errors.append(f"Lead agent not found: {blueprint.lead.agent_id}")
-        elif lead["kind"] != "agent":
-            errors.append(f"The lead must be a primary agent from library/, not a sub-agent: {lead['id']}")
+        if blueprint.lead is not None:
+            lead = self._describe_or_none(blueprint.lead.agent_id)
+            if lead is None:
+                errors.append(f"Lead agent not found: {blueprint.lead.agent_id}")
+            elif lead["kind"] != "agent":
+                errors.append(f"The lead must be a primary agent from library/, not a sub-agent: {lead['id']}")
+        else:
+            lead = None
 
         member_ids = [member.agent_id for member in blueprint.members]
         if len(set(member_ids)) != len(member_ids):
             errors.append("Squad members must not contain duplicates.")
-        if blueprint.lead.agent_id in member_ids:
+        if blueprint.lead is not None and blueprint.lead.agent_id in member_ids:
             errors.append("The lead cannot also be a squad member.")
         members = {}
         for member_id in member_ids:
@@ -150,15 +153,20 @@ class SquadArchitect:
             else:
                 members[member_id] = node
 
-        for node_spec in [blueprint.lead, *blueprint.members]:
+        nodes_to_check = [blueprint.lead, *blueprint.members] if blueprint.lead else list(blueprint.members)
+        for node_spec in nodes_to_check:
             unknown = [tool for tool in node_spec.tools or [] if tool not in known_tools]
             if unknown:
                 errors.append(f"{node_spec.agent_id}: unknown tools {', '.join(unknown)}")
 
         if blueprint.lead_delegates:
             errors.append("Squad runs are orchestrated in order; dynamic agent delegation is disabled.")
-        if not member_ids:
+        if blueprint.lead is None and not member_ids:
+            errors.append("A squad must have at least a lead or members.")
+        elif blueprint.lead is not None and not member_ids:
             warnings.append("No members: the lead will answer alone after an empty scratchpad barrier.")
+        elif blueprint.lead is None:
+            warnings.append("No lead agent: the last member's output will be the final answer (no synthesis step).")
 
         if lead is not None:
             lead_tools = self._final_tools(blueprint.lead, lead)
@@ -182,13 +190,14 @@ class SquadArchitect:
             raise ValueError("; ".join(validation.errors))
 
         pattern = squad_registry.normalize_pattern(blueprint.pattern)
+        primary_agent_id = blueprint.lead.agent_id if blueprint.lead else ""
         member_ids = [member.agent_id for member in blueprint.members]
         if blueprint.squad_id:
             squad = squad_registry.update_squad(
                 blueprint.squad_id,
                 name=blueprint.name,
                 description=blueprint.description,
-                primary_agent=blueprint.lead.agent_id,
+                primary_agent=primary_agent_id,
                 subagents=member_ids,
                 default_pattern=pattern,
                 max_parallel=1,
@@ -197,7 +206,7 @@ class SquadArchitect:
                 raise LookupError(f"Squad not found: {blueprint.squad_id}")
         else:
             squad = squad_registry.create_squad(
-                blueprint.name, blueprint.description, blueprint.lead.agent_id,
+                blueprint.name, blueprint.description, primary_agent_id,
                 member_ids, pattern, 1,
             )
 
@@ -212,7 +221,7 @@ class SquadArchitect:
 
     def _apply_lead(self, blueprint: SquadBlueprint) -> None:
         """Persist explicit lead tool changes; the orchestrator controls all squad handoffs."""
-        if blueprint.lead.tools is None:
+        if blueprint.lead is None or blueprint.lead.tools is None:
             return
         lead = self.describe_agent(blueprint.lead.agent_id)
         tools = self._final_tools(blueprint.lead, lead)

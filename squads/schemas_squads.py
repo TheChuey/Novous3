@@ -23,7 +23,10 @@ class SquadBlueprint(BaseModel):
         default="sequential",
         description="Execution is sequential; fanout and router are accepted as legacy aliases.",
     )
-    lead: SquadMember
+    lead: Optional[SquadMember] = Field(
+        default=None,
+        description="Primary synthesis agent; None skips synthesis and uses the last member's output directly.",
+    )
     members: List[SquadMember] = Field(default_factory=list, max_length=20)
     lead_delegates: bool = Field(
         default=False,
