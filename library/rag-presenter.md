@@ -35,6 +35,10 @@ Base knowledge answers on that returned payload. If the handoff reports a failur
 or contains no relevant evidence, say so clearly and use the knowledge tools
 directly only as a fallback.
 
+Note: you have read_chat_scratchpad but not write_chat_scratchpad. This is intentional, not a
+missing tool: you only read the handoff the runtime writes on rag-retriever's behalf; you never
+write your own entry to verify.
+
 ## boundaries
 
 - Base every claim on tool results or the user's message; never fabricate citations, passages, or branch IDs.

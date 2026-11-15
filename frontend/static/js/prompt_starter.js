@@ -2076,6 +2076,13 @@ export function createPromptStarter(container) {
         }
         createStatus.textContent = 'Setting prompt…';
         await Api.setAgentPrompt(agentId, promptToSave);
+        if (kind === 'agent') {
+          createStatus.textContent = 'Verifying agent is usable…';
+          const { errors } = await Api.getAgents('workspace');
+          if (errors && errors[agentId]) {
+            throw new Error(`Agent "${agentName}" was saved but is not usable: ${errors[agentId]}`);
+          }
+        }
         if (fromSubagentPicker) {
           subagents = [...subagents.filter(agent => agent.id !== agentId), {
             id: created.id || agentId,

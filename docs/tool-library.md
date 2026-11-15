@@ -23,6 +23,14 @@ Tool Library and the Tool Workbench, where tools are edited, tested and added.
 - When no wording is saved, the agent sees the first line of the docstring.
 - The function name is the tool name. Use short snake_case names. Models misspell long
   camelCase names, and a misspelled name cannot be called.
+- **Paired write/read tools:** if a tool saves something another tool reads back (or the
+  reverse), name the paired tool in the docstring by its exact function name, state the exact
+  shape of what it returns, and require the caller to read its own write back with the paired
+  tool, using the same identifying arguments, before relying on it. For example,
+  `write_chat_scratchpad`: "Save content to this chat's scratchpad under an agent name and a
+  title. Paired with read_chat_scratchpad: after saving, you must call read_chat_scratchpad
+  with the same agent and title to confirm the content was saved correctly before reporting
+  success. Returns a JSON object with saved, store, agent, title, and id."
 
 ## Tool Library (Tools tab → Tool Workbench → Registered Tool Library)
 

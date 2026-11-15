@@ -34,7 +34,7 @@ function renderToolWorkbench(container, toolPayload = null) {
         </label>
         <label class="tool-workbench-field">
           <span>Tool Description &amp; Rules</span>
-          <textarea id="tw-description" class="form-input" rows="5"></textarea>
+          <textarea id="tw-description" class="form-input" rows="5" placeholder="If this tool is one half of a write/read pair, name the paired tool, state what it returns, and require a read-back to verify the write before relying on it."></textarea>
         </label>
         <div class="tool-workbench-actions tool-workbench-wide">
           <button type="button" class="btn btn-primary" id="tw-generate-fn">Generate Python Function</button>
@@ -134,7 +134,7 @@ function renderToolWorkbench(container, toolPayload = null) {
         <p class="text-muted small">Built-in tools that rely on module-level imports or objects may fail on Direct Python Test, but Stage 2 (asking the LLM to use the tool) works for every tool. Built-in code is read-only; only the prompt description below can be changed for them.</p>
         <section class="tool-prompt-pane" aria-labelledby="tw-tool-prompt-title">
           <h3 id="tw-tool-prompt-title">Prompt description</h3>
-          <p class="text-muted small">This wording is added to agent prompts and to the function schema the LLM sees when the tool is attached. Keep the docstring in the code describing how the tool works; use this to say when and how an agent should call it. Leave it empty to use the docstring.</p>
+          <p class="text-muted small">This wording is added to agent prompts and to the function schema the LLM sees when the tool is attached. Keep the docstring in the code describing how the tool works; use this to say when and how an agent should call it. Leave it empty to use the docstring. If this tool is one half of a write/read pair, name the paired tool and require a read-back to verify the write before relying on it.</p>
           <textarea id="tw-tool-prompt" class="form-input tool-prompt-input" rows="3" maxlength="2000" aria-label="Prompt description"></textarea>
           <div class="text-muted small">Text injected into prompts</div>
           <pre id="tw-tool-prompt-preview" class="tool-workbench-output"></pre>

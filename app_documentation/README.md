@@ -49,7 +49,29 @@ content; run-scoped entries remain available in the scratchpad viewer. The
 orchestrator passes only the relevant preceding result to each step to keep
 model context focused.
 
+Every scratchpad write tool (`write_chat_scratchpad`, `write_coding_scratchpad`,
+`write_squad_scratchpad`) is paired with its matching read tool
+(`read_chat_scratchpad`, `read_coding_scratchpad`, `read_squad_scratchpad`).
+Both halves' docstrings name the pairing, state the write's exact return shape,
+and require the caller to read its own entry back with the same `agent`/`title`
+to verify the save before reporting success. Every agent whose prompt lists a
+write tool now also lists its matching read tool, and each agent's instructions
+spell out the required write-then-read-back-then-verify sequence. Custom tools
+added through the Tool Workbench are steered toward the same convention — see
+[the tool library guide](../docs/tool-library.md).
+
 Repeated tool-call detection is not currently part of the squad workflow.
+
+## Agent creation
+
+Agents created through Prompt Starter (or the Squad Development dialog) are
+scaffolded as `library/*.md` or `subAgentLibrary/*.yaml` files and listed by
+`GET /api/agents`, which re-reads the library on every call. A file that fails
+to parse (malformed frontmatter, an unresolved variable, etc.) is now reported
+under that response's `errors` field, keyed by agent ID, instead of silently
+vanishing from every listing. Prompt Starter checks this immediately after
+creating an agent and surfaces the parse error directly if the new agent isn't
+actually usable yet.
 
 ## Running and testing
 

@@ -34,7 +34,7 @@ Short Markdown, no full code:
 - **Checks:** 2-4 concrete behaviors the tester should assert.
 
 ## Tools (chat use only)
-When chatting directly, you may use map_files, read_file, and project_status to inspect the workspace. Use read_coding_scratchpad with the agent name and title to read a specific plan, code, or test result, and write_coding_scratchpad with your agent name, a title, and the content to leave a plan or note the squad should follow. Never invent file contents or tool results. This planner is read-only for workspace files.
+When chatting directly, you may use map_files, read_file, and project_status to inspect the workspace. Use read_coding_scratchpad with the agent name and title to read a specific plan, code, or test result, and write_coding_scratchpad with your agent name, a title, and the content to leave a plan or note the squad should follow. After writing, call read_coding_scratchpad with the exact same agent and title to confirm the saved content matches what you wrote; only treat the plan or note as saved once that read-back confirms it, retrying the write once if it doesn't match. Never invent file contents or tool results. This planner is read-only for workspace files.
 
 ## Available Tools
 
@@ -55,7 +55,7 @@ Parameters:
 Return the current project state metadata for this workspace.
 
 ### read_coding_scratchpad
-Read one coding scratchpad entry by agent name and title. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist.
+Read one coding scratchpad entry by agent name and title. Paired with write_coding_scratchpad: call this immediately after writing, with the exact same agent and title, to verify the saved content before relying on it. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist.
 
 Parameters:
 - agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
@@ -64,7 +64,7 @@ Parameters:
 - offset: Character position to start reading at; use next_offset from the previous result. Default 0.
 
 ### write_coding_scratchpad
-Save content to the coding scratchpad under an agent name and a title. Read it back with read_coding_scratchpad using the same agent and title.
+Save content to the coding scratchpad under an agent name and a title. Paired with read_coding_scratchpad: after saving, you must call read_coding_scratchpad with the same agent and title to confirm the content was saved correctly before reporting success. Returns a JSON object with saved, store, agent, title, and id.
 
 Parameters:
 - agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.

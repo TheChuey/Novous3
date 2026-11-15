@@ -275,6 +275,9 @@ class AgentLibrary:
         "prompt-creation": LIBRARY_ROOT,
     }
 
+    def __init__(self):
+        self.load_errors: dict[str, str] = {}
+
     def normalize_agent_id(self, agent_id: str) -> str:
         clean = str(agent_id or "").strip().replace("\\", "/")
         if not clean or clean in (".", "..") or "/" in clean:
@@ -399,6 +402,7 @@ class AgentLibrary:
         seen: set[str] = set()
         agents: list[dict] = []
         roots: list[Path] = [self.LIBRARY_ROOT]
+        load_errors: dict[str, str] = {}
 
         if environment is not None:
             roots = [self._get_agents_root(environment)]
@@ -415,7 +419,8 @@ class AgentLibrary:
                 try:
                     profile = self.load_agent_definition_from_md(child)
                     metadata = parse_yaml_frontmatter(child.read_text(encoding="utf-8"))
-                except Exception:
+                except Exception as exc:
+                    load_errors[agent_id] = str(exc)
                     continue
                 agent_environment = metadata.get("environment", "workspace")
                 if environment is not None and agent_environment != environment:
@@ -434,6 +439,7 @@ class AgentLibrary:
                     "path": child.relative_to(self.REPO_ROOT).as_posix(),
                 })
 
+        self.load_errors = load_errors
         return agents
 
     # --- Tool assignment ------------------------------------------------------------

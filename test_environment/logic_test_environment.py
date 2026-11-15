@@ -368,7 +368,13 @@ class ToolWorkbench:
         "```python code block containing one public top-level synchronous function with "
         "type-hinted parameters (str, int, float, bool, list, dict), a docstring "
         "describing it, and a JSON-serializable return value. Put any imports at the top "
-        "of the block. Do not include example calls, tests, or explanations."
+        "of the block. Do not include example calls, tests, or explanations. "
+        "If the request describes one half of a write/read pair (a tool that saves "
+        "something another tool reads back, or vice versa), name the paired tool in the "
+        "docstring by its exact function name, state the exact shape of what it returns, "
+        "and state that a caller writing through this pair must read its own write back "
+        "with the paired tool, using the same identifying arguments, to verify it before "
+        "relying on it."
     )
 
     HARNESS_START = "# --- Novous test call (edit the values; removed when adding to the library) ---"

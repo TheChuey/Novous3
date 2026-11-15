@@ -116,7 +116,7 @@ Parameters:
 ## Context & Memory
 - Use when[MEMORY CONDITION].
 - Save the information with the agent set to and the title set to[MEMORY TITLE].
-- When reading it back, use the same agent and title values.
+- Then call read_chat_scratchpad with those same agent and title values to confirm the saved content matches what you wrote. Only treat it as saved once that read-back confirms it; if the content is missing or doesn't match, retry the write once before reporting failure.
 
 ## Sub-agents
 Delegate work with call_subagent. Only call the sub-agents listed here, using the exact ID.

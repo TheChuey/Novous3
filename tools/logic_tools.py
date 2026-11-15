@@ -793,7 +793,7 @@ def _mirror_squad_handoff(trace_id: str, agent: str, title: str, content: str) -
 
 @tool(provider="scratchpadMemory")
 def write_coding_scratchpad(agent: str, title: str, content: str) -> str:
-    """Save content to the coding scratchpad under an agent name and a title. Read it back with read_coding_scratchpad using the same agent and title."""
+    """Save content to the coding scratchpad under an agent name and a title. Paired with read_coding_scratchpad: after saving, you must call read_coding_scratchpad with the same agent and title to confirm the content was saved correctly before reporting success. Returns a JSON object with saved, store, agent, title, and id."""
     writer, title = _scratchpad_write_args(agent, title, content)
     entry = code_scratchpad.post(writer, "note", title, content, run_id="chat")
     return json.dumps({"saved": True, "store": "coding", "agent": writer, "title": title, "id": entry["id"]},
@@ -802,7 +802,7 @@ def write_coding_scratchpad(agent: str, title: str, content: str) -> str:
 
 @tool(provider="scratchpadMemory")
 def read_coding_scratchpad(agent: str, title: str, index: str = "0", offset: str = "0") -> str:
-    """Read one coding scratchpad entry by agent name and title. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist."""
+    """Read one coding scratchpad entry by agent name and title. Paired with write_coding_scratchpad: call this immediately after writing, with the exact same agent and title, to verify the saved content before relying on it. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist."""
     agent, title, position = _scratchpad_key(agent, title, index)
     entries = code_scratchpad.entries(limit=code_scratchpad.MAX_ENTRIES)
     return _scratchpad_recall("coding", entries, agent, title, position, _scratchpad_offset(offset))
@@ -810,7 +810,7 @@ def read_coding_scratchpad(agent: str, title: str, index: str = "0", offset: str
 
 @tool(provider="scratchpadMemory")
 def write_chat_scratchpad(agent: str, title: str, content: str) -> str:
-    """Save content to this chat's scratchpad under an agent name and a title. Read it back with read_chat_scratchpad using the same agent and title."""
+    """Save content to this chat's scratchpad under an agent name and a title. Paired with read_chat_scratchpad: after saving, you must call read_chat_scratchpad with the same agent and title to confirm the content was saved correctly before reporting success. Returns a JSON object with saved, store, agent, title, and id."""
     session_id = _chat_session_id()
     writer, title = _scratchpad_write_args(agent, title, content)
     entry = chat_scratchpad.post(session_id, writer, title, content)
@@ -820,7 +820,7 @@ def write_chat_scratchpad(agent: str, title: str, content: str) -> str:
 
 @tool(provider="scratchpadMemory")
 def read_chat_scratchpad(agent: str, title: str, index: str = "0", offset: str = "0") -> str:
-    """Read one entry from this chat's scratchpad by agent name and title. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist."""
+    """Read one entry from this chat's scratchpad by agent name and title. Paired with write_chat_scratchpad: call this immediately after writing, with the exact same agent and title, to verify the saved content before relying on it. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist."""
     session_id = _chat_session_id()
     agent, title, position = _scratchpad_key(agent, title, index)
     entries = chat_scratchpad.entries(session_id)
@@ -829,7 +829,7 @@ def read_chat_scratchpad(agent: str, title: str, index: str = "0", offset: str =
 
 @tool(provider="scratchpadMemory")
 def write_squad_scratchpad(agent: str, title: str, content: str) -> str:
-    """Save content to the current squad run's scratchpad under an agent name and a title. Read it back with read_squad_scratchpad using the same agent and title."""
+    """Save content to the current squad run's scratchpad under an agent name and a title. Paired with read_squad_scratchpad: after saving, you must call read_squad_scratchpad with the same agent and title to confirm the content was saved correctly before reporting success. Returns a JSON object with saved, store, agent, title, and id."""
     trace_id, _ = _active_squad_scratchpad()
     writer, title = _scratchpad_write_args(agent, title, content)
     entry = squad_scratchpad.post(trace_id, writer, "note", title, content)
@@ -840,7 +840,7 @@ def write_squad_scratchpad(agent: str, title: str, content: str) -> str:
 
 @tool(provider="scratchpadMemory")
 def read_squad_scratchpad(agent: str, title: str, index: str = "0", offset: str = "0") -> str:
-    """Read one entry from the current squad run's scratchpad by agent name and title. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist."""
+    """Read one entry from the current squad run's scratchpad by agent name and title. Paired with write_squad_scratchpad: call this immediately after writing, with the exact same agent and title, to verify the saved content before relying on it. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist."""
     trace_id, _ = _active_squad_scratchpad()
     agent, title, position = _scratchpad_key(agent, title, index)
     run = squad_scratchpad.get(trace_id)

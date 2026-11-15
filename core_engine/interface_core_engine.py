@@ -44,8 +44,10 @@ def api_health():
 @router.get("/api/agents")
 def api_list_agents(environment: AgentEnvironment = "workspace"):
     if environment == "workspace":
-        return {"agents": chat_service.list_agents()}
-    return {"agents": agent_library.list_agents(environment)}
+        agents = chat_service.list_agents()
+    else:
+        agents = agent_library.list_agents(environment)
+    return {"agents": agents, "errors": agent_library.load_errors}
 
 
 @router.post("/api/agents/create")

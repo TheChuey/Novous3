@@ -42,6 +42,8 @@ prompt: |
   }
   Use "nothing_found" instead of "success" when retrieval completes without relevant passages. Use "error" when retrieval fails, and include the error message in the content.
 
+  Then call read_chat_scratchpad with agent "rag-retriever" and title "result" to confirm the saved content matches what you wrote. Only finish once that read-back confirms it; if the content is missing or doesn't match, retry the write once before reporting failure.
+
   ## Available Tools
 
   ### get_knowledge_catalog
@@ -69,7 +71,7 @@ prompt: |
   - knowledge_branch_id: The branch ID from the knowledge catalog.
 
   ### read_chat_scratchpad
-  Read one entry from this chat's scratchpad by agent name and title. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist.
+  Read one entry from this chat's scratchpad by agent name and title. Paired with write_chat_scratchpad: call this immediately after writing, with the exact same agent and title, to verify the saved content before relying on it. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist.
 
   Parameters:
   - agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
@@ -78,7 +80,7 @@ prompt: |
   - offset: Character position to start reading at; use next_offset from the previous result. Default 0.
 
   ### write_chat_scratchpad
-  Save content to this chat's scratchpad under an agent name and a title. Read it back with read_chat_scratchpad using the same agent and title.
+  Save content to this chat's scratchpad under an agent name and a title. Paired with read_chat_scratchpad: after saving, you must call read_chat_scratchpad with the same agent and title to confirm the content was saved correctly before reporting success. Returns a JSON object with saved, store, agent, title, and id.
 
   Parameters:
   - agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
