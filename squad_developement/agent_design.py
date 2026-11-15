@@ -34,6 +34,27 @@ def save_generic_prompt(content: str) -> str:
     return content
 
 
+def generate_text(model: str, prompt: str) -> str:
+    """One-off completion for the Prompt Starter's AI variable-fill dialog."""
+    from core_engine.logic_core_engine import serialized_ollama_chat
+    from modelProfiles.logic_modelProfiles import model_profiles
+
+    model = str(model or "").strip()
+    if not model:
+        raise ValueError("Choose a model for generation.")
+    prompt = str(prompt or "")
+    if not prompt.strip():
+        raise ValueError("The generation prompt must not be empty.")
+    if len(prompt) > 20_000:
+        raise ValueError("The generation prompt must be at most 20,000 characters.")
+    result = serialized_ollama_chat(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        options={"num_ctx": model_profiles.effective(model)["num_ctx"]},
+    )
+    return str((result.get("message") or {}).get("content") or "")
+
+
 def format_pasted_yaml(content: str) -> str:
     """Format a complete YAML mapping without discarding comments or aliases."""
     if len(content.encode("utf-8")) > 1_000_000:
@@ -119,8 +140,6 @@ def parse_prompt_starter_agent(content: str) -> dict:
         raise ValueError("Agent tools must not contain duplicates.")
     if mode == "chat" and tools:
         raise ValueError("Agent tools require mode 'agent'; set mode to 'agent' or clear the tool entries.")
-    if "call_subagent" in tools:
-        raise ValueError("Choose registered tools other than call_subagent.")
     missing_tools = tool_catalog.unknown_tool_names(tools)
     if missing_tools:
         raise ValueError("Unregistered tools: " + ", ".join(missing_tools))
@@ -195,8 +214,8 @@ def get_agent(squad_id: str, agent_id: str) -> dict:
 def tool_instructions(tool: str) -> str:
     tool_catalog.load_tools()
     meta = tool_catalog.registry.get(tool)
-    if tool == "call_subagent" or not meta:
-        raise ValueError("Choose a registered tool other than call_subagent.")
+    if not meta:
+        raise ValueError(f"Tool not registered: {tool}")
     description = meta["description"]
     description = "\n".join(description) if isinstance(description, list) else str(description or "")
     parts = [f"## Tool: {tool}", description or "No tool documentation is available."]

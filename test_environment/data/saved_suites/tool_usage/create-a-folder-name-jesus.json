@@ -1,0 +1,27 @@
+{
+  "id": "create-a-folder-name-jesus",
+  "name": "create a folder name Jesus",
+  "category": "tool_usage",
+  "description": "",
+  "agent_id": "chat-assitant",
+  "model": "gemma4:e2b",
+  "steps": [
+    {
+      "text": "create a folder name Jesus",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "map your work space",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "loop in side the Lessons and read lessonsPlan.md",
+      "enabled": true,
+      "expect": null
+    }
+  ],
+  "created": "2026-11-15T07:23:35+00:00",
+  "updated": "2026-11-15T07:23:35+00:00"
+}

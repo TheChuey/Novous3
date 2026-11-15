@@ -46,6 +46,20 @@ def get_choices():
     return _validate(yaml.safe_load(path.read_text(encoding="utf-8")))
 
 
+def _write_choices(choices):
+    _validate(choices)
+    path = _path()
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent, delete=False) as handle:
+            temporary = handle.name
+            yaml.safe_dump(choices, handle, sort_keys=True, allow_unicode=True)
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def add_choice(variable, value):
     if not isinstance(value, str):
         raise ValueError("Choice must be text.")
@@ -55,17 +69,23 @@ def add_choice(variable, value):
         values = choices.setdefault(variable, [])
         if value not in values:
             values.append(value)
-        _validate(choices)
-        path = _path()
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent, delete=False) as handle:
-                temporary = handle.name
-                yaml.safe_dump(choices, handle, sort_keys=True, allow_unicode=True)
-            os.replace(temporary, path)
-        finally:
-            if temporary and os.path.exists(temporary):
-                os.unlink(temporary)
+        _write_choices(choices)
+        return choices
+
+
+def remove_choice(variable, value):
+    if not isinstance(value, str):
+        raise ValueError("Choice must be text.")
+    value = value.strip()
+    with _lock:
+        choices = get_choices()
+        values = choices.get(variable) or []
+        if value not in values:
+            raise FileNotFoundError(f"No saved choice to delete for {variable}.")
+        values.remove(value)
+        if not values:
+            del choices[variable]
+        _write_choices(choices)
         return choices
 
 

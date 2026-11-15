@@ -39,6 +39,11 @@ class StarterTemplateRequest(BaseModel):
     body: str
 
 
+class StarterGenerateRequest(BaseModel):
+    model: str
+    prompt: str
+
+
 
 
 class FlowRequest(BaseModel):
@@ -114,6 +119,16 @@ def starter_choices():
 @router.post("/prompt-starter/choices")
 def add_starter_choice(request: StarterChoiceRequest):
     return {"choices": invoke(prompt_starter.add_choice, request.variable, request.value)}
+
+
+@router.post("/prompt-starter/choices/delete")
+def delete_starter_choice(request: StarterChoiceRequest):
+    return {"choices": invoke(prompt_starter.remove_choice, request.variable, request.value)}
+
+
+@router.post("/prompt-starter/generate")
+def starter_generate(request: StarterGenerateRequest):
+    return {"text": invoke(agent_design.generate_text, request.model, request.prompt)}
 
 
 @router.get("/prompt-starter/templates")

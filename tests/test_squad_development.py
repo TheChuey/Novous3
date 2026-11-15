@@ -270,6 +270,43 @@ def test_create_agent_with_selected_tools(client, kind):
     assert client.get("/api/squad-development/tools/calculator/instructions").json()["content"].startswith("## Tool: calculator")
 
 
+def test_prompt_starter_choice_delete(client):
+    url = "/api/squad-development/prompt-starter/choices"
+    client.post(url, json={"variable": "TASK", "value": "First"})
+    client.post(url, json={"variable": "TASK", "value": "Second"})
+    response = client.post(url + "/delete", json={"variable": "TASK", "value": "First"})
+    assert response.status_code == 200
+    assert response.json()["choices"] == {"TASK": ["Second"]}
+    assert client.post(url + "/delete", json={"variable": "TASK", "value": "Missing"}).status_code == 404
+    assert client.post(url + "/delete", json={"variable": "TASK", "value": "Second"}).json()["choices"] == {}
+
+
+def test_prompt_starter_generate_returns_model_text(client, monkeypatch):
+    from core_engine import logic_core_engine
+    from modelProfiles.logic_modelProfiles import model_profiles
+
+    calls = {}
+
+    def fake_chat(**kwargs):
+        calls.update(kwargs)
+        return {"message": {"content": "A concise role description."}}
+
+    monkeypatch.setattr(logic_core_engine, "serialized_ollama_chat", fake_chat)
+    monkeypatch.setattr(model_profiles, "effective", lambda model: {"num_ctx": 4096})
+
+    url = "/api/squad-development/prompt-starter/generate"
+    response = client.post(url, json={"model": "test:latest", "prompt": "Write a role.\n\nContext:\n[GOAL]: Plan"})
+    assert response.status_code == 200
+    assert response.json() == {"text": "A concise role description."}
+    assert calls["model"] == "test:latest"
+    assert calls["messages"][0]["content"].startswith("Write a role.")
+    assert calls["options"] == {"num_ctx": 4096}
+
+    assert client.post(url, json={"model": "", "prompt": "Write"}).status_code == 400
+    assert client.post(url, json={"model": "test:latest", "prompt": "  "}).status_code == 400
+    assert client.post(url, json={"model": "test:latest", "prompt": "a" * 20_001}).status_code == 400
+
+
 def test_rule_routes_recovery_and_step_limit(client, monkeypatch):
     class FakeAgent:
         def __init__(self, model, tools, profile, session):

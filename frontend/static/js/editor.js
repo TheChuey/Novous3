@@ -2,6 +2,7 @@ import { Api } from './api.js';
 import { attachCodeBuilderEditor } from './codebuilder/codebuilder_editor.js';
 import { renderTree } from './tree.js';
 import { groupTools } from './tool_categories.js';
+import { createPromptStarter } from './prompt_starter.js';
 
 const fileSelectionListeners = new WeakMap();
 
@@ -16,7 +17,8 @@ const state = {
   path: null,
   dirty: false,
   editor: null,
-  managedPath: false
+  managedPath: false,
+  promptStarter: null
 };
 
 /**
@@ -31,6 +33,7 @@ export function renderEditorView(container, initialPath = null) {
   const oldSelectionListener = fileSelectionListeners.get(container);
   if (oldSelectionListener) window.removeEventListener('novous:file-selected', oldSelectionListener);
   state.editor?.dispose();
+  state.promptStarter?.dispose();
   state.path = null;
   state.dirty = false;
   state.managedPath = false;
@@ -162,6 +165,8 @@ export function renderEditorView(container, initialPath = null) {
       <div class="editor-tools-grip" role="separator" aria-label="Resize tools dialog"
            title="Drag to resize"></div>
     </dialog>`);
+
+  state.promptStarter = createPromptStarter(container);
 
   const editorMount = container.querySelector('#editor-monaco');
   const pathLabel = container.querySelector('#editor-path');
@@ -637,7 +642,17 @@ export function renderEditorView(container, initialPath = null) {
       delete createPromptId.dataset.edited;
       createPromptForm.classList.add('hidden');
       await loadPromptLibrary();
-      await openFile(created.path || `library/${id}.md`, false);
+      const filePath = created.path || `library/${id}.md`;
+      await openFile(filePath, false);
+      state.promptStarter.open({
+        applyTo: {
+          agentId: id,
+          agentName: name,
+          onComplete: async () => {
+            await openFile(filePath, false);
+          }
+        }
+      });
     } catch (err) {
       setStatus(libraryStatus, `Could not create prompt: ${err.message}`, 'danger');
     } finally {

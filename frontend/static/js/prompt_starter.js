@@ -4,13 +4,44 @@ import { groupTools } from './tool_categories.js';
 
 const VARIABLE = /\[([A-Z][A-Z0-9 _-]{0,63})\]/g;
 
+// What each standard agent-prompt variable means; sent to the LLM so generated
+// text and appended context are understood in their role within the prompt.
+const STARTER_VARIABLE_DESCRIPTIONS = {
+  'AGENT NAME': "The agent's display name.",
+  'AGENT ID': "The agent's unique file id (lowercase, hyphenated).",
+  'DESCRIPTION': 'A short description of what the agent does.',
+  'ROLE': 'Who the agent is and its primary responsibility.',
+  'PURPOSE': 'The specific goal this agent must accomplish.',
+  'RESPONSIBILITIES': 'The list of duties the agent is responsible for.',
+  'EXECUTION INSTRUCTIONS': 'Step-by-step instructions the agent follows when performing its task.',
+  'BOUNDARIES': 'Restrictions: what the agent must not do.',
+  'COMMUNICATION': 'How the agent reports and communicates results.',
+  'SUB-AGENT NAME': "The sub-agent's display name.",
+  'GOAL': 'The goal the agent works toward.',
+  'TASK': 'The task to send to a sub-agent.',
+  'OUTPUT FORMAT': 'The format the agent must use for its final answer.',
+  'CONDITION': 'When the action should happen.',
+};
+
+// Default pre-prompts the chain-fill wizard starts each variable with.
+const STARTER_VARIABLE_PREPROMPTS = {
+  'ROLE': 'Write the Role section for this agent: who the agent is and its primary responsibility, in 2-4 sentences addressed to the agent ("You are…").',
+  'PURPOSE': 'Write the Purpose section: the specific goal this agent must accomplish, in 1-3 sentences.',
+  'RESPONSIBILITIES': 'Write the Responsibilities section: a bullet list of 3-6 concrete duties this agent is responsible for.',
+  'EXECUTION INSTRUCTIONS': 'Write the Execution Instructions section: a short numbered list of steps the agent follows when performing its task.',
+  'BOUNDARIES': 'Write the Boundaries section: a bullet list of restrictions describing what the agent must not do.',
+  'COMMUNICATION': 'Write the Communication section: a short bullet list of how the agent reports and communicates results.',
+  'DESCRIPTION': 'Write a one-sentence description of what this agent does.',
+  'OUTPUT FORMAT': 'Write the Output Format section: the exact format the agent must use for its final answer.',
+};
+
 export function starterVariables(text) {
   return [...new Set([...text.matchAll(VARIABLE)].map(match => match[1]))];
 }
 
 export function renderStarter(text, values) {
   return text.replace(VARIABLE, (match, name) => {
-    const value = values[name]?.trim();
+    const value = (values[name] || values[name.replace(/-/g, ' ')])?.trim();
     if (value) return value;
     return /^TOOL \d+$/.test(name) ? '' : match;
   });
@@ -82,8 +113,8 @@ export function starterEditorText(node) {
   return text;
 }
 
-async function choiceRequest(method, body) {
-  const response = await fetch('/api/squad-development/prompt-starter/choices', {
+async function choiceRequest(method, body, path = '') {
+  const response = await fetch(`/api/squad-development/prompt-starter/choices${path}`, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : {},
     body: body ? JSON.stringify(body) : undefined,
@@ -105,13 +136,48 @@ function toAgentId(name) {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 64) || 'new-agent';
 }
 
+function normalizeAgentId(value) {
+  return String(value || '').trim().toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^[-_]+|[-_]+$/g, '')
+    .slice(0, 64);
+}
+
+function normalizeAgentFrontmatterId(content, agentId) {
+  const lines = content.split(/\r\n|\n|\r/);
+  if (lines[0]?.trim() !== '---') return content;
+  const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+  if (end < 0) return content;
+  const idLine = lines.findIndex((line, index) => index > 0 && index < end && /^[ \t]*id[ \t]*:/.test(line));
+  if (idLine < 0) return content;
+  const match = lines[idLine].match(/^([ \t]*id[ \t]*:[ \t]*)(?:(['"])(.*?)\2|([^#]*?))(?:[ \t]+#.*)?[ \t]*$/);
+  if (!match) return content;
+  const sourceId = (match[3] ?? match[4] ?? '').trim();
+  if (normalizeAgentId(sourceId) !== agentId) return content;
+  lines[idLine] = `${match[1]}${agentId}`;
+  return lines.join('\n');
+}
+
 export function createPromptStarter(container) {
   const host = document.createElement('div');
   host.innerHTML = `<dialog class="sd-starter-dialog" aria-labelledby="sd-starter-title">
     <header class="sd-starter-head">
       <div><h2 id="sd-starter-title">Prompt Starter</h2>
       <p class="small text-muted">Edit the Markdown directly. Select a tool or sub-agent in the text, and fill the other variables on the right.</p></div>
-      <button type="button" class="btn btn-sm" data-starter="close">Close</button>
+      <div class="sd-starter-window-controls">
+        <button type="button" class="sd-wc-btn" data-starter="popout" title="Pop out to separate window">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 2h5v5"/><path d="M14 2L8 8"/><path d="M12 9v4a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1h4"/></svg>
+        </button>
+        <button type="button" class="sd-wc-btn" data-starter="minimize" title="Minimize">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8h10"/></svg>
+        </button>
+        <button type="button" class="sd-wc-btn" data-starter="maximize" title="Maximize">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="1"/></svg>
+        </button>
+        <button type="button" class="sd-wc-btn sd-wc-close" data-starter="close" title="Close">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </div>
     </header>
     <div class="sd-starter-template-bar">
       <label class="small" for="sd-starter-tpl-select">Template:</label>
@@ -123,22 +189,32 @@ export function createPromptStarter(container) {
       <button type="button" class="btn btn-sm" data-starter="tpl-delete" title="Delete the selected template" disabled>Delete</button>
       <button type="button" class="btn btn-sm" data-starter="tpl-load-generic" title="Load the generic prompt from the server">Load Generic</button>
     </div>
-    <p class="small text-muted">Add only the tools you need. Their descriptions and parameter variables are added directly to the prompt. The sub-agent default edits its generated prompt body.</p>
     <p class="small text-danger" role="alert" data-starter="error"></p>
     <div class="sd-starter-layout">
       <section class="sd-starter-main">
         <div class="sd-starter-editor-toolbar">
           <h3 data-starter="editor-heading">Agent definition</h3>
+          <button type="button" class="btn btn-sm" data-starter="add-variable">+ Add variable</button>
           <button type="button" class="btn btn-sm" data-starter="add-tool">+ Add tools</button>
         </div>
-        <p class="small text-muted">Add a placeholder like [NEW VARIABLE] to create its own field. Click a tool or sub-agent variable to choose it, or another variable to jump to its field.</p>
-        <div class="sd-starter-editor" data-starter="editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Prompt Starter Markdown editor" spellcheck="false"></div>
+        <div class="sd-starter-editor" data-starter="editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Prompt Starter Markdown editor" spellcheck="false"
+             title="Add a placeholder like [NEW VARIABLE] to create its own field. Click a variable token to jump to its field."></div>
       </section>
       <div class="sd-starter-divider" data-starter="layout-divider" title="Drag to resize"></div>
       <aside class="sd-starter-fields" aria-label="Prompt variables">
-        <h3>Variables</h3>
-        <p class="small text-muted">Values appear in the Markdown. Save a choice to reuse it later.</p>
+        <div class="sd-starter-fields-head">
+          <h3>Variables</h3>
+          <button type="button" class="btn btn-sm" data-starter="ai-fill-toolbar" title="Fill a variable with an LLM response">AI Fill</button>
+          <button type="button" class="btn btn-sm btn-primary" data-starter="ai-chain-fill"
+                  title="Generate every unfilled variable in order; each step uses the already-accepted ones as context">Chain Fill</button>
+          <button type="button" class="btn btn-sm" data-starter="save-all-choices">Save All</button>
+        </div>
         <div data-starter="fields"></div>
+        <details class="sd-starter-ai-results" data-starter="ai-results" open>
+          <summary>AI results (<span data-starter="ai-results-count">0</span>)</summary>
+          <p class="small text-muted">Held LLM responses with their pre-prompt and target variable. Use one to copy it into the prompt.</p>
+          <div data-starter="ai-results-list"></div>
+        </details>
       </aside>
     </div>
     <dialog class="sd-starter-tool-picker" data-starter="tool-picker" aria-labelledby="sd-starter-tool-picker-title">
@@ -161,6 +237,79 @@ export function createPromptStarter(container) {
           <button type="button" class="btn" data-starter="tool-picker-cancel">Cancel</button>
           <button type="button" class="btn btn-primary" data-starter="tool-picker-apply">Add selected tools</button>
         </div>
+      </section>
+    </dialog>
+    <dialog class="sd-starter-ai-dialog" data-starter="ai-dialog" aria-labelledby="sd-starter-ai-title">
+      <section class="sd-starter-ai-panel">
+        <div class="sd-starter-tool-picker-head">
+          <h3 id="sd-starter-ai-title">AI fill variable</h3>
+          <button type="button" class="btn btn-sm" data-starter="ai-cancel">Close</button>
+        </div>
+        <div class="sd-starter-ai-pane" data-starter="ai-request">
+          <label class="small">Variable to fill
+            <select class="form-select" data-starter="ai-target" aria-label="Variable to fill"></select>
+          </label>
+          <label class="small">Model
+            <select class="form-select" data-starter="ai-model" aria-label="Model"></select>
+          </label>
+          <label class="small" for="sd-starter-ai-description">What this variable is (sent to the LLM with the pre-prompt)</label>
+          <div class="sd-starter-ai-preprompt-row">
+            <input id="sd-starter-ai-description" class="form-input" data-starter="ai-description"
+                   placeholder="e.g. Who the agent is and its primary responsibility">
+            <button type="button" class="btn btn-sm" data-starter="ai-save-description"
+                    title="Save this description for this variable so it is reused as context">Save</button>
+          </div>
+          <label class="small" for="sd-starter-ai-preprompt">Pre-prompt to the LLM</label>
+          <textarea id="sd-starter-ai-preprompt" class="form-input" rows="5" data-starter="ai-preprompt"
+                    placeholder="Describe what the model should write for this variable, e.g. 'Write the role description for an agent.'"></textarea>
+          <div class="sd-starter-choice-list" data-starter="ai-preprompt-list" aria-label="Saved pre-prompts" hidden></div>
+          <div class="sd-starter-ai-preprompt-row">
+            <button type="button" class="btn btn-sm" data-starter="ai-save-preprompt"
+                    title="Save this pre-prompt for this variable so you can reuse it later">Save pre-prompt</button>
+          </div>
+          <label class="small" for="sd-starter-ai-addition">Append to pre-prompt (optional)</label>
+          <input id="sd-starter-ai-addition" class="form-input" data-starter="ai-addition"
+                 placeholder="e.g. engineer — added to the end of the pre-prompt before sending">
+          <div data-starter="ai-context-wrap" hidden>
+            <p class="small text-muted">Append these variables as context:</p>
+            <div class="sd-starter-ai-context" data-starter="ai-context"></div>
+          </div>
+          <div class="workspace-save-actions">
+            <button type="button" class="btn" data-starter="ai-cancel">Cancel</button>
+            <button type="button" class="btn btn-primary" data-starter="ai-generate">Generate</button>
+          </div>
+        </div>
+        <div class="sd-starter-ai-pane" data-starter="ai-response" hidden>
+          <label class="small" for="sd-starter-ai-response-text">LLM response (edit before saving)</label>
+          <textarea id="sd-starter-ai-response-text" class="form-input sd-starter-ai-response" rows="12"
+                    data-starter="ai-response-text"></textarea>
+          <div class="workspace-save-actions">
+            <button type="button" class="btn btn-sm" data-starter="ai-back">Back</button>
+            <button type="button" class="btn btn-sm" data-starter="ai-markdown">Format as Markdown</button>
+            <span class="spacer"></span>
+            <button type="button" class="btn" data-starter="ai-cancel">Cancel</button>
+            <button type="button" class="btn btn-sm" data-starter="ai-save">Save to variable</button>
+            <button type="button" class="btn btn-sm" data-starter="ai-hold"
+                    title="Hold this response (with its pre-prompt and variable) in the AI results list">Add to list</button>
+            <button type="button" class="btn btn-primary" data-starter="ai-accept-next" hidden
+                    title="Fill this variable and generate the next one in the chain">Accept &amp; next</button>
+          </div>
+        </div>
+        <div class="sd-starter-ai-pane" data-starter="ai-complete" hidden>
+          <label class="small" for="sd-starter-ai-finished">Finished prompt (all variables filled)</label>
+          <textarea id="sd-starter-ai-finished" class="form-input sd-starter-ai-response" rows="14"
+                    data-starter="ai-finished" readonly></textarea>
+          <div class="workspace-save-actions">
+            <button type="button" class="btn btn-sm" data-starter="ai-copy-finished">Copy prompt</button>
+            <button type="button" class="btn btn-sm" data-starter="ai-save-finished">Save prompt (.md)</button>
+            <span class="spacer"></span>
+            <button type="button" class="btn" data-starter="ai-clear-restart"
+                    title="Clear the generated variables (the seed stays) and run the chain again">Clear &amp; restart</button>
+            <button type="button" class="btn btn-primary" data-starter="ai-cancel">Done</button>
+          </div>
+        </div>
+        <p class="small text-muted" role="status" data-starter="ai-status"></p>
+        <p class="small text-danger" role="alert" data-starter="ai-error"></p>
       </section>
     </dialog>
     <div class="sd-starter-picker" data-starter="picker" hidden>
@@ -191,6 +340,10 @@ export function createPromptStarter(container) {
       </div>
       <div class="sd-starter-create-row">
         <button type="button" class="btn btn-sm btn-primary" data-starter="create-confirm">Create</button>
+        <button type="button" class="btn btn-sm" data-starter="create-load-agent"
+                title="Load a saved agent definition file into the editor to create an agent from it">Load agent…</button>
+        <button type="button" class="btn btn-sm" data-starter="create-save-agent"
+                title="Save the agent definition as a Markdown file without creating it in the library">Save agent (.md)</button>
         <button type="button" class="btn btn-sm" data-starter="create-cancel">Cancel</button>
         <span class="small text-muted" data-starter="create-status"></span>
       </div>
@@ -198,7 +351,10 @@ export function createPromptStarter(container) {
     <footer class="sd-starter-actions">
       <button type="button" class="btn btn-sm" data-starter="reset" disabled>Reset</button>
       <button type="button" class="btn btn-sm" data-starter="copy" disabled>Copy prompt</button>
+      <button type="button" class="btn btn-sm" data-starter="save-prompt" disabled
+              title="Save the finished prompt as a Markdown file">Save prompt</button>
       <span class="sd-starter-actions-sep"></span>
+      <button type="button" class="btn btn-sm btn-primary" data-starter="apply-to-editor" hidden disabled>Apply to Editor</button>
       <button type="button" class="btn btn-sm btn-primary" data-starter="create-agent" disabled>Create Agent</button>
       <button type="button" class="btn btn-sm btn-primary" data-starter="create-squad" disabled>Create New Squad</button>
       <span class="small" role="status" data-starter="status"></span>
@@ -236,6 +392,29 @@ export function createPromptStarter(container) {
   const createKindLabel = dialog.querySelector('[data-starter="create-kind-label"]');
   const createStatus = dialog.querySelector('[data-starter="create-status"]');
   const createAgentButton = dialog.querySelector('[data-starter="create-agent"]');
+  const createSquadButton = dialog.querySelector('[data-starter="create-squad"]');
+  const applyToEditorButton = dialog.querySelector('[data-starter="apply-to-editor"]');
+  const aiDialog = dialog.querySelector('[data-starter="ai-dialog"]');
+  const aiRequestPane = dialog.querySelector('[data-starter="ai-request"]');
+  const aiResponsePane = dialog.querySelector('[data-starter="ai-response"]');
+  const aiTargetSelect = dialog.querySelector('[data-starter="ai-target"]');
+  const aiModelSelect = dialog.querySelector('[data-starter="ai-model"]');
+  const aiPreprompt = dialog.querySelector('[data-starter="ai-preprompt"]');
+  const aiPrepromptList = dialog.querySelector('[data-starter="ai-preprompt-list"]');
+  const aiAddition = dialog.querySelector('[data-starter="ai-addition"]');
+  const aiDescription = dialog.querySelector('[data-starter="ai-description"]');
+  const aiResultsCount = dialog.querySelector('[data-starter="ai-results-count"]');
+  const aiResultsList = dialog.querySelector('[data-starter="ai-results-list"]');
+  const aiContextWrap = dialog.querySelector('[data-starter="ai-context-wrap"]');
+  const aiContextList = dialog.querySelector('[data-starter="ai-context"]');
+  const aiResponseText = dialog.querySelector('[data-starter="ai-response-text"]');
+  const aiCompletePane = dialog.querySelector('[data-starter="ai-complete"]');
+  const aiFinished = dialog.querySelector('[data-starter="ai-finished"]');
+  const aiStatus = dialog.querySelector('[data-starter="ai-status"]');
+  const aiErrorLabel = dialog.querySelector('[data-starter="ai-error"]');
+  const aiTitle = dialog.querySelector('#sd-starter-ai-title');
+  const aiGenerateBtn = dialog.querySelector('[data-starter="ai-generate"]');
+  const aiAcceptNextBtn = dialog.querySelector('[data-starter="ai-accept-next"]');
   const values = {};
   let choices = {};
   let tools = [];
@@ -243,6 +422,9 @@ export function createPromptStarter(container) {
   let templates = [];
   let starterDefaults = null;
   let disposed = false;
+  let maximized = false;
+  let preMaxRect = null;
+  let popoutWindow = null;
   let catalogReady = false;
   let variablesKey = '';
   let pickerName = '';
@@ -253,6 +435,145 @@ export function createPromptStarter(container) {
   let pendingSubagentCreation = null;
   let toolPickerSelection = new Set();
   let toolPickerReturnFocus = null;
+  let applyTarget = null;
+  const maximizeBtn = dialog.querySelector('[data-starter="maximize"]');
+
+  function toggleMaximize() {
+    maximized = !maximized;
+    if (maximized) {
+      preMaxRect = {
+        top: dialog.style.top, left: dialog.style.left,
+        width: dialog.style.width, height: dialog.style.height,
+        maxWidth: dialog.style.maxWidth, maxHeight: dialog.style.maxHeight,
+        margin: dialog.style.margin, inset: dialog.style.inset,
+      };
+      dialog.style.margin = '0';
+      dialog.style.inset = '0';
+      dialog.style.top = '0';
+      dialog.style.left = '0';
+      dialog.style.width = '100vw';
+      dialog.style.height = '100vh';
+      dialog.style.maxWidth = '100vw';
+      dialog.style.maxHeight = '100vh';
+      dialog.style.borderRadius = '0';
+      dialog.classList.add('sd-starter-maximized');
+    } else {
+      if (preMaxRect) {
+        Object.assign(dialog.style, preMaxRect);
+      } else {
+        dialog.style.removeProperty('margin');
+        dialog.style.removeProperty('inset');
+        dialog.style.removeProperty('top');
+        dialog.style.removeProperty('left');
+        dialog.style.removeProperty('width');
+        dialog.style.removeProperty('height');
+        dialog.style.removeProperty('max-width');
+        dialog.style.removeProperty('max-height');
+      }
+      dialog.style.borderRadius = '';
+      dialog.classList.remove('sd-starter-maximized');
+    }
+    maximizeBtn.title = maximized ? 'Restore' : 'Maximize';
+    maximizeBtn.innerHTML = maximized
+      ? '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="4" width="9" height="9" rx="1"/><path d="M5 4V3a1 1 0 011-1h7a1 1 0 011 1v7a1 1 0 01-1 1h-1"/></svg>'
+      : '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="1"/></svg>';
+  }
+
+  function doMinimize() {
+    dialog.close();
+    dialog.classList.add('sd-starter-minimized');
+    let bar = container.querySelector('.sd-starter-minimized-bar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.className = 'sd-starter-minimized-bar';
+      bar.innerHTML = '<span>Prompt Starter</span><button type="button" class="btn btn-sm" data-action="restore-starter">Restore</button>';
+      bar.querySelector('button').addEventListener('click', () => {
+        bar.remove();
+        dialog.classList.remove('sd-starter-minimized');
+        dialog.showModal();
+      });
+      container.append(bar);
+    }
+  }
+
+  function doPopout() {
+    const promptText = editorText();
+    const currentValues = { ...values };
+    const w = Math.min(1400, screen.availWidth - 100);
+    const h = Math.min(900, screen.availHeight - 100);
+    const left = Math.round((screen.availWidth - w) / 2);
+    const top = Math.round((screen.availHeight - h) / 2);
+    popoutWindow = window.open('', '_blank',
+      `width=${w},height=${h},left=${left},top=${top},menubar=no,toolbar=no,status=no,scrollbars=yes,resizable=yes`);
+    if (!popoutWindow) {
+      showError(new Error('Could not open pop-out window. Check your browser pop-up blocker settings.'));
+      return;
+    }
+    dialog.close();
+
+    const doc = popoutWindow.document;
+    doc.title = 'Prompt Starter — Novous';
+    const parentStyles = document.querySelectorAll('link[rel="stylesheet"], style');
+    let styleHTML = '';
+    parentStyles.forEach(el => {
+      if (el.tagName === 'LINK') {
+        const href = el.getAttribute('href');
+        if (href) styleHTML += `<link rel="stylesheet" href="${new URL(href, location.origin).href}">`;
+      } else {
+        styleHTML += `<style>${el.textContent}</style>`;
+      }
+    });
+    doc.head.innerHTML = `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${styleHTML}`;
+    doc.body.style.margin = '0';
+    doc.body.style.background = 'var(--bg-primary)';
+    doc.body.style.color = 'var(--text-main)';
+    doc.body.className = document.body.className;
+
+    const wrapper = doc.createElement('div');
+    wrapper.className = 'sd-starter-popout-host';
+    doc.body.append(wrapper);
+
+    dialog.classList.add('sd-starter-popout-mode');
+    dialog.close();
+    wrapper.append(dialog);
+    dialog.showModal();
+
+    const popoutControls = dialog.querySelector('.sd-starter-window-controls');
+    const popinBtn = doc.createElement('button');
+    popinBtn.type = 'button';
+    popinBtn.className = 'sd-wc-btn';
+    popinBtn.title = 'Pop back into main window';
+    popinBtn.dataset.starter = 'popin';
+    popinBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 14H3a1 1 0 01-1-1V5a1 1 0 011-1h4"/><path d="M7 9l5-5"/><path d="M9 4h3v3"/></svg>';
+    const popoutBtn = popoutControls.querySelector('[data-starter="popout"]');
+    popoutBtn.hidden = true;
+    popoutControls.insertBefore(popinBtn, popoutControls.firstChild);
+
+    popoutWindow.addEventListener('beforeunload', () => {
+      if (disposed) return;
+      doPopin();
+    });
+  }
+
+  function doPopin() {
+    if (!popoutWindow) return;
+    dialog.close();
+    dialog.classList.remove('sd-starter-popout-mode');
+    const popinBtn = dialog.querySelector('[data-starter="popin"]');
+    if (popinBtn) popinBtn.remove();
+    const popoutBtn = dialog.querySelector('[data-starter="popout"]');
+    if (popoutBtn) popoutBtn.hidden = false;
+    container.append(dialog);
+    try { popoutWindow.close(); } catch {}
+    popoutWindow = null;
+    if (maximized) {
+      maximized = false;
+      dialog.classList.remove('sd-starter-maximized');
+      dialog.style.removeProperty('border-radius');
+      preMaxRect = null;
+    }
+    dialog.showModal();
+  }
 
   function showError(err) { error.textContent = err.message || String(err); }
   function isToolParameterVariable(name) { return /^TOOL \d+ [A-Z0-9 _-]+$/.test(name); }
@@ -269,7 +590,7 @@ export function createPromptStarter(container) {
       createFormTitle.textContent = createMode === 'squad'
         ? `Create New Squad + First ${kindLabel}` : `Create New ${kindLabel}`;
     }
-    addToolButton.hidden = tplSelect.value !== 'agent' || createKindSelect.value !== 'agent';
+    addToolButton.hidden = !editorText().trimStart().startsWith('---');
   }
   function editorText() { return starterEditorText(editor); }
   function promptBodyText() {
@@ -320,7 +641,7 @@ export function createPromptStarter(container) {
     toolInstructionEntries = [];
     renderEditor(body);
     renderFields();
-    if (!selected.length || tplSelect.value !== 'agent') {
+    if (!selected.length || !body.trimStart().startsWith('---')) {
       toolInstructionsState = 'ready';
       return;
     }
@@ -380,12 +701,11 @@ export function createPromptStarter(container) {
       group.querySelector('.editor-tool-group-count').textContent = `${selectedCount}/${inputs.length}`;
       inputs.forEach(input => { input.checked = toolPickerSelection.has(input.value); });
     });
-    const selectableCount = tools.filter(tool => tool.name !== 'call_subagent').length;
-    toolCount.textContent = `${toolPickerSelection.size} of ${selectableCount} selected`;
+    toolCount.textContent = `${toolPickerSelection.size} of ${tools.length} selected`;
   }
   function renderToolPickerOptions() {
     const query = toolFilter.value.trim().toLowerCase();
-    const grouped = groupTools(tools.filter(tool => tool.name !== 'call_subagent'))
+    const grouped = groupTools(tools)
       .map(([category, entries]) => [category, entries.filter(tool => [
         category, tool.name, tool.provider, tool.description,
       ].flat().join(' ').toLowerCase().includes(query))])
@@ -497,6 +817,367 @@ export function createPromptStarter(container) {
   function addToolVariable() {
     openToolPicker();
   }
+
+  // --- AI variable fill -----------------------------------------------------
+  let aiModelsLoaded = false;
+  let aiBusy = false;
+  let lastAiPrompt = '';
+  const aiResultsKey = 'novous2.starter.ai-results';
+  let aiResults = [];
+  try {
+    const stored = JSON.parse(localStorage.getItem(aiResultsKey) || '[]');
+    if (Array.isArray(stored)) aiResults = stored.filter(entry => entry && typeof entry.text === 'string');
+  } catch { /* storage unavailable */ }
+  function persistAiResults() {
+    try { localStorage.setItem(aiResultsKey, JSON.stringify(aiResults.slice(0, 50))); }
+    catch { /* storage unavailable */ }
+  }
+  function renderAiResults() {
+    aiResultsCount.textContent = String(aiResults.length);
+    aiResultsList.replaceChildren(...aiResults.map((entry, index) => {
+      const row = document.createElement('div');
+      row.className = 'sd-starter-ai-result';
+      const head = document.createElement('div');
+      head.className = 'sd-starter-ai-result-head';
+      const variable = document.createElement('strong');
+      variable.textContent = entry.variable || '';
+      const when = document.createElement('span');
+      when.className = 'text-muted small';
+      when.textContent = entry.time ? new Date(entry.time).toLocaleString() : '';
+      head.append(variable, when);
+      const prePrompt = document.createElement('p');
+      prePrompt.className = 'small text-muted sd-starter-ai-result-preprompt';
+      prePrompt.textContent = entry.prePrompt || '';
+      prePrompt.title = entry.prePrompt || '';
+      const preview = document.createElement('p');
+      preview.className = 'small sd-starter-ai-result-text';
+      preview.textContent = entry.text;
+      const actions = document.createElement('div');
+      actions.className = 'sd-starter-ai-result-actions';
+      for (const [action, label, title] of [
+        ['ai-result-use', 'To prompt', `Copy this response into the ${entry.variable || ''} variable`],
+        ['ai-result-copy', 'Copy', 'Copy the response text to the clipboard'],
+        ['ai-result-reuse', 'Reuse', 'Reopen the AI dialog with this variable and pre-prompt'],
+        ['ai-result-delete', 'Delete', 'Remove this entry from the list'],
+      ]) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = action === 'ai-result-delete' ? 'btn btn-sm btn-danger' : 'btn btn-sm';
+        button.dataset.starter = action;
+        button.dataset.index = String(index);
+        button.textContent = label;
+        button.title = title;
+        actions.appendChild(button);
+      }
+      row.append(head, prePrompt, preview, actions);
+      return row;
+    }));
+  }
+  function aiPrepromptKey(name) {
+    return `AI PRE-PROMPT ${name}`.slice(0, 64).trimEnd();
+  }
+  function aiDescriptionKey(name) {
+    return `AI DESCRIPTION ${name}`.slice(0, 64).trimEnd();
+  }
+  // A variable's description: the user-saved one, else a tool parameter's, else the built-in default.
+  function variableDescription(name) {
+    const saved = (choices[aiDescriptionKey(name)] || []).slice(-1)[0];
+    if (saved) return saved;
+    const parameterDescriptions = Object.assign({}, ...toolInstructionEntries.map(entry => entry.parameterDescriptions));
+    return parameterDescriptions[name] || STARTER_VARIABLE_DESCRIPTIONS[name] || '';
+  }
+  function populateAiPreprompts() {
+    const saved = choices[aiPrepromptKey(aiTargetSelect.value)] || [];
+    aiPrepromptList.replaceChildren(...saved.map(value => {
+      const row = document.createElement('div');
+      row.className = 'sd-starter-choice-row';
+      const use = document.createElement('button');
+      use.type = 'button';
+      use.className = 'sd-starter-choice';
+      use.dataset.starter = 'ai-use-preprompt';
+      use.title = value;
+      use.textContent = truncateOption(value);
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'sd-starter-choice-delete';
+      remove.dataset.starter = 'ai-delete-preprompt';
+      remove.title = 'Delete this saved pre-prompt';
+      remove.setAttribute('aria-label', 'Delete saved pre-prompt');
+      remove.textContent = '×';
+      row.append(use, remove);
+      return row;
+    }));
+    aiPrepromptList.hidden = !saved.length;
+  }
+  function showAiPane(pane) {
+    aiRequestPane.hidden = pane !== 'request';
+    aiResponsePane.hidden = pane !== 'response';
+    aiCompletePane.hidden = pane !== 'complete';
+  }
+  function aiShowError(err) { aiErrorLabel.textContent = err ? (err.message || String(err)) : ''; }
+  function renderAiContext() {
+    const target = aiTargetSelect.value;
+    const entries = Object.entries(values)
+      .filter(([name, value]) => name !== target && value?.trim() && !isToolPickerVariable(name));
+    aiContextWrap.hidden = !entries.length;
+    aiContextList.replaceChildren(...entries.map(([name, value]) => {
+      const label = document.createElement('label');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = name;
+      const copy = document.createElement('span');
+      const title = document.createElement('strong');
+      title.textContent = name;
+      copy.appendChild(title);
+      const described = variableDescription(name);
+      if (described) {
+        const meaning = document.createElement('span');
+        meaning.className = 'small';
+        meaning.textContent = described;
+        copy.appendChild(meaning);
+      }
+      const preview = document.createElement('span');
+      preview.className = 'text-muted small';
+      preview.textContent = value.trim().slice(0, 120);
+      copy.appendChild(preview);
+      label.append(checkbox, copy);
+      return label;
+    }));
+  }
+  async function loadAiModels() {
+    if (aiModelsLoaded) return;
+    aiModelSelect.innerHTML = '<option value="">Loading models…</option>';
+    try {
+      const data = await Api.getModels();
+      if (disposed) return;
+      const models = data.models || [];
+      if (!models.length) {
+        aiModelSelect.innerHTML = '<option value="">No models installed</option>';
+        if (data.error) aiShowError(new Error(data.error));
+        return;
+      }
+      aiModelSelect.replaceChildren(...models.map(name => new Option(name, name)));
+      aiModelSelect.value = models.includes(data.default) ? data.default : models[0];
+      aiModelsLoaded = true;
+    } catch (err) {
+      aiModelSelect.innerHTML = '<option value="">No models</option>';
+      if (!disposed) aiShowError(err);
+    }
+  }
+  function openAiDialog(targetName = '', prePrompt = null) {
+    const variables = starterVariables(editorText()).filter(name => !isCatalogVariable(name));
+    if (!variables.length) {
+      showError(new Error('Add a variable placeholder to the prompt before using AI fill.'));
+      return;
+    }
+    aiShowError(null);
+    aiStatus.textContent = '';
+    aiAcceptNextBtn.hidden = true;
+    aiTitle.textContent = 'AI fill variable';
+    aiTargetSelect.replaceChildren(...variables.map(name => new Option(name, name)));
+    aiTargetSelect.value = variables.includes(targetName) ? targetName : variables[0];
+    aiTargetSelect.disabled = Boolean(targetName) && variables.includes(targetName);
+    if (prePrompt !== null) aiPreprompt.value = prePrompt;
+    aiAddition.value = '';
+    aiDescription.value = variableDescription(aiTargetSelect.value);
+    populateAiPreprompts();
+    renderAiContext();
+    showAiPane('request');
+    if (!aiDialog.open) aiDialog.showModal();
+    loadAiModels();
+    aiPreprompt.focus();
+  }
+  async function aiGenerate(button) {
+    if (aiBusy) return;
+    const prePrompt = aiPreprompt.value.trim();
+    if (!prePrompt) { aiShowError(new Error('Enter a pre-prompt for the LLM.')); return; }
+    const model = aiModelSelect.value;
+    if (!model) { aiShowError(new Error('Choose a model.')); return; }
+    const chosen = [...aiContextList.querySelectorAll('input:checked')].map(input => input.value);
+    const addition = aiAddition.value.trim();
+    let prompt = addition ? `${prePrompt}\n\n${addition}` : prePrompt;
+    lastAiPrompt = prompt;
+    const target = aiTargetSelect.value;
+    const targetDescription = aiDescription.value.trim();
+    prompt += `\n\nYou are writing the value for the "${target}" variable of an AI agent prompt.`;
+    if (targetDescription) prompt += ` ${target} means: ${targetDescription}`;
+    prompt += ' Output only the text for this variable — no section heading and no preamble.';
+    if (chosen.length) {
+      prompt += '\n\nContext — already-filled variables of this agent prompt:\n' + chosen.map(name => {
+        const described = variableDescription(name);
+        return `- ${name}${described ? ` (${described})` : ''}: ${values[name].trim()}`;
+      }).join('\n');
+    }
+    aiBusy = true;
+    button.disabled = true;
+    aiShowError(null);
+    aiStatus.textContent = 'Generating…';
+    try {
+      const data = await Api.generateStarterText(model, prompt);
+      if (disposed) return;
+      aiResponseText.value = (data.text || '').trim();
+      showAiPane('response');
+      aiStatus.textContent = aiResponseText.value ? '' : 'The model returned an empty response.';
+    } catch (err) {
+      if (!disposed) { aiShowError(err); aiStatus.textContent = ''; }
+    } finally {
+      aiBusy = false;
+      button.disabled = false;
+    }
+  }
+  async function aiFormatMarkdown(button) {
+    if (aiBusy) return;
+    const text = aiResponseText.value.trim();
+    if (!text) { aiShowError(new Error('There is no response text to format.')); return; }
+    const model = aiModelSelect.value;
+    if (!model) { aiShowError(new Error('Choose a model.')); return; }
+    aiBusy = true;
+    button.disabled = true;
+    aiShowError(null);
+    aiStatus.textContent = 'Formatting as Markdown…';
+    try {
+      const data = await Api.generateStarterText(model,
+        'Convert the following text to clean, well-structured Markdown. '
+        + 'Output only the Markdown with no preamble and no surrounding code fences.\n\n' + text);
+      if (disposed) return;
+      const formatted = (data.text || '').trim();
+      if (formatted) aiResponseText.value = formatted;
+      aiStatus.textContent = formatted ? 'Formatted as Markdown.' : 'The model returned an empty response.';
+    } catch (err) {
+      if (!disposed) { aiShowError(err); aiStatus.textContent = ''; }
+    } finally {
+      aiBusy = false;
+      button.disabled = false;
+    }
+  }
+  // Fills the variable's text area in the Variables panel (and the value used by the
+  // finished prompt) without rewriting the token shown in the Markdown editor.
+  function aiApplyToVariable(variable, text) {
+    values[variable] = text;
+    showVariableField(variable, true);
+    fields.querySelector('[data-starter-value]')?.scrollIntoView({ block: 'nearest' });
+  }
+  function aiSave() {
+    const target = aiTargetSelect.value;
+    if (!target) return;
+    aiApplyToVariable(target, aiResponseText.value.trim());
+    aiDialog.close();
+    status.textContent = `Saved the LLM response to ${target}.`;
+  }
+
+  // --- Chain fill: generate the remaining variables in order, feeding each
+  // accepted section into the context of the next one. ---------------------
+  let chainQueue = [];
+  let chainTotal = 0;
+  const CHAIN_SEED_VARIABLES = ['AGENT NAME', 'AGENT ID', 'DESCRIPTION', 'SUB-AGENT NAME', 'SUB-AGENT ID'];
+  function defaultPreprompt(name) {
+    const saved = (choices[aiPrepromptKey(name)] || []).slice(-1)[0];
+    return saved || STARTER_VARIABLE_PREPROMPTS[name]
+      || `Write the value for the ${name} section of this agent prompt.`;
+  }
+  function chainStepSetup(name) {
+    aiTargetSelect.value = name;
+    aiTargetSelect.disabled = true;
+    aiDescription.value = variableDescription(name);
+    aiPreprompt.value = defaultPreprompt(name);
+    aiAddition.value = '';
+    populateAiPreprompts();
+    renderAiContext();
+    aiContextList.querySelectorAll('input').forEach(input => { input.checked = true; });
+    aiTitle.textContent = `Chain fill — ${name} (${chainTotal - chainQueue.length + 1}/${chainTotal})`;
+    aiAcceptNextBtn.hidden = false;
+  }
+  function startChainFill() {
+    const variables = starterVariables(editorText()).filter(name => !isCatalogVariable(name));
+    const queue = variables.filter(name => !values[name]?.trim() && !CHAIN_SEED_VARIABLES.includes(name));
+    if (!queue.length) {
+      showError(new Error('All variables are already filled; nothing to chain-fill.'));
+      return;
+    }
+    if (!CHAIN_SEED_VARIABLES.some(name => values[name]?.trim())
+        && !variables.some(name => values[name]?.trim())) {
+      showError(new Error('Fill AGENT NAME and DESCRIPTION first — the chain uses them as the seed context.'));
+      return;
+    }
+    chainQueue = queue;
+    chainTotal = queue.length;
+    openAiDialog(queue[0]);
+    if (!aiDialog.open) { chainQueue = []; return; }
+    chainStepSetup(queue[0]);
+    aiStatus.textContent = 'Review the pre-prompt and press Generate to start the chain.';
+  }
+  function endChain() {
+    chainQueue = [];
+    chainTotal = 0;
+    aiTitle.textContent = 'AI fill variable';
+    aiAcceptNextBtn.hidden = true;
+  }
+  function aiAcceptNext() {
+    const target = aiTargetSelect.value;
+    const text = aiResponseText.value.trim();
+    if (!text) { aiShowError(new Error('There is no response text to accept.')); return; }
+    aiApplyToVariable(target, text);
+    chainQueue = chainQueue.filter(name => name !== target);
+    if (!chainQueue.length) {
+      chainQueue = [];
+      chainTotal = 0;
+      aiAcceptNextBtn.hidden = true;
+      aiTitle.textContent = 'Chain fill — complete';
+      aiFinished.value = finishedPrompt();
+      showAiPane('complete');
+      aiStatus.textContent = 'Every variable is filled. Review the finished prompt below.';
+      status.textContent = 'Chain fill complete — every variable is filled.';
+      return;
+    }
+    chainStepSetup(chainQueue[0]);
+    showAiPane('request');
+    aiGenerate(aiGenerateBtn);
+  }
+  function aiHold() {
+    const text = aiResponseText.value.trim();
+    if (!text) { aiShowError(new Error('There is no response text to hold.')); return; }
+    const target = aiTargetSelect.value;
+    aiResults.unshift({ variable: target, prePrompt: lastAiPrompt, text, time: Date.now() });
+    if (aiResults.length > 50) aiResults.length = 50;
+    persistAiResults();
+    renderAiResults();
+    aiDialog.close();
+    status.textContent = `Held the LLM response for ${target} in AI results.`;
+  }
+  async function aiSaveDescription(button) {
+    const name = aiTargetSelect.value;
+    const value = aiDescription.value.trim();
+    if (!value) { aiShowError(new Error('Enter a description before saving it.')); return; }
+    if (value.length > 2000) { aiShowError(new Error('A description must be at most 2000 characters.')); return; }
+    button.disabled = true;
+    try {
+      const key = aiDescriptionKey(name);
+      const previous = (choices[key] || []).slice(-1)[0];
+      if (previous && previous !== value) {
+        // One description per variable: replace the stored one instead of accumulating.
+        try { await choiceRequest('POST', { variable: key, value: previous }, '/delete'); } catch { /* keep going */ }
+      }
+      choices = await choiceRequest('POST', { variable: key, value });
+      if (disposed) return;
+      renderAiContext();
+      aiStatus.textContent = `Description saved for ${name}.`;
+    } catch (err) { if (!disposed) aiShowError(err); }
+    finally { button.disabled = false; }
+  }
+  async function aiSavePreprompt(button) {
+    const value = aiPreprompt.value.trim();
+    if (!value) { aiShowError(new Error('Enter a pre-prompt before saving it.')); return; }
+    if (value.length > 2000) { aiShowError(new Error('A saved pre-prompt must be at most 2000 characters.')); return; }
+    button.disabled = true;
+    try {
+      choices = await choiceRequest('POST', { variable: aiPrepromptKey(aiTargetSelect.value), value });
+      if (disposed) return;
+      populateAiPreprompts();
+      aiStatus.textContent = `Pre-prompt saved for ${aiTargetSelect.value}.`;
+    } catch (err) { if (!disposed) aiShowError(err); }
+    finally { button.disabled = false; }
+  }
+  const truncateOption = value => (value.length > 60 ? `${value.slice(0, 60)}…` : value);
   function optionsFor(name) {
     let catalog = '';
     if (isSubagentVariable(name)) {
@@ -504,27 +1185,56 @@ export function createPromptStarter(container) {
         `<option value="${esc(agent.id)}" title="${esc(agent.description || '')}">${esc(agent.name || agent.id)} (${esc(agent.id)})</option>`).join('')}</optgroup>`;
     }
     const saved = choices[name] || [];
-    return `${catalog}${saved.length ? `<optgroup label="Saved choices">${saved.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('')}</optgroup>` : ''}`;
+    return `${catalog}${saved.length ? `<optgroup label="Saved choices">${saved.map(value =>
+      `<option value="${esc(value)}" title="${esc(value)}">${esc(truncateOption(value))}</option>`).join('')}</optgroup>` : ''}`;
   }
+  let currentVariable = '';
   function renderFields() {
     const variables = starterVariables(editorText())
       .filter(name => !isCatalogVariable(name));
     const parameterDescriptions = Object.assign({}, ...toolInstructionEntries.map(entry => entry.parameterDescriptions));
-    const key = variables.map(name => `${name}:${parameterDescriptions[name] || ''}`).join('\n');
+    if (!variables.includes(currentVariable)) currentVariable = variables[0] || '';
+    const key = variables.map(name => `${name}:${parameterDescriptions[name] || ''}`).join('\n') + `\n@${currentVariable}`;
     if (variablesKey === key) return;
     variablesKey = key;
-    fields.innerHTML = variables.map((name, index) => {
-      const description = parameterDescriptions[name];
-      return `<div class="sd-starter-field" data-variable="${esc(name)}">
-        <label for="sd-starter-value-${index}"><strong>${esc(name)}</strong></label>
-        ${description ? `<p class="sd-starter-field-description">${esc(description)}</p>` : ''}
-        <select class="form-select" aria-label="Choose ${esc(name)}" data-starter-choice>
-          <option value="">Choose or type below</option>${optionsFor(name)}
+    if (!variables.length) {
+      fields.innerHTML = '<p class="small text-muted">Add an uppercase placeholder in the prompt to create a field.</p>';
+      return;
+    }
+    const name = currentVariable;
+    const index = variables.indexOf(name);
+    const description = parameterDescriptions[name];
+    fields.innerHTML = `<div class="sd-starter-field-nav">
+        <button type="button" class="btn btn-sm" data-starter="field-prev" title="Previous variable"${index === 0 ? ' disabled' : ''}>‹</button>
+        <select class="form-select" data-starter="field-jump" aria-label="Choose variable">
+          ${variables.map(variable =>
+            `<option value="${esc(variable)}"${variable === name ? ' selected' : ''}>${esc(variable)}${values[variable]?.trim() ? ' ✓' : ''}</option>`).join('')}
         </select>
-        <textarea id="sd-starter-value-${index}" class="form-input" rows="2" data-starter-value>${esc(values[name] || '')}</textarea>
-        <button type="button" class="btn btn-sm" data-starter="save-choice">Save choice</button>
+        <span class="small text-muted sd-starter-field-count">${index + 1}/${variables.length}</span>
+        <button type="button" class="btn btn-sm" data-starter="field-next" title="Next variable"${index === variables.length - 1 ? ' disabled' : ''}>›</button>
+      </div>
+      <div class="sd-starter-field" data-variable="${esc(name)}">
+        ${description ? `<p class="sd-starter-field-description">${esc(description)}</p>` : ''}
+        ${(choices[name] || []).length ? `<div class="sd-starter-choice-list" aria-label="Saved choices for ${esc(name)}">
+          ${(choices[name] || []).map(value => `<div class="sd-starter-choice-row">
+            <button type="button" class="sd-starter-choice" data-starter="use-choice" title="${esc(value)}">${esc(truncateOption(value))}</button>
+            <button type="button" class="sd-starter-choice-delete" data-starter="delete-choice"
+                    title="Delete this saved choice" aria-label="Delete saved choice">×</button>
+          </div>`).join('')}
+        </div>` : ''}
+        <textarea class="form-input sd-starter-field-value" rows="8" data-starter-value
+                  aria-label="Value for ${esc(name)}">${esc(values[name] || '')}</textarea>
+        <div class="sd-starter-field-actions">
+          <button type="button" class="btn btn-sm" data-starter="save-choice">Save choice</button>
+          <button type="button" class="btn btn-sm" data-starter="ai-fill" title="Fill ${esc(name)} with an LLM response">AI</button>
+        </div>
       </div>`;
-    }).join('') || '<p class="small text-muted">Add an uppercase placeholder in the prompt to create a field.</p>';
+  }
+  function showVariableField(name, focus = false) {
+    currentVariable = name;
+    variablesKey = '';
+    renderFields();
+    if (focus) fields.querySelector('[data-starter-value]')?.focus();
   }
 
   // --- Template selector ---
@@ -569,7 +1279,8 @@ export function createPromptStarter(container) {
     Object.keys(values).forEach(key => delete values[key]);
     variablesKey = '';
     picker.hidden = true;
-    addToolButton.hidden = isCustom || kind !== 'agent';
+    // Tools can only be added to definitions with YAML frontmatter, custom or default.
+    addToolButton.hidden = !body.trimStart().startsWith('---');
     toolInstructionsRequest += 1;
     renderEditor(body);
     editorHeading.textContent = isCustom ? 'Prompt' : kind === 'subagent' ? 'Sub-agent prompt' : 'Agent definition';
@@ -587,7 +1298,9 @@ export function createPromptStarter(container) {
     createSquadRow.hidden = !isSquad;
     createSquadNameInput.value = '';
     createNameInput.value = values['AGENT NAME'] || values['SUB-AGENT NAME'] || '';
-    createIdInput.value = values['AGENT ID'] || toAgentId(createNameInput.value);
+    const idVariable = isSubagent ? 'SUB-AGENT ID' : 'AGENT ID';
+    createIdInput.value = normalizeAgentId(values[idVariable] || toAgentId(createNameInput.value))
+      || toAgentId(createNameInput.value);
     createKindLabel.hidden = isSubagent;
     createKindSelect.disabled = isSubagent;
     if (isSubagent) createKindSelect.value = 'subagent';
@@ -597,6 +1310,10 @@ export function createPromptStarter(container) {
     if (isSquad) createSquadNameInput.focus();
     else createNameInput.focus();
   }
+
+  createIdInput.addEventListener('change', () => {
+    createIdInput.value = normalizeAgentId(createIdInput.value) || toAgentId(createNameInput.value);
+  });
 
   function hideCreateForm() {
     createForm.hidden = true;
@@ -667,6 +1384,11 @@ export function createPromptStarter(container) {
     });
   }
 
+  dialog.querySelector('.sd-starter-head').addEventListener('dblclick', e => {
+    if (e.target.closest('.sd-starter-window-controls')) return;
+    toggleMaximize();
+  });
+
   // --- Dialog window resize from any edge/corner ---
   {
     const EDGES = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
@@ -724,6 +1446,20 @@ export function createPromptStarter(container) {
   renderEditor('');
   renderFields();
   editor.addEventListener('input', renderFields);
+  let lastEditorRange = null;
+  document.addEventListener('selectionchange', () => {
+    const sel = window.getSelection();
+    if (sel?.rangeCount && editor.contains(sel.anchorNode)) {
+      lastEditorRange = sel.getRangeAt(0).cloneRange();
+    }
+  });
+  function restoreEditorCursor() {
+    if (lastEditorRange) {
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(lastEditorRange);
+    }
+  }
   function insertPlainText(text) {
     if (document.execCommand('insertText', false, text)) return;
     const selection = window.getSelection();
@@ -779,7 +1515,7 @@ export function createPromptStarter(container) {
       return;
     }
     if (!isCatalogVariable(name)) {
-      [...fields.querySelectorAll('[data-variable]')].find(field => field.dataset.variable === name)?.querySelector('[data-starter-value]')?.focus();
+      showVariableField(name, true);
       return;
     }
     openPickerForVariable(name, token);
@@ -803,6 +1539,13 @@ export function createPromptStarter(container) {
     }
   });
   toolFilter.addEventListener('input', renderToolPickerOptions);
+  aiDialog.addEventListener('close', endChain);
+  aiTargetSelect.addEventListener('change', () => {
+    aiDescription.value = variableDescription(aiTargetSelect.value);
+    renderAiContext();
+    populateAiPreprompts();
+  });
+  renderAiResults();
   toolPicker.addEventListener('cancel', event => {
     event.preventDefault();
     closeToolPicker();
@@ -823,6 +1566,8 @@ export function createPromptStarter(container) {
     updateTokens(name);
   });
   fields.addEventListener('change', event => {
+    const jump = event.target.closest('[data-starter="field-jump"]');
+    if (jump) { showVariableField(jump.value, true); return; }
     const select = event.target.closest('[data-starter-choice]');
     if (!select || !select.value) return;
     const field = select.closest('[data-variable]');
@@ -853,13 +1598,23 @@ export function createPromptStarter(container) {
     error.textContent = '';
     status.textContent = '';
     if (action === 'close') {
+      if (popoutWindow) { doPopin(); return; }
       if (pendingSubagentCreation) restorePendingSubagent();
       if (toolPicker.open) closeToolPicker();
       picker.hidden = true;
       hideCreateForm();
+      applyTarget = null;
+      createAgentButton.hidden = false;
+      createSquadButton.hidden = false;
+      applyToEditorButton.hidden = true;
+      if (maximized) { maximized = false; dialog.classList.remove('sd-starter-maximized'); dialog.style.borderRadius = ''; preMaxRect = null; }
       dialog.close();
       return;
     }
+    if (action === 'minimize') { doMinimize(); return; }
+    if (action === 'maximize') { toggleMaximize(); return; }
+    if (action === 'popout') { doPopout(); return; }
+    if (action === 'popin') { doPopin(); return; }
     if (action === 'tool-picker-close' || action === 'tool-picker-cancel') {
       closeToolPicker();
       return;
@@ -887,6 +1642,145 @@ export function createPromptStarter(container) {
     }
     if (action === 'add-tool') {
       addToolVariable();
+      return;
+    }
+    if (action === 'use-choice') {
+      const field = button.closest('[data-variable]');
+      if (!field) return;
+      const name = field.dataset.variable;
+      values[name] = button.title;
+      field.querySelector('[data-starter-value]').value = button.title;
+      updateTokens(name);
+      return;
+    }
+    if (action === 'delete-choice') {
+      const field = button.closest('[data-variable]');
+      const value = button.closest('.sd-starter-choice-row')?.querySelector('.sd-starter-choice')?.title;
+      if (!field || !value) return;
+      if (!confirm(`Delete this saved choice for ${field.dataset.variable}?\n\n${value.length > 200 ? `${value.slice(0, 200)}…` : value}`)) return;
+      button.disabled = true;
+      try {
+        choices = await choiceRequest('POST', { variable: field.dataset.variable, value }, '/delete');
+        variablesKey = '';
+        renderFields();
+        status.textContent = `Deleted a saved choice for ${field.dataset.variable}.`;
+      } catch (err) {
+        if (!disposed) { showError(err); button.disabled = false; }
+      }
+      return;
+    }
+    if (action === 'field-prev' || action === 'field-next') {
+      const variables = starterVariables(editorText()).filter(name => !isCatalogVariable(name));
+      const next = variables[variables.indexOf(currentVariable) + (action === 'field-next' ? 1 : -1)];
+      if (next) showVariableField(next, true);
+      return;
+    }
+    if (action === 'ai-fill-toolbar') { openAiDialog(); return; }
+    if (action === 'ai-chain-fill') { startChainFill(); return; }
+    if (action === 'ai-accept-next') { aiAcceptNext(); return; }
+    if (action === 'ai-copy-finished') {
+      try { await navigator.clipboard.writeText(aiFinished.value); aiStatus.textContent = 'Finished prompt copied.'; }
+      catch (err) { aiShowError(new Error(`Could not copy the prompt: ${err.message}.`)); }
+      return;
+    }
+    if (action === 'ai-save-finished') {
+      const baseName = toAgentId(values['AGENT ID'] || values['AGENT NAME'] || values['SUB-AGENT NAME'] || 'prompt-starter');
+      button.disabled = true;
+      try {
+        const saved = await Api.saveTextFile(aiFinished.value, `${baseName}.md`, 'md');
+        aiStatus.textContent = `Prompt saved as ${saved.filename}.`;
+      } catch (err) {
+        if (err?.name !== 'AbortError' && !disposed) aiShowError(new Error(`Could not save the prompt: ${err.message}.`));
+      } finally { button.disabled = false; }
+      return;
+    }
+    if (action === 'ai-clear-restart') {
+      if (!confirm('Clear the generated variables and run the chain again? The seed (agent name, ID, description) is kept.')) return;
+      starterVariables(editorText())
+        .filter(name => !isCatalogVariable(name) && !CHAIN_SEED_VARIABLES.includes(name))
+        .forEach(name => { delete values[name]; updateTokens(name); });
+      variablesKey = '';
+      renderFields();
+      startChainFill();
+      return;
+    }
+    if (action === 'ai-fill') {
+      openAiDialog(button.closest('[data-variable]')?.dataset.variable || '');
+      return;
+    }
+    if (action === 'ai-cancel') { aiDialog.close(); return; }
+    if (action === 'ai-generate') { aiGenerate(button); return; }
+    if (action === 'ai-back') { showAiPane('request'); return; }
+    if (action === 'ai-markdown') { aiFormatMarkdown(button); return; }
+    if (action === 'ai-save') { aiSave(); return; }
+    if (action === 'ai-hold') { aiHold(); return; }
+    if (action === 'ai-save-preprompt') { aiSavePreprompt(button); return; }
+    if (action === 'ai-use-preprompt') { aiPreprompt.value = button.title; return; }
+    if (action === 'ai-delete-preprompt') {
+      const value = button.closest('.sd-starter-choice-row')?.querySelector('.sd-starter-choice')?.title;
+      if (!value) return;
+      if (!confirm(`Delete this saved pre-prompt for ${aiTargetSelect.value}?\n\n${value.length > 200 ? `${value.slice(0, 200)}…` : value}`)) return;
+      button.disabled = true;
+      try {
+        choices = await choiceRequest('POST', { variable: aiPrepromptKey(aiTargetSelect.value), value }, '/delete');
+        populateAiPreprompts();
+        aiStatus.textContent = 'Saved pre-prompt deleted.';
+      } catch (err) {
+        if (!disposed) { aiShowError(err); button.disabled = false; }
+      }
+      return;
+    }
+    if (action === 'ai-save-description') { aiSaveDescription(button); return; }
+    if (action.startsWith('ai-result-')) {
+      const entry = aiResults[Number(button.dataset.index)];
+      if (!entry) return;
+      if (action === 'ai-result-use') {
+        aiApplyToVariable(entry.variable, entry.text);
+        status.textContent = `Copied the held response into ${entry.variable}.`;
+      } else if (action === 'ai-result-copy') {
+        try { await navigator.clipboard.writeText(entry.text); status.textContent = 'Response copied to the clipboard.'; }
+        catch (err) { showError(new Error(`Could not copy the response: ${err.message}.`)); }
+      } else if (action === 'ai-result-reuse') {
+        openAiDialog(entry.variable, entry.prePrompt || '');
+      } else if (action === 'ai-result-delete') {
+        aiResults.splice(Number(button.dataset.index), 1);
+        persistAiResults();
+        renderAiResults();
+      }
+      return;
+    }
+    if (action === 'add-variable') {
+      let name = prompt('Variable name:');
+      if (!name) return;
+      name = name.trim().toUpperCase().replace(/[^A-Z0-9 _-]/g, '').replace(/\s+/g, ' ').slice(0, 64);
+      if (!name || !/^[A-Z]/.test(name)) {
+        showError(new Error('Variable name must start with a letter (A-Z). Only uppercase letters, digits, spaces, hyphens and underscores are allowed.'));
+        return;
+      }
+      editor.focus();
+      restoreEditorCursor();
+      insertPlainText(`[${name}]`);
+      const scrollTop = editor.scrollTop;
+      renderEditor(editorText());
+      editor.scrollTop = scrollTop;
+      renderFields();
+      return;
+    }
+    if (action === 'save-all-choices') {
+      const toSave = Object.entries(values)
+        .filter(([name, val]) => val?.trim() && !isCatalogVariable(name));
+      if (!toSave.length) { showError(new Error('No variable values to save.')); return; }
+      button.disabled = true;
+      status.textContent = 'Saving…';
+      try {
+        for (const [name, value] of toSave) {
+          choices = await choiceRequest('POST', { variable: name, value: value.trim() });
+        }
+        variablesKey = '';
+        renderFields();
+        status.textContent = `Saved ${toSave.length} variable value${toSave.length > 1 ? 's' : ''}.`;
+      } catch (err) { if (!disposed) showError(err); }
+      finally { button.disabled = false; }
       return;
     }
     if (action === 'reset') {
@@ -988,6 +1882,58 @@ export function createPromptStarter(container) {
       catch (err) { showError(new Error(`Could not copy the prompt: ${err.message}.`)); }
       return;
     }
+    if (action === 'save-prompt') {
+      const promptText = finishedPrompt();
+      if (!promptText.trim()) { showError(new Error('The prompt is empty; nothing to save.')); return; }
+      const baseName = toAgentId(values['AGENT ID'] || values['AGENT NAME'] || values['SUB-AGENT NAME'] || 'prompt-starter');
+      button.disabled = true;
+      try {
+        const saved = await Api.saveTextFile(promptText, `${baseName}.md`, 'md');
+        status.textContent = `Prompt saved as ${saved.filename}.`;
+      } catch (err) {
+        if (err?.name !== 'AbortError' && !disposed) showError(new Error(`Could not save the prompt: ${err.message}.`));
+      } finally { button.disabled = false; }
+      return;
+    }
+
+    // --- Apply to Editor (apply mode) ---
+    if (action === 'apply-to-editor') {
+      if (!applyTarget) return;
+      if (toolInstructionsState !== 'ready') {
+        showError(new Error(toolInstructionsState === 'loading'
+          ? 'Wait for tool descriptions to finish loading.'
+          : 'Tool descriptions could not be loaded; retry the tool selection.'));
+        return;
+      }
+      const promptText = finishedPrompt();
+      if (!promptText.trim()) { showError(new Error('The finished prompt must not be empty.')); return; }
+      const unresolved = starterVariables(promptText);
+      if (unresolved.length && !confirm(`These variables are still unfilled: ${unresolved.join(', ')}. Continue?`)) return;
+
+      button.disabled = true;
+      status.textContent = 'Applying to editor…';
+      try {
+        let promptToSave = promptText;
+        let agentTools = null;
+        let agentToolMode = null;
+        if (promptText.startsWith('---')) {
+          const definition = await Api.parseStarterAgentDefinition(promptText);
+          promptToSave = definition.prompt;
+          agentTools = definition.tools;
+          agentToolMode = definition.mode;
+        }
+        await Api.setAgentPrompt(applyTarget.agentId, promptToSave);
+        if (agentTools !== null && agentTools.length) {
+          await Api.setAgentTools('prompt', applyTarget.agentId, agentTools, agentToolMode);
+        }
+        status.textContent = '';
+        dialog.close();
+        applyTarget.onComplete();
+      } catch (err) {
+        if (!disposed) showError(err);
+      } finally { button.disabled = false; }
+      return;
+    }
 
     // --- Create Agent / Squad ---
     if (action === 'create-agent') {
@@ -1003,15 +1949,72 @@ export function createPromptStarter(container) {
       restorePendingSubagent();
       return;
     }
+    if (action === 'create-load-agent') {
+      const fileInput = document.createElement('input');
+      fileInput.type = 'file';
+      fileInput.accept = '.md,.markdown,.yaml,.yml,.txt';
+      fileInput.addEventListener('change', async () => {
+        const file = fileInput.files?.[0];
+        if (!file) return;
+        try {
+          const content = (await file.text()).replace(/\r\n?/g, '\n');
+          if (!content.trim()) throw new Error(`${file.name} is empty.`);
+          Object.keys(values).forEach(key => delete values[key]);
+          variablesKey = '';
+          picker.hidden = true;
+          renderEditor(content);
+          renderFields();
+          refreshToolInstructions();
+          addToolButton.hidden = !content.trimStart().startsWith('---');
+          // Prefill the form from the frontmatter unless the values are still placeholders.
+          const clean = text => text.trim().replace(/^["']|["']$/g, '');
+          const idMatch = content.match(/^id:[ \t]*(.+)$/m);
+          const nameMatch = content.match(/^name:[ \t]*(.+)$/m);
+          if (nameMatch && !nameMatch[1].includes('[')) createNameInput.value = clean(nameMatch[1]);
+          if (idMatch && !idMatch[1].includes('[')) createIdInput.value = clean(idMatch[1]);
+          else if (createNameInput.value) createIdInput.value = toAgentId(createNameInput.value);
+          createStatus.textContent = `Loaded ${file.name}. Review the definition, then press Create.`;
+        } catch (err) { if (!disposed) showError(err); }
+      });
+      fileInput.click();
+      return;
+    }
+    if (action === 'create-save-agent') {
+      const agentName = createNameInput.value.trim();
+      const agentId = normalizeAgentId(createIdInput.value) || toAgentId(agentName);
+      createIdInput.value = agentId;
+      if (!agentName) { showError(new Error('Enter a name for the agent.')); return; }
+      const kind = createMode === 'subagent' ? 'subagent' : createKindSelect.value;
+      const nameVariable = kind === 'subagent' ? 'SUB-AGENT NAME' : 'AGENT NAME';
+      values[nameVariable] = agentName;
+      updateTokens(nameVariable);
+      values[kind === 'subagent' ? 'SUB-AGENT ID' : 'AGENT ID'] = agentId;
+      updateTokens(kind === 'subagent' ? 'SUB-AGENT ID' : 'AGENT ID');
+      const promptText = kind === 'agent'
+        ? normalizeAgentFrontmatterId(finishedPrompt(), agentId)
+        : finishedPrompt();
+      if (!promptText.trim()) { showError(new Error('The finished prompt must not be empty.')); return; }
+      const unresolved = starterVariables(promptText);
+      if (unresolved.length && !confirm(`These variables are still unfilled: ${unresolved.join(', ')}. Save anyway?`)) return;
+      button.disabled = true;
+      try {
+        const extension = kind === 'subagent' ? 'yaml' : 'md';
+        const saved = await Api.saveTextFile(promptText, `${agentId}.${extension}`, 'md');
+        createStatus.textContent = `Agent definition saved as ${saved.filename}.`;
+      } catch (err) {
+        if (err?.name !== 'AbortError' && !disposed) showError(new Error(`Could not save the agent: ${err.message}.`));
+      } finally { button.disabled = false; }
+      return;
+    }
     if (action === 'create-confirm') {
       const mode = createMode;
       const agentName = createNameInput.value.trim();
-      const agentId = createIdInput.value.trim();
+      const agentId = normalizeAgentId(createIdInput.value) || toAgentId(agentName);
+      createIdInput.value = agentId;
       const kind = mode === 'subagent' ? 'subagent' : createKindSelect.value;
       const squadName = createSquadNameInput.value.trim();
       const nameVariable = kind === 'subagent' ? 'SUB-AGENT NAME' : 'AGENT NAME';
       if (!agentName) { showError(new Error('Enter a name for the agent.')); return; }
-      if (!agentId) { showError(new Error('Enter an ID for the agent.')); return; }
       values[nameVariable] = agentName;
       updateTokens(nameVariable);
       if (kind === 'agent') {
@@ -1028,7 +2031,9 @@ export function createPromptStarter(container) {
           : 'Tool descriptions could not be loaded; retry the tool selection before creating the agent.'));
         return;
       }
-      const promptText = finishedPrompt();
+      const promptText = kind === 'agent'
+        ? normalizeAgentFrontmatterId(finishedPrompt(), agentId)
+        : finishedPrompt();
       if (!promptText.trim()) { showError(new Error('The finished prompt must not be empty.')); return; }
       if (promptText.startsWith('---') && kind !== 'agent') {
         showError(new Error('The Novous Agent YAML definition must be created as an agent.'));
@@ -1098,10 +2103,27 @@ export function createPromptStarter(container) {
   });
 
   return {
-    async open() {
+    async open(options = {}) {
       error.textContent = '';
       status.textContent = '';
       hideCreateForm();
+      container.querySelector('.sd-starter-minimized-bar')?.remove();
+      dialog.classList.remove('sd-starter-minimized', 'sd-starter-maximized', 'sd-starter-popout-mode');
+      if (maximized) { maximized = false; preMaxRect = null; dialog.style.borderRadius = ''; }
+      dialog.style.removeProperty('margin'); dialog.style.removeProperty('inset');
+      dialog.style.removeProperty('top'); dialog.style.removeProperty('left');
+      dialog.style.removeProperty('width'); dialog.style.removeProperty('height');
+      dialog.style.removeProperty('max-width'); dialog.style.removeProperty('max-height');
+      applyTarget = options.applyTo || null;
+      if (applyTarget) {
+        createAgentButton.hidden = true;
+        createSquadButton.hidden = true;
+        applyToEditorButton.hidden = false;
+      } else {
+        createAgentButton.hidden = false;
+        createSquadButton.hidden = false;
+        applyToEditorButton.hidden = true;
+      }
       if (!starterDefaults) {
         try {
           starterDefaults = await Api.getStarterDefaults();
@@ -1116,6 +2138,14 @@ export function createPromptStarter(container) {
           return;
         }
       }
+      if (applyTarget) {
+        values['AGENT NAME'] = applyTarget.agentName || '';
+        values['AGENT ID'] = applyTarget.agentId || '';
+        variablesKey = '';
+        renderFields();
+        updateTokens('AGENT NAME');
+        updateTokens('AGENT ID');
+      }
       dialog.showModal();
       try {
         const [catalog, agents, saved] = await Promise.all([
@@ -1128,7 +2158,10 @@ export function createPromptStarter(container) {
         catalogReady = true;
         variablesKey = '';
         renderFields();
-        dialog.querySelectorAll('.sd-starter-actions button').forEach(button => { button.disabled = false; });
+        dialog.querySelectorAll('.sd-starter-actions button').forEach(button => {
+          if (button.hidden) return;
+          button.disabled = false;
+        });
       } catch (err) { if (!disposed) showError(err); }
       loadTemplates();
     },
@@ -1138,6 +2171,11 @@ export function createPromptStarter(container) {
       return editorText().replace(/\r\n/g, '\n') !== defaultPrompt
         || Object.values(values).some(value => value.trim());
     },
-    dispose() { disposed = true; dialog.remove(); },
+    dispose() {
+      disposed = true;
+      if (popoutWindow) { try { popoutWindow.close(); } catch {} popoutWindow = null; }
+      dialog.remove();
+      container.querySelector('.sd-starter-minimized-bar')?.remove();
+    },
   };
 }

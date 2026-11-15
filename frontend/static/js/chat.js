@@ -481,8 +481,33 @@ export function renderChatView(container) {
     return details;
   }
 
-  function renderScratchpad(memory) {
+  function renderChatScratchpadEntries(entries) {
+    const section = scratchpadSection('Current chat entries', entries.length);
+    if (!entries.length) {
+      section.appendChild(emptyNote('No entries are saved in this chat.'));
+      return section;
+    }
+    entries.forEach((entry, index) => {
+      const details = document.createElement('details');
+      details.className = 'scratchpad-read';
+      details.dataset.readerItem = '';
+      details.open = index === 0;
+      const summary = document.createElement('summary');
+      const timestamp = entry.created_at ? new Date(entry.created_at).toLocaleString() : '';
+      summary.textContent = [entry.author || 'Unknown agent', entry.title || '', timestamp]
+        .filter(Boolean).join(' · ');
+      const content = document.createElement('div');
+      content.className = 'prompt-rich-markdown';
+      appendMarkdown(content, String(entry.content || ''));
+      details.append(summary, content);
+      section.appendChild(details);
+    });
+    return section;
+  }
+
+  function renderScratchpad(memory, chatEntries = []) {
     scratchpadContent.replaceChildren();
+    const chatSection = renderChatScratchpadEntries(chatEntries);
     const subagents = scratchpadSubagentHistory(memory).reverse();
     const reads = Array.isArray(memory.read_history)
       ? memory.read_history
@@ -529,6 +554,7 @@ export function renderChatView(container) {
     nav.className = 'reader-nav';
     nav.setAttribute('aria-label', 'Scratchpad sections');
     [
+      [`Current chat entries (${chatEntries.length})`, chatSection],
       [`Sub-agent results (${subagents.length})`, subagentSection],
       [`File reads (${reads.length})`, readsSection],
       ['Workspace map', mapSection],
@@ -539,7 +565,7 @@ export function renderChatView(container) {
       jump.addEventListener('click', () => section.scrollIntoView({ behavior: 'smooth', block: 'start' }));
       nav.appendChild(jump);
     });
-    scratchpadContent.append(nav, subagentSection, readsSection, mapSection);
+    scratchpadContent.append(nav, chatSection, subagentSection, readsSection, mapSection);
     scratchpadReader.refresh();
   }
 
@@ -590,7 +616,12 @@ export function renderChatView(container) {
     scratchpadStatus.hidden = true;
     scratchpadContent.textContent = 'Loading scratchpad…';
     try {
-      renderScratchpad(await Api.getAgentScratchpad());
+      const sessionId = `chat-${agentSelect.value}`;
+      const [memory, chatScratchpad] = await Promise.all([
+        Api.getAgentScratchpad(),
+        Api.getChatScratchpad(sessionId),
+      ]);
+      renderScratchpad(memory, chatScratchpad.entries || []);
     } catch (error) {
       scratchpadContent.textContent = `Could not load scratchpad: ${error.message}`;
     }
@@ -613,9 +644,9 @@ export function renderChatView(container) {
     currentStore: 'chat',
     onRestore: loadScratchpad,
     onNativeClear: async () => {
-      if (!confirm('Clear the chat scratchpad? This cannot be undone.')) return;
-      await Api.clearAgentScratchpad();
-      scratchpadContent.textContent = '';
+      if (!confirm("Clear this chat's scratchpad entries? This cannot be undone.")) return;
+      await Api.clearChatScratchpad(`chat-${agentSelect.value}`);
+      await loadScratchpad();
       scratchpadStatus.textContent = 'Scratchpad cleared.';
       scratchpadStatus.hidden = false;
     },

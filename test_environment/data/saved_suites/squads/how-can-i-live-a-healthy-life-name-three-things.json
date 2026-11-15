@@ -1,0 +1,27 @@
+{
+  "id": "how-can-i-live-a-healthy-life-name-three-things",
+  "name": "how can i live a healthy life name three things",
+  "category": "squads",
+  "description": "",
+  "agent_id": "sidekik-01",
+  "model": "mistral-nemo:latest",
+  "steps": [
+    {
+      "text": "how can i live a healthy life name three things",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "how many poounds can i loose if i burn extra 500 calories a month",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "how many minutes do i neeed to streach a day to get some flexibility",
+      "enabled": true,
+      "expect": null
+    }
+  ],
+  "created": "2026-11-15T07:06:54+00:00",
+  "updated": "2026-11-15T07:12:38+00:00"
+}

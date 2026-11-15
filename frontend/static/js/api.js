@@ -629,5 +629,8 @@ export const Api = {
   async getGenericPrompt() {
     return get('/api/squad-development/template');
   },
+  async generateStarterText(model, prompt) {
+    return send('POST', '/api/squad-development/prompt-starter/generate', { model, prompt });
+  },
 
 };
