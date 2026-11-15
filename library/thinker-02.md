@@ -3,7 +3,7 @@ id: thinker-02
 name: a thinker who deconstructs problems
 description: a critical thinker
 mode: agent
-model: qwen2.5-coder:latest
+model: qwen2.5-coder:14b
 environment: workspace
 version: 1
 tools:

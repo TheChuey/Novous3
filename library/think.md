@@ -3,7 +3,7 @@ id: think
 name: think
 description: A Thinking Agent is an agent responsible for analyzing information, reasoning through problems, evaluating possibilities, and developing logical conclusions before recommending or taking action.
 mode: agent
-model: qwen2.5-coder:latest
+model: qwen2.5-coder:14b
 environment: workspace
 version: 1
 tools:

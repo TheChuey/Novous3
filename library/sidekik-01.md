@@ -3,7 +3,7 @@ id: sidekik-01
 name: helper
 description: be good assistant
 mode: agent
-model: qwen2.5-coder:latest
+model: qwen2.5-coder:14b
 environment: workspace
 version: 1
 tools:

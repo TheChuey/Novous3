@@ -516,7 +516,7 @@ def execute_python_code(req: CodeExecutionRequest) -> CodeExecutionResult:
         elif kind == "done":
             done = event
 
-    stdout, stderr = "".join(out), "".join(err)
+    stdout, stderr = "".join(out).replace("\r\n", "\n"), "".join(err).replace("\r\n", "\n")
     if saw_syntax_error and not stderr:
         item = diagnostics[-1]
         stderr = f"{item.message} (line {item.line})\n" if item.line else f"{item.message}\n"

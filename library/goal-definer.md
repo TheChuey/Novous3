@@ -2,15 +2,13 @@
 id: goal-definer
 name: Goal Definer
 mode: agent
-model: qwen2.5-coder:latest
+model: qwen2.5-coder:14b
 environment: workspace
 version: 1
 tools:
   - calculator
   - read_file
   - write_file
-  - create_file
-  - list_directory
   - project_status
   - read_chat_scratchpad
   - write_chat_scratchpad
@@ -63,17 +61,11 @@ Parameters:
 - path (required): The file or folder path, relative to the workspace root.
 - content (required): The text to save.
 
-### create_file
-- Not registered in the tool catalog
-
-### list_directory
-- Not registered in the tool catalog
-
 ### project_status
 Return the current project state metadata for this workspace.
 
 ### read_chat_scratchpad
-Read one entry from this chat's scratchpad by agent name and title. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist.
+Read one entry from this chat's scratchpad by agent name and title. Paired with write_chat_scratchpad: call this immediately after writing, with the exact same agent and title, to verify the saved content before relying on it. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist.
 
 Parameters:
 - agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
@@ -82,7 +74,7 @@ Parameters:
 - offset: Character position to start reading at; use next_offset from the previous result. Default 0.
 
 ### write_chat_scratchpad
-Save content to this chat's scratchpad under an agent name and a title. Read it back with read_chat_scratchpad using the same agent and title.
+Save content to this chat's scratchpad under an agent name and a title. Paired with read_chat_scratchpad: after saving, you must call read_chat_scratchpad with the same agent and title to confirm the content was saved correctly before reporting success. Returns a JSON object with saved, store, agent, title, and id.
 
 Parameters:
 - agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
@@ -117,16 +109,6 @@ Parameters:
 - Use when[MEMORY CONDITION].
 - Save the information with the agent set to and the title set to[MEMORY TITLE].
 - Then call read_chat_scratchpad with those same agent and title values to confirm the saved content matches what you wrote. Only treat it as saved once that read-back confirms it; if the content is missing or doesn't match, retry the write once before reporting failure.
-
-## Sub-agents
-Delegate work with call_subagent. Only call the sub-agents listed here, using the exact ID.
-
-### [SUB-AGENT ID]
-- Name:[SUB-AGENT NAME]
-- What it does: [SUB-AGENT PURPOSE].
-- When to use: Examine the Goal Summmary and c.
-- Task to send: [TASK].
-- After the call: [HOW TO USE THE RESULT].
 
 ## Boundaries
 - Do not call agents that are not listed in the Sub-agents section.
