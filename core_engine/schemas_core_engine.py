@@ -59,7 +59,7 @@ class AgentToolsRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     agent_id: str
-    model: str = "qwen2.5-coder:latest"
+    model: str = "qwen2.5-coder:14b"
     session_id: str | None = None
     environment: AgentEnvironment = "workspace"
 

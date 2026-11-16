@@ -184,7 +184,7 @@ def create_agent(squad_id: str, agent_id: str, name: str, kind: str, prompt: str
         raise ValueError("Choose registered tools other than call_subagent.")
     if len(set(tools)) != len(tools):
         raise ValueError("Tools must not contain duplicates.")
-    meta = {"id": agent_id, "name": name.strip(), "mode": "agent", "model": "qwen2.5-coder:latest", "tools": tools}
+    meta = {"id": agent_id, "name": name.strip(), "mode": "agent", "model": "qwen2.5-coder:14b", "tools": tools}
     content = ("---\n" + yaml.safe_dump(meta, sort_keys=False) + "---\n\n" + prompt
                if kind == "agent" else yaml.safe_dump({**meta, "type": "subagent", "prompt": prompt}, sort_keys=False))
     path.write_text(content, encoding="utf-8", newline="")

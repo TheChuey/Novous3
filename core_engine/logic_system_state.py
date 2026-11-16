@@ -15,7 +15,7 @@ class ProjectStateService:
             "name": "Novous Workspace",
             "version": "1.0.0",
             "description": "",
-            "default_model": "qwen2.5-coder:latest",
+            "default_model": "qwen2.5-coder:14b",
             "squad_root": "",
             "active_agent": "",
         }

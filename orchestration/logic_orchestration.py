@@ -1028,7 +1028,7 @@ class SquadRegistry:
             f"description: {json.dumps(clean_description)}",
             "type: subagent",
             "mode: agent",
-            "model: qwen2.5-coder:latest",
+            "model: qwen2.5-coder:14b",
             "environment: workspace",
             "version: 1",
             "tools:",
@@ -1425,7 +1425,7 @@ class SubAgentRunner:
         pending = ""
         usage_chunk = None
         last_flush = time.monotonic()
-        resolved_model = model or profile.model or "qwen2.5-coder:latest"
+        resolved_model = model or profile.model or "qwen2.5-coder:14b"
         num_ctx = model_profiles.effective(resolved_model)["num_ctx"]
         stream = serialized_ollama_chat(
             model=resolved_model,
@@ -1565,7 +1565,7 @@ class SubAgentRunner:
                     "Do not call or delegate to other agents. The orchestrator controls the "
                     "workflow order; complete only your assigned step using the supplied handoff."
                 )
-            model = profile.model or "qwen2.5-coder:latest"
+            model = profile.model or "qwen2.5-coder:14b"
             agent_instance = Agent(model=model, tools=[], profile=profile)
             if profile.mode == "agent" and profile.tools:
                 apply_model_limits(agent_instance, profile, model, SQUAD_PINNED_TOOLS)

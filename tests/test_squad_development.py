@@ -62,8 +62,8 @@ def test_prompt_starter_defaults_match_agent_and_subagent_scaffolds(client):
     assert agent_metadata["name"] == "[AGENT NAME]"
     assert agent_metadata["mode"] == "agent"
     assert agent_metadata["tools"] == []
-    assert "You are [AGENT NAME], a Novous workspace agent." in defaults["agent"]["prompt"]
-    assert "Serve as the [AGENT NAME] for the workspace environment." in defaults["agent"]["prompt"]
+    assert "## Role\n[ROLE]" in defaults["agent"]["prompt"]
+    assert "## Responsibilities\n[RESPONSIBILITIES]" in defaults["agent"]["prompt"]
 
     subagent_yaml = yaml.safe_load(defaults["subagent"]["yaml"])
     assert subagent_yaml["type"] == "subagent"

@@ -91,7 +91,7 @@ export const Api = {
     return get('/api/codebuilder/agents');
   },
 
-  async sendMessage(message, agentId, model = 'qwen2.5-coder:latest', sessionId = null, environment = 'workspace') {
+  async sendMessage(message, agentId, model = 'qwen2.5-coder:14b', sessionId = null, environment = 'workspace') {
     return send('POST', '/api/chat', {
       message, agent_id: agentId, model, session_id: sessionId, environment
     });
@@ -229,7 +229,7 @@ export const Api = {
   async streamMessage(
     message,
     agentId,
-    model = 'qwen2.5-coder:latest',
+    model = 'qwen2.5-coder:14b',
     sessionId = null,
     environment = 'workspace',
     onEvent = () => {},

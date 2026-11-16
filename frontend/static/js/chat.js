@@ -1153,7 +1153,7 @@ export function renderChatView(container) {
 
   let agents = [];
   let installedModels = [];
-  let currentModel = 'qwen2.5-coder:latest';
+  let currentModel = 'qwen2.5-coder:14b';
   let isSending = false;
   let isResetting = false;
   let isSavingLog = false;
@@ -1241,7 +1241,7 @@ export function renderChatView(container) {
 
   function syncModelSelect() {
     const agent = agents.find(a => a.id === agentSelect.value);
-    const stored = agent?.model || 'qwen2.5-coder:latest';
+    const stored = agent?.model || 'qwen2.5-coder:14b';
     if (installedModels.includes(stored)) {
       currentModel = stored;
       modelSelect.value = stored;

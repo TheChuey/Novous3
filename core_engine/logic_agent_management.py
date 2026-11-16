@@ -70,14 +70,14 @@ Whenever you provide or revise Python code, call `send_code_to_editor` with the 
         return agent_template.format(name=name.strip(), purpose=purpose)
 
     def render_prompt_starter_definition(self) -> dict:
-        """Render the generated Novous agent definition with an empty, editable tool list."""
+        """Render the Novous Generic Prompt as the default, editable agent definition."""
         name = "[AGENT NAME]"
         metadata = {
             "id": "[AGENT ID]",
             "name": name,
             "description": "",
             "mode": "agent",
-            "model": "qwen2.5-coder:latest",
+            "model": "qwen2.5-coder:14b",
             "squad": "",
             "tools": [],
             "environment": "workspace",
@@ -90,8 +90,16 @@ Whenever you provide or revise Python code, call `send_code_to_editor` with the 
         lines = frontmatter.splitlines()
         lines.insert(len(lines) - 1, "tools: []")
         frontmatter = "\n".join(lines) + "\n"
-        prompt = self.render_scaffold_prompt(name, mode="agent")
-        return {"prompt": frontmatter + "\n" + prompt + "\n"}
+        body = (
+            f"\n# {name}\n\n"
+            "## Role\n[ROLE]\n\n"
+            "## Purpose\n[PURPOSE]\n\n"
+            "## Responsibilities\n[RESPONSIBILITIES]\n\n"
+            "## Execution Instructions\n[EXECUTION INSTRUCTIONS]\n\n"
+            "## Boundaries\n[BOUNDARIES]\n\n"
+            "## Communication\n[COMMUNICATION]\n"
+        )
+        return {"prompt": frontmatter + body}
 
     def _validate_id(self, agent_id: str, environment: str = "workspace") -> str:
         agent_id = agent_id.strip().lower()
@@ -185,7 +193,7 @@ Whenever you provide or revise Python code, call `send_code_to_editor` with the 
             "name": name.strip(),
             "description": description.strip(),
             "mode": mode if mode in ("chat", "agent") else "chat",
-            "model": "qwen2.5-coder:latest",
+            "model": "qwen2.5-coder:14b",
             "squad": squad.strip(),
             "tools": (
                 list(self.CODEBUILDER_DEFAULT_TOOLS if environment == "codebuilder" else self.DEFAULT_TOOLS)

@@ -32,7 +32,7 @@ from editor.schemas_editor import EditorEventType
 from modelProfiles.logic_modelProfiles import model_profiles
 
 MAX_NUM_CTX = 32768
-DEFAULT_MODEL = "qwen2.5-coder:latest"
+DEFAULT_MODEL = "qwen2.5-coder:14b"
 # Tools a profile must keep when its tool cap is smaller than its tool list.
 PINNED_TOOLS = {
     "rag-presenter": ("call_subagent", "read_chat_scratchpad"),
@@ -783,7 +783,7 @@ class Agent:
     TOOL_FAILURE_KINDS = ("unknown_tool", "bad_arguments", "tool_error")
 
     def __init__(self, model: str | None, tools: List[Callable], profile: AgentProfile, session=None):
-        self.model = model or profile.model or "qwen2.5-coder:latest"
+        self.model = model or profile.model or DEFAULT_MODEL
         self.profile = profile
         self.tools = {getattr(f, "name", None) or f.__name__: f for f in (tools or [])}
         self.messages: List[dict] = []
@@ -1864,11 +1864,26 @@ class ChatService:
                 reply = agent.think(prepared_message)
             except RequiredDelegationError as exc:
                 reply = f"[engine] Could not complete required agent setup: {exc}"
+            except ollama.ResponseError as exc:
+                agent.note_failure("model_error", "", str(exc))
+                attempted = model or profile.model or DEFAULT_MODEL
+                if getattr(exc, "status_code", None) == 404:
+                    pulled = self.list_models().get("models") or []
+                    available = ", ".join(pulled) if pulled else "(none found — is Ollama running?)"
+                    reply = (f"[engine] Model '{attempted}' is not installed in Ollama.\n"
+                             f"Pulled models: {available}\n"
+                             f"Fix this agent's `model:` field to match one of the pulled tags above, "
+                             f"or run `ollama pull {attempted}`.")
+                else:
+                    reply = (f"[engine] Could not reach the model runtime: {exc}\n"
+                             f"Start Ollama (e.g. `ollama serve`) and pull the model `{attempted}`, then retry.")
+                if agent.messages and agent.messages[-1].get("role") == "user":
+                    agent.messages.pop()
             except Exception as exc:  # Ollama down / model missing -> graceful error reply
                 agent.note_failure("model_error", "", str(exc))
                 reply = (f"[engine] Could not reach the model runtime: {exc}\n"
                          f"Start Ollama (e.g. `ollama serve`) and pull the model "
-                         f"`{model or profile.model or 'qwen2.5-coder:latest'}`, then retry.")
+                         f"`{model or profile.model or DEFAULT_MODEL}`, then retry.")
                 if agent.messages and agent.messages[-1].get("role") == "user":
                     agent.messages.pop()
         finally:
@@ -1930,7 +1945,7 @@ class ChatService:
             error = str(exc)
         return {
             "models": sorted(models),
-            "default": "qwen2.5-coder:latest",
+            "default": DEFAULT_MODEL,
             "error": error if not models else None,
         }
 

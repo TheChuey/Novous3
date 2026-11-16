@@ -5,7 +5,7 @@ Open **Squad Development** in the application. The Chat Agent remains available 
 prompt-writing conversations.
 
 **Prompt Starter** opens a separate editor containing the starter definition.
-Its **Novous Agent** default includes the generated YAML frontmatter and prompt;
+Its **Novous Generic Prompt** default includes the generated YAML frontmatter and prompt;
 the sub-agent editor edits its generated prompt body while creation writes the
 standard sub-agent YAML metadata and tools. **Add tools** opens the categorized,
 filterable multi-select tool chooser used by the Editor Prompt Library. Selected
