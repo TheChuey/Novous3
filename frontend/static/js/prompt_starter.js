@@ -158,13 +158,11 @@ function normalizeAgentFrontmatterId(content, agentId) {
   return lines.join('\n');
 }
 
-export function createPromptStarter(container) {
+export function createPromptStarter(container, { embed = false } = {}) {
   const host = document.createElement('div');
-  host.innerHTML = `<dialog class="sd-starter-dialog" aria-labelledby="sd-starter-title">
-    <header class="sd-starter-head">
-      <div><h2 id="sd-starter-title">Prompt Starter</h2>
-      <p class="small text-muted">Edit the Markdown directly. Select a tool or sub-agent in the text, and fill the other variables on the right.</p></div>
-      <div class="sd-starter-window-controls">
+  const rootTag = embed ? 'div' : 'dialog';
+  const rootClass = embed ? 'sd-starter-embed' : 'sd-starter-dialog';
+  const windowControls = embed ? '' : `<div class="sd-starter-window-controls">
         <button type="button" class="sd-wc-btn" data-starter="popout" title="Pop out to separate window">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 2h5v5"/><path d="M14 2L8 8"/><path d="M12 9v4a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1h4"/></svg>
         </button>
@@ -177,12 +175,17 @@ export function createPromptStarter(container) {
         <button type="button" class="sd-wc-btn sd-wc-close" data-starter="close" title="Close">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
         </button>
-      </div>
+      </div>`;
+  host.innerHTML = `<${rootTag} class="${rootClass}" aria-labelledby="sd-starter-title">
+    <header class="sd-starter-head">
+      <div><h2 id="sd-starter-title">Prompt Starter</h2>
+      <p class="small text-muted">Edit the Markdown directly. Select a tool or sub-agent in the text, and fill the other variables on the right.</p></div>
+      ${windowControls}
     </header>
     <div class="sd-starter-template-bar">
       <label class="small" for="sd-starter-tpl-select">Template:</label>
       <select id="sd-starter-tpl-select" class="form-select form-select-sm" data-starter="tpl-select">
-        <option value="agent">Default (Novous Agent)</option>
+        <option value="agent">Default (Novous Generic Prompt)</option>
         <option value="subagent">Default (Novous Sub-agent YAML)</option>
       </select>
       <button type="button" class="btn btn-sm" data-starter="tpl-save" title="Save current editor as a reusable template">Save as Template</button>
@@ -302,6 +305,8 @@ export function createPromptStarter(container) {
           <div class="workspace-save-actions">
             <button type="button" class="btn btn-sm" data-starter="ai-copy-finished">Copy prompt</button>
             <button type="button" class="btn btn-sm" data-starter="ai-save-finished">Save prompt (.md)</button>
+            <button type="button" class="btn btn-sm btn-primary" data-starter="ai-insert-finished"
+                    title="Replace each filled variable's placeholder in the Markdown editor with its generated text">Add to prompt</button>
             <span class="spacer"></span>
             <button type="button" class="btn" data-starter="ai-clear-restart"
                     title="Clear the generated variables (the seed stays) and run the chain again">Clear &amp; restart</button>
@@ -359,9 +364,15 @@ export function createPromptStarter(container) {
       <button type="button" class="btn btn-sm btn-primary" data-starter="create-squad" disabled>Create New Squad</button>
       <span class="small" role="status" data-starter="status"></span>
     </footer>
-  </dialog>`;
+  </${rootTag}>`;
   const dialog = host.firstElementChild;
   container.append(dialog);
+  // Embedded panels have no modal/backdrop semantics or window chrome; these
+  // helpers let the rest of the module call the same show/close/open points
+  // regardless of whether `dialog` is a real <dialog> or a plain <div>.
+  function showHost() { if (!embed) dialog.showModal(); }
+  function closeHost() { if (!embed) dialog.close(); }
+  function isHostOpen() { return embed || dialog.open; }
   const fields = dialog.querySelector('[data-starter="fields"]');
   const editor = dialog.querySelector('[data-starter="editor"]');
   const picker = dialog.querySelector('[data-starter="picker"]');
@@ -480,7 +491,7 @@ export function createPromptStarter(container) {
   }
 
   function doMinimize() {
-    dialog.close();
+    closeHost();
     dialog.classList.add('sd-starter-minimized');
     let bar = container.querySelector('.sd-starter-minimized-bar');
     if (!bar) {
@@ -490,7 +501,7 @@ export function createPromptStarter(container) {
       bar.querySelector('button').addEventListener('click', () => {
         bar.remove();
         dialog.classList.remove('sd-starter-minimized');
-        dialog.showModal();
+        showHost();
       });
       container.append(bar);
     }
@@ -509,7 +520,7 @@ export function createPromptStarter(container) {
       showError(new Error('Could not open pop-out window. Check your browser pop-up blocker settings.'));
       return;
     }
-    dialog.close();
+    closeHost();
 
     const doc = popoutWindow.document;
     doc.title = 'Prompt Starter — Novous';
@@ -534,9 +545,9 @@ export function createPromptStarter(container) {
     doc.body.append(wrapper);
 
     dialog.classList.add('sd-starter-popout-mode');
-    dialog.close();
+    closeHost();
     wrapper.append(dialog);
-    dialog.showModal();
+    showHost();
 
     const popoutControls = dialog.querySelector('.sd-starter-window-controls');
     const popinBtn = doc.createElement('button');
@@ -557,7 +568,7 @@ export function createPromptStarter(container) {
 
   function doPopin() {
     if (!popoutWindow) return;
-    dialog.close();
+    closeHost();
     dialog.classList.remove('sd-starter-popout-mode');
     const popinBtn = dialog.querySelector('[data-starter="popin"]');
     if (popinBtn) popinBtn.remove();
@@ -572,7 +583,7 @@ export function createPromptStarter(container) {
       dialog.style.removeProperty('border-radius');
       preMaxRect = null;
     }
-    dialog.showModal();
+    showHost();
   }
 
   function showError(err) { error.textContent = err.message || String(err); }
@@ -599,6 +610,15 @@ export function createPromptStarter(container) {
     return marker ? text.slice(0, marker.index).replace(/\s+$/, '') : text;
   }
   function finishedPrompt() { return renderStarter(editorText(), values); }
+  // Bakes every filled, non-tool variable's text directly into the editor, leaving tool
+  // placeholders (TOOL N / TOOL N <PARAM>) as live tokens so tool management keeps working.
+  function bakeFilledVariables(text) {
+    return text.replace(VARIABLE, (match, name) => {
+      if (isToolPickerVariable(name) || isToolParameterVariable(name)) return match;
+      const value = (values[name] || values[name.replace(/-/g, ' ')])?.trim();
+      return value || match;
+    });
+  }
   function withToolInstructions(body, instructions) {
     return `${body.replace(/\s+$/, '')}\n\n## Available Tools\n\n${instructions}\n`;
   }
@@ -917,8 +937,11 @@ export function createPromptStarter(container) {
   function aiShowError(err) { aiErrorLabel.textContent = err ? (err.message || String(err)) : ''; }
   function renderAiContext() {
     const target = aiTargetSelect.value;
+    // Selected tools (bare TOOL N) are useful context for writing role/responsibilities text;
+    // their injected parameter placeholders (TOOL N <PARAM>) are just documentation tokens and
+    // would only add noise, so they're left out here.
     const entries = Object.entries(values)
-      .filter(([name, value]) => name !== target && value?.trim() && !isToolPickerVariable(name));
+      .filter(([name, value]) => name !== target && value?.trim() && !isToolParameterVariable(name));
     aiContextWrap.hidden = !entries.length;
     aiContextList.replaceChildren(...entries.map(([name, value]) => {
       const label = document.createElement('label');
@@ -965,7 +988,8 @@ export function createPromptStarter(container) {
     }
   }
   function openAiDialog(targetName = '', prePrompt = null) {
-    const variables = starterVariables(editorText()).filter(name => !isCatalogVariable(name));
+    const variables = starterVariables(editorText())
+      .filter(name => !isCatalogVariable(name) && !isToolParameterVariable(name));
     if (!variables.length) {
       showError(new Error('Add a variable placeholder to the prompt before using AI fill.'));
       return;
@@ -1088,7 +1112,8 @@ export function createPromptStarter(container) {
     aiAcceptNextBtn.hidden = false;
   }
   function startChainFill() {
-    const variables = starterVariables(editorText()).filter(name => !isCatalogVariable(name));
+    const variables = starterVariables(editorText())
+      .filter(name => !isCatalogVariable(name) && !isToolParameterVariable(name));
     const queue = variables.filter(name => !values[name]?.trim() && !CHAIN_SEED_VARIABLES.includes(name));
     if (!queue.length) {
       showError(new Error('All variables are already filled; nothing to chain-fill.'));
@@ -1240,7 +1265,7 @@ export function createPromptStarter(container) {
   // --- Template selector ---
   function renderTemplateSelect() {
     const current = tplSelect.value;
-    tplSelect.innerHTML = `<option value="agent">Default (Novous Agent)</option>`
+    tplSelect.innerHTML = `<option value="agent">Default (Novous Generic Prompt)</option>`
       + `<option value="subagent">Default (Novous Sub-agent YAML)</option>`
       + templates.map(t => `<option value="template:${esc(t.name)}">${esc(t.name)}</option>`).join('');
     if (current === 'agent' || current === 'subagent'
@@ -1384,13 +1409,15 @@ export function createPromptStarter(container) {
     });
   }
 
-  dialog.querySelector('.sd-starter-head').addEventListener('dblclick', e => {
-    if (e.target.closest('.sd-starter-window-controls')) return;
-    toggleMaximize();
-  });
+  // Window chrome (maximize/minimize/popout and edge-resize) only applies to the
+  // floating modal dialog; an embedded panel just fills its host element.
+  if (!embed) {
+    dialog.querySelector('.sd-starter-head').addEventListener('dblclick', e => {
+      if (e.target.closest('.sd-starter-window-controls')) return;
+      toggleMaximize();
+    });
 
-  // --- Dialog window resize from any edge/corner ---
-  {
+    // --- Dialog window resize from any edge/corner ---
     const EDGES = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
     for (const edge of EDGES) {
       const handle = document.createElement('div');
@@ -1582,7 +1609,7 @@ export function createPromptStarter(container) {
     applyTemplate(tplSelect.value);
     status.textContent = tplSelect.value.startsWith('template:')
       ? `Loaded template: ${tplSelect.value.slice(9)}`
-      : `Loaded ${tplSelect.value === 'subagent' ? 'Novous sub-agent YAML' : 'Novous Agent'} default.`;
+      : `Loaded ${tplSelect.value === 'subagent' ? 'Novous sub-agent YAML' : 'Novous Generic Prompt'} default.`;
   });
 
   // --- Auto-fill ID from name ---
@@ -1608,7 +1635,7 @@ export function createPromptStarter(container) {
       createSquadButton.hidden = false;
       applyToEditorButton.hidden = true;
       if (maximized) { maximized = false; dialog.classList.remove('sd-starter-maximized'); dialog.style.borderRadius = ''; preMaxRect = null; }
-      dialog.close();
+      closeHost();
       return;
     }
     if (action === 'minimize') { doMinimize(); return; }
@@ -1694,10 +1721,22 @@ export function createPromptStarter(container) {
       } finally { button.disabled = false; }
       return;
     }
+    if (action === 'ai-insert-finished') {
+      // Bake every currently-filled variable's text directly into the Markdown editor,
+      // in one step, instead of leaving it sitting only in the Variables panel. Tool
+      // placeholders are left alone so the tool picker keeps working on them.
+      const scrollTop = editor.scrollTop;
+      renderEditor(bakeFilledVariables(editorText()));
+      editor.scrollTop = scrollTop;
+      renderFields();
+      aiStatus.textContent = 'Added each filled variable to the prompt.';
+      status.textContent = 'Added each filled variable to the prompt.';
+      return;
+    }
     if (action === 'ai-clear-restart') {
       if (!confirm('Clear the generated variables and run the chain again? The seed (agent name, ID, description) is kept.')) return;
       starterVariables(editorText())
-        .filter(name => !isCatalogVariable(name) && !CHAIN_SEED_VARIABLES.includes(name))
+        .filter(name => !isCatalogVariable(name) && !isToolParameterVariable(name) && !CHAIN_SEED_VARIABLES.includes(name))
         .forEach(name => { delete values[name]; updateTokens(name); });
       variablesKey = '';
       renderFields();
@@ -1768,7 +1807,7 @@ export function createPromptStarter(container) {
     }
     if (action === 'save-all-choices') {
       const toSave = Object.entries(values)
-        .filter(([name, val]) => val?.trim() && !isCatalogVariable(name));
+        .filter(([name, val]) => val?.trim() && !isCatalogVariable(name) && !isToolParameterVariable(name));
       if (!toSave.length) { showError(new Error('No variable values to save.')); return; }
       button.disabled = true;
       status.textContent = 'Saving…';
@@ -1927,7 +1966,7 @@ export function createPromptStarter(container) {
           await Api.setAgentTools('prompt', applyTarget.agentId, agentTools, agentToolMode);
         }
         status.textContent = '';
-        dialog.close();
+        closeHost();
         applyTarget.onComplete();
       } catch (err) {
         if (!disposed) showError(err);
@@ -2140,7 +2179,7 @@ export function createPromptStarter(container) {
         } catch (err) {
           if (!disposed) {
             showError(err);
-            dialog.showModal();
+            showHost();
           }
           return;
         }
@@ -2153,12 +2192,12 @@ export function createPromptStarter(container) {
         updateTokens('AGENT NAME');
         updateTokens('AGENT ID');
       }
-      dialog.showModal();
+      showHost();
       try {
         const [catalog, agents, saved] = await Promise.all([
           Api.getTools(), Api.getOrchestrationCatalog(), choiceRequest('GET'),
         ]);
-        if (disposed || !dialog.open) return;
+        if (disposed || !isHostOpen()) return;
         tools = catalog.tools || [];
         subagents = agents.subagents || [];
         choices = saved;

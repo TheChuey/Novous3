@@ -1,7 +1,7 @@
 import { Api } from './api.js';
 import { renderEditorView } from './editor.js';
 import { renderChatView } from './chat.js';
-import { renderPromptCreationView } from './prompt_creation.js';
+import { leavePromptCreationView, renderPromptCreationView } from './prompt_creation.js';
 import { renderCodeBuilderView } from './codebuilder/codebuilder.js';
 import { AppState, esc, refreshAgents, refreshSquads, updateHealthBadge } from './shell.js';
 import { renderWorkspaceView } from './views/workspace_view.js';
@@ -39,6 +39,7 @@ export function switchTab(tab, payload = null) {
   tab = TAB_ALIASES[tab] || tab;
   if (!Object.prototype.hasOwnProperty.call(views, tab)) tab = 'squads';
   if (AppState.activeTab === 'squad-development' && !leaveSquadDevelopment()) return;
+  if (AppState.activeTab === 'prompt-creation') leavePromptCreationView();
   if (tab !== 'runs') stopRunStream();
   AppState.activeTab = tab;
   document.querySelectorAll('.nav-btn').forEach(b =>

@@ -886,6 +886,19 @@ body.is-resizing { cursor: col-resize; user-select: none; }
 /* --- Testing -------------------------------------------------------------- */
 
 .prompt-creation-flow { display: flex; flex-direction: column; }
+/* Chat Agent | Prompt Starter: resizable columns, same mechanism as the Chat Console. */
+.pc-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--starter-gutter, 10px) var(--starter-w, 440px);
+  grid-template-rows: minmax(0, 1fr);
+  height: calc(100vh - 110px);
+  min-height: 0;
+}
+.pc-layout > * { min-height: 0; overflow: hidden; }
+.pc-layout.starter-collapsed { --starter-w: 0px; --starter-gutter: 18px; }
+.pc-layout.starter-collapsed .pc-starter-panel { visibility: hidden; border: 0; }
+.pc-layout.starter-hiding .pc-starter-panel { opacity: 0.35; }
+.pc-starter-panel { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .prompt-library-create {
   display: grid;
   gap: 0.4rem;
@@ -935,7 +948,7 @@ body.is-resizing { cursor: col-resize; user-select: none; }
 .prompt-chat-card {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 145px);
+  height: 100%;
   min-height: 390px;
   max-height: none;
   padding: 0;
@@ -1239,6 +1252,12 @@ body.is-resizing { cursor: col-resize; user-select: none; }
   .chat-file-sidebar { min-height: 260px; max-height: 40vh; }
   .chat-main { order: -1; height: calc(100vh - 150px); min-height: 420px; }
   .test-panel { width: 100%; min-width: 0; min-height: 360px; border-left: 0; border-top: 1px solid var(--border-color); }
+  .pc-layout { grid-template-columns: 1fr; grid-template-rows: none; height: auto; gap: 0.75rem; }
+  .pc-layout > * { overflow: visible; }
+  .pc-layout > .panel-resizer { display: none; }
+  .pc-layout.starter-collapsed .pc-starter-panel { visibility: visible; border: 1px solid var(--border-color); }
+  .prompt-chat-card { height: calc(100vh - 150px); min-height: 420px; }
+  .pc-starter-panel { min-height: 480px; }
   .messages-scroll { min-height: 0; }
   .chat-input-bar { flex-shrink: 0; }
   .tool-workbench-grid { grid-template-columns: 1fr; }

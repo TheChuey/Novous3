@@ -1,6 +1,9 @@
 import { Api } from './api.js';
 import { appendMarkdown } from './markdown.js';
 import { navigate } from './shell.js';
+import { createPromptStarter } from './prompt_starter.js';
+import { iconSvg } from './icons.js';
+import { setupSidePanels } from './side_panels.js';
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({
@@ -8,46 +11,79 @@ function esc(value) {
   }[c]));
 }
 
+let activeStarter = null;
+
+export function leavePromptCreationView() {
+  activeStarter?.dispose();
+  activeStarter = null;
+}
+
 export function renderPromptCreationView(container) {
   container.innerHTML = `
     <div class="prompt-creation-flow">
-      <section class="card prompt-chat-card" aria-labelledby="pc-chat-title">
-        <div class="codebuilder-chat-heading">
-          <h2 id="pc-chat-title">Chat Agent</h2>
-          <span id="pc-chat-status" class="text-muted small">Loading agents…</span>
-          <button type="button" class="btn btn-sm" id="pc-squad-development">Squad Development</button>
-          <span class="prompt-chat-font-controls" role="group" aria-label="Chat text size">
-            <button type="button" class="btn btn-sm" id="pc-font-smaller" title="Smaller text" aria-label="Decrease chat text size">A−</button>
-            <button type="button" class="btn btn-sm" id="pc-font-larger" title="Larger text" aria-label="Increase chat text size">A+</button>
-          </span>
-        </div>
-        <p class="text-muted small prompt-chat-note">
-          Chat with an available agent to clarify and shape your prompt. Responses use cleaner Markdown formatting when possible.
-        </p>
-        <div id="pc-chat-messages" class="codebuilder-chat-messages" aria-live="polite">
-          <div class="codebuilder-chat-message system">Describe the prompt you want to create, and we’ll work through it together.</div>
-        </div>
-        <form id="pc-chat-form" class="codebuilder-chat-form">
-          <label class="codebuilder-model-picker">
-            <span class="text-muted small">Agent</span>
-            <select id="pc-chat-agent" class="form-select" aria-label="Choose chat agent">
-              <option value="">Loading agents…</option>
-            </select>
-            <span class="text-muted small">Model</span>
-            <select id="pc-chat-model" class="form-select" aria-label="Choose model">
-              <option value="">Loading models…</option>
-            </select>
-          </label>
-          <textarea id="pc-chat-input" class="form-input" rows="3"
-                    placeholder="What should this prompt help its agent do?"
-                    aria-label="Message to chat agent"></textarea>
-          <div class="codebuilder-chat-actions">
-            <button id="pc-chat-clear" class="btn btn-sm" type="button">Clear</button>
-            <button class="btn btn-primary" type="submit" disabled>Send</button>
+      <div class="pc-layout">
+        <section class="card prompt-chat-card" aria-labelledby="pc-chat-title">
+          <div class="codebuilder-chat-heading">
+            <h2 id="pc-chat-title">Chat Agent</h2>
+            <span id="pc-chat-status" class="text-muted small">Loading agents…</span>
+            <button type="button" class="btn btn-sm" id="pc-squad-development">Squad Development</button>
+            <span class="prompt-chat-font-controls" role="group" aria-label="Chat text size">
+              <button type="button" class="btn btn-sm" id="pc-font-smaller" title="Smaller text" aria-label="Decrease chat text size">A−</button>
+              <button type="button" class="btn btn-sm" id="pc-font-larger" title="Larger text" aria-label="Increase chat text size">A+</button>
+            </span>
           </div>
-        </form>
-      </section>
+          <p class="text-muted small prompt-chat-note">
+            Chat with an available agent to clarify and shape your prompt. Responses use cleaner Markdown formatting when possible.
+          </p>
+          <div id="pc-chat-messages" class="codebuilder-chat-messages" aria-live="polite">
+            <div class="codebuilder-chat-message system">Describe the prompt you want to create, and we’ll work through it together.</div>
+          </div>
+          <form id="pc-chat-form" class="codebuilder-chat-form">
+            <label class="codebuilder-model-picker">
+              <span class="text-muted small">Agent</span>
+              <select id="pc-chat-agent" class="form-select" aria-label="Choose chat agent">
+                <option value="">Loading agents…</option>
+              </select>
+              <span class="text-muted small">Model</span>
+              <select id="pc-chat-model" class="form-select" aria-label="Choose model">
+                <option value="">Loading models…</option>
+              </select>
+            </label>
+            <textarea id="pc-chat-input" class="form-input" rows="3"
+                      placeholder="What should this prompt help its agent do?"
+                      aria-label="Message to chat agent"></textarea>
+            <div class="codebuilder-chat-actions">
+              <button id="pc-chat-clear" class="btn btn-sm" type="button">Clear</button>
+              <button class="btn btn-primary" type="submit" disabled>Send</button>
+            </div>
+          </form>
+        </section>
+
+        <div class="panel-resizer" data-resize="starter" role="separator" tabindex="0"
+             aria-orientation="vertical" aria-label="Resize Prompt Starter panel"><span class="cb-grip">${iconSvg('chevron-left', 14)}</span></div>
+
+        <aside class="pc-starter-panel" aria-label="Prompt Starter" id="pc-starter-panel"></aside>
+      </div>
     </div>`;
+
+  const pcLayout = container.querySelector('.pc-layout');
+  const starterPanel = container.querySelector('#pc-starter-panel');
+  const starter = createPromptStarter(starterPanel, { embed: true });
+  activeStarter = starter;
+  starter.open();
+  setupSidePanels({
+    shell: pcLayout,
+    layout: pcLayout,
+    prefsKey: 'novous2.prompt-creation.',
+    centerMin: 360,
+    panels: {
+      starter: {
+        var: '--starter-w', edge: 'right', min: 320, hideBelow: 200, default: 440, label: 'Prompt Starter',
+        resizer: container.querySelector('.panel-resizer[data-resize="starter"]'),
+        toggle: null,
+      },
+    },
+  });
 
   const chatAgentSel = container.querySelector('#pc-chat-agent');
   const chatModelSel = container.querySelector('#pc-chat-model');
