@@ -62,6 +62,25 @@ added through the Tool Workbench are steered toward the same convention — see
 
 Repeated tool-call detection is not currently part of the squad workflow.
 
+A system prompt's instructions lose influence as a chat session's message
+history grows, and small local models can stop following a tool-use rule
+after a few turns even though the rule is still present in the (now distant)
+system message. An agent definition can set `remind_every_turn: true` plus a
+`tool_reminder: "..."` string in its frontmatter (plain top-level keys, next
+to `max_tool_rounds`) to have that reminder text appended to the outgoing
+message on every turn, not just read once at session start.
+`ChatService.prepare_agent_message` (`core_engine/logic_core_engine.py`)
+applies this for any agent whose profile sets it, generalizing the
+hardcoded RAG-retrieval handoff that already worked the same way for
+`rag-presenter`/`knowledge`. Both chat entry points (`/api/chat` and
+`/api/chat/stream`) call this before every turn, and the agent definition is
+re-read from disk on every turn, so toggling the field in an agent's `.md`
+file takes effect on the next message with no restart. There is no settings
+UI for this yet; turn it on or off by hand-editing the agent's frontmatter,
+the same way `max_tool_rounds` is set today. It does not apply to sub-agents
+run through squads, which call `Agent.think` directly and bypass
+`prepare_agent_message`.
+
 ## Agent creation
 
 Agents created through Prompt Starter (or the Squad Development dialog) are

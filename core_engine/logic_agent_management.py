@@ -116,7 +116,8 @@ Whenever you provide or revise Python code, call `send_code_to_editor` with the 
 
     def _render_frontmatter(self, meta: dict) -> str:
         lines = ["---"]
-        for key in ["id", "name", "description", "mode", "model", "squad", "environment", "environment_name", "version"]:
+        for key in ["id", "name", "description", "mode", "model", "squad", "environment", "environment_name",
+                    "version", "max_tool_rounds", "remind_every_turn", "tool_reminder"]:
             if key not in meta:
                 continue
             value = meta[key]

@@ -6,7 +6,10 @@ from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from core_engine.logic_core_engine import SessionNotFoundError, agent_library, chat_service, questionnaire
+from core_engine.logic_core_engine import (
+    SessionNotFoundError, agent_library, chat_service, questionnaire,
+    set_current_session_id,
+)
 from core_engine.logic_agent_management import agent_management
 from core_engine.logic_system_state import project_state, system_health
 from core_engine.schemas_core_engine import (
@@ -164,13 +167,26 @@ def api_chat_stream(req: ChatRequest):
         return f"data: {json.dumps(payload)}\n\n"
 
     def events():
+        # Starlette iterates a sync generator for StreamingResponse by dispatching each
+        # next() call through anyio.to_thread.run_sync, which does not guarantee the same
+        # worker thread across calls. A ContextVar set on one thread is invisible once
+        # resumption moves to another, so the session id is re-set on every resumption
+        # that could trigger a tool call, instead of once at the top.
         agent.tool_events = []
         try:
+            set_current_session_id(session_key)
             prepared_message = chat_service.prepare_agent_message(agent, profile, message)
             for event in agent.tool_events:
                 chat_service.publish_tool_event(event, session_key)
                 yield sse({"type": "tool_event", "event": event})
-            for item in agent.think_stream(prepared_message):
+
+            stream = agent.think_stream(prepared_message)
+            while True:
+                set_current_session_id(session_key)
+                try:
+                    item = next(stream)
+                except StopIteration:
+                    break
                 if item["type"] == "tool_event":
                     chat_service.publish_tool_event(item["event"], session_key)
                 elif item["type"] == "done":

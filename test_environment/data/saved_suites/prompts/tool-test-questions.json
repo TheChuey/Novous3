@@ -1,0 +1,32 @@
+{
+  "id": "tool-test-questions",
+  "name": "tool test questions",
+  "category": "prompts",
+  "description": "",
+  "agent_id": "thinke01",
+  "model": "qwen2.5-coder:14b",
+  "steps": [
+    {
+      "text": "how many planets in the solar system?",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "what are the states in the usa?",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "why is there laws for building manfucaturing?",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "who are the presidents of the usa?",
+      "enabled": true,
+      "expect": null
+    }
+  ],
+  "created": "2026-11-18T10:01:57+00:00",
+  "updated": "2026-11-18T10:01:57+00:00"
+}

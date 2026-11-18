@@ -360,6 +360,8 @@ class AgentLibrary:
                 **sections,
                 **({"max_tool_rounds": meta["max_tool_rounds"]} if "max_tool_rounds" in meta else {}),
                 **({"pinned_tools": [str(tool) for tool in meta["pinned_tools"]]} if meta.get("pinned_tools") else {}),
+                **({"remind_every_turn": bool(meta["remind_every_turn"])} if "remind_every_turn" in meta else {}),
+                **({"tool_reminder": str(meta["tool_reminder"])} if "tool_reminder" in meta else {}),
             },
         )
 
@@ -1794,46 +1796,50 @@ class ChatService:
                 "tool_health": self.agent_health(agent)}
 
     def prepare_agent_message(self, agent: Agent, profile: AgentProfile, message: str) -> str:
-        if profile.id not in FORCED_RETRIEVAL_AGENTS:
-            return message
+        if profile.id in FORCED_RETRIEVAL_AGENTS:
+            required_tools = ("call_subagent", "read_chat_scratchpad")
+            missing_tools = [name for name in required_tools if name not in agent.tools]
+            if missing_tools:
+                raise RequiredDelegationError(
+                    f"{profile.name or profile.id} is missing required tools: " + ", ".join(missing_tools)
+                )
 
-        required_tools = ("call_subagent", "read_chat_scratchpad")
-        missing_tools = [name for name in required_tools if name not in agent.tools]
-        if missing_tools:
-            raise RequiredDelegationError(
-                f"{profile.name or profile.id} is missing required tools: " + ", ".join(missing_tools)
-            )
-
-        handoff = {
-            "subagent_id": "rag-retriever",
-            "task_prompt": message,
-            "parameters": "{}",
-        }
-        retrieval_result = agent.act(
-            {"function": {"name": "call_subagent", "arguments": handoff}},
-            origin="orchestrator",
-        )
-        if str(retrieval_result).startswith("Error executing tool 'call_subagent'"):
-            scratchpad_result = "Not read because the required sub-agent call failed."
-        else:
-            scratchpad_result = agent.act(
-                {
-                    "function": {
-                        "name": "read_chat_scratchpad",
-                        "arguments": {"agent": "rag-retriever", "title": "result", "index": "0"},
-                    }
-                },
+            handoff = {
+                "subagent_id": "rag-retriever",
+                "task_prompt": message,
+                "parameters": "{}",
+            }
+            retrieval_result = agent.act(
+                {"function": {"name": "call_subagent", "arguments": handoff}},
                 origin="orchestrator",
             )
+            if str(retrieval_result).startswith("Error executing tool 'call_subagent'"):
+                scratchpad_result = "Not read because the required sub-agent call failed."
+            else:
+                scratchpad_result = agent.act(
+                    {
+                        "function": {
+                            "name": "read_chat_scratchpad",
+                            "arguments": {"agent": "rag-retriever", "title": "result", "index": "0"},
+                        }
+                    },
+                    origin="orchestrator",
+                )
 
-        return (
-            f"{message}\n\n"
-            "Required RAG retrieval handoff (already executed for this turn). "
-            "Do not invoke the sub-agent again. Treat errors or missing evidence "
-            "as retrieval failures and report them honestly.\n"
-            f"call_subagent result:\n{retrieval_result}\n"
-            f"read_chat_scratchpad(agent=rag-retriever, title=result):\n{scratchpad_result}"
-        )
+            message = (
+                f"{message}\n\n"
+                "Required RAG retrieval handoff (already executed for this turn). "
+                "Do not invoke the sub-agent again. Treat errors or missing evidence "
+                "as retrieval failures and report them honestly.\n"
+                f"call_subagent result:\n{retrieval_result}\n"
+                f"read_chat_scratchpad(agent=rag-retriever, title=result):\n{scratchpad_result}"
+            )
+
+        reminder = str(profile.extras.get("tool_reminder") or "").strip()
+        if profile.extras.get("remind_every_turn") and reminder:
+            message = f"{message}\n\n[Reminder] {reminder}"
+
+        return message
 
     def run_single_agent(self, agent_id: str, message: str, model: str | None = None,
                          session_id: str | None = None,

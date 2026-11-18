@@ -16,6 +16,9 @@ AI DESCRIPTION AGENT ID:
 - The agent's unique file id (lowercase, hyphenated).
 AI DESCRIPTION DESCRIPTION:
 - Description of the agents Job
+AI DESCRIPTION EXECUTION INSTRUCTIONS:
+- Step-by-step instructions the agent follows when performing its task. if tools and
+  subagent are in the context add those to the execution instructions
 AI DESCRIPTION ROLE:
 - '## Role Define who the agent is, its specialized identity, and the function it
   is expected to perform. Explain what kind of agent it is and the role it fulfills.'
@@ -24,6 +27,9 @@ AI PRE-PROMPT AGENT ID:
   \ per point \nDescribing the Variable\nFormat it in a Markdown file"
 AI PRE-PROMPT DESCRIPTION:
 - Write one sentence describing the agents Job 20 to 50 words with verbs
+AI PRE-PROMPT EXECUTION INSTRUCTIONS:
+- 'Write the Execution Instructions section: a short numbered list of steps the agent
+  follows when performing its task.'
 AI PRE-PROMPT ROLE:
 - "Prompt for the agent \nDescribe the variable in detail \nList only five points,\
   \ no more than 10 words per point \nDescribing the Variable\nFormat it in a Markdown\
@@ -110,8 +116,21 @@ EXECUTION INSTRUCTIONS:
 
   5. Generate meaningful, actionable insights derived from the analysis to aid in
   informed decision-making.'
-- '6. After completing the analysis, call write_chat_scratchpad (agent: "Thinker",
-  title: "result") to save your conclusions, then verify with read_chat_scratchpad.'
+- '6. Call write_chat_scratchpad exactly once, with all three arguments set every
+  time: agent set to "Thinker", title set to "result", and content set to the actual
+  conclusions you wrote in steps 1-5, in your own words. Never leave out title. Never
+  copy these instructions into content — content must be your own analysis text,
+  not a description of what to do.
+
+  7. Call read_chat_scratchpad exactly once, with agent="Thinker", title="result",
+  to confirm.
+
+  8. Once that read succeeds, stop calling tools for this question — give your final
+  answer as plain text to the user. Never call either scratchpad tool more than once
+  for this question. For every new question the user asks, repeat steps 1-8 from
+  the start and attempt write_chat_scratchpad and read_chat_scratchpad again — even
+  if a tool call failed or a previous question''s call already used up its one attempt.
+  A past failure never excuses skipping the tools on a later question.'
 GOAL:
 - Summarize the problem in one sentence. About 25 words that correctly define the
   nature of the statement or questions being asked
