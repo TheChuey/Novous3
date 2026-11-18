@@ -463,22 +463,31 @@
 .sd-starter-tool-picker-panel .editor-tools-list { flex: 1 1 auto; }
 .sd-starter-tool-picker-panel .workspace-save-actions { justify-content: flex-end; margin-top: .25rem; }
 .sd-starter-field-actions { display: flex; gap: .4rem; }
-.sd-starter-ai-dialog { width: min(640px, 92vw); max-height: 88vh; padding: 0; overflow: hidden; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-card); color: var(--text-main); }
+.sd-starter-ai-dialog { width: min(760px, 92vw); max-height: 88vh; padding: 0; overflow: hidden; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-card); color: var(--text-main); }
 .sd-starter-ai-dialog[open] { display: flex; }
 .sd-starter-ai-dialog::backdrop { background: rgba(0, 0, 0, .72); }
 .sd-starter-ai-panel { display: flex; flex: 1; flex-direction: column; gap: .6rem; min-height: 0; padding: 1rem; overflow: auto; }
+.sd-starter-ai-progress { display: flex; flex-direction: column; gap: .3rem; padding: .4rem .1rem .6rem; border-bottom: 1px solid var(--border-color); }
+.sd-starter-ai-progress[hidden] { display: none; }
+.sd-starter-ai-progress-row { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; }
+.sd-starter-ai-progress-bar { width: 100%; height: 8px; accent-color: var(--primary); }
 .sd-starter-ai-pane { display: flex; flex-direction: column; gap: .6rem; }
 .sd-starter-ai-pane[hidden] { display: none; }
 .sd-starter-ai-pane > label.small { display: flex; flex-direction: column; gap: .25rem; }
+.sd-starter-ai-section { border: 1px solid var(--border-color); border-radius: 6px; padding: .6rem .75rem; margin: 0; display: flex; flex-direction: column; gap: .5rem; }
+.sd-starter-ai-section > legend { padding: 0 .3rem; font-size: .85rem; font-weight: 600; color: var(--text-muted); }
+.sd-starter-ai-context-label { margin: 0 0 .15rem; font-weight: 600; }
 .sd-starter-ai-context { display: flex; flex-direction: column; gap: .35rem; max-height: 180px; overflow: auto; padding: .5rem; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-primary); }
 .sd-starter-ai-context label { display: flex; align-items: baseline; gap: .5rem; cursor: pointer; }
 .sd-starter-ai-context label span { display: flex; flex-direction: column; min-width: 0; }
 .sd-starter-ai-context label span .small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sd-starter-ai-response { min-height: 240px; resize: vertical; }
+.sd-starter-ai-response-status { margin: 0; font-style: italic; }
 .sd-starter-ai-pane .workspace-save-actions { display: flex; gap: .4rem; justify-content: flex-end; margin-top: .25rem; flex-wrap: wrap; }
 .sd-starter-ai-pane .workspace-save-actions .spacer { flex: 1; }
-.sd-starter-ai-preprompt-row { display: flex; gap: .4rem; align-items: center; }
+.sd-starter-ai-preprompt-row { display: flex; gap: .4rem; align-items: flex-start; }
 .sd-starter-ai-preprompt-row select { flex: 1; min-width: 0; }
+.sd-starter-ai-preprompt-row textarea { flex: 1; min-width: 0; resize: vertical; }
 .sd-starter-ai-results { margin-top: .75rem; border-top: 1px solid var(--border-color); padding-top: .5rem; }
 .sd-starter-ai-results summary { cursor: pointer; font-weight: 600; }
 .sd-starter-ai-result { display: flex; flex-direction: column; gap: .25rem; padding: .5rem 0; border-bottom: 1px solid var(--border-color); }

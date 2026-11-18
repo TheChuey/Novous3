@@ -248,52 +248,77 @@ export function createPromptStarter(container, { embed = false } = {}) {
           <h3 id="sd-starter-ai-title">AI fill variable</h3>
           <button type="button" class="btn btn-sm" data-starter="ai-cancel">Close</button>
         </div>
+        <div class="sd-starter-ai-progress" data-starter="ai-progress" hidden>
+          <div class="sd-starter-ai-progress-row">
+            <span class="small" data-starter="ai-progress-label"></span>
+            <span class="small text-muted" data-starter="ai-progress-count"></span>
+          </div>
+          <progress class="sd-starter-ai-progress-bar" data-starter="ai-progress-bar" max="1" value="0"></progress>
+        </div>
         <div class="sd-starter-ai-pane" data-starter="ai-request">
-          <label class="small">Variable to fill
-            <select class="form-select" data-starter="ai-target" aria-label="Variable to fill"></select>
-          </label>
-          <label class="small">Model
-            <select class="form-select" data-starter="ai-model" aria-label="Model"></select>
-          </label>
-          <label class="small" for="sd-starter-ai-description">What this variable is (sent to the LLM with the pre-prompt)</label>
-          <div class="sd-starter-ai-preprompt-row">
-            <input id="sd-starter-ai-description" class="form-input" data-starter="ai-description"
-                   placeholder="e.g. Who the agent is and its primary responsibility">
-            <button type="button" class="btn btn-sm" data-starter="ai-save-description"
-                    title="Save this description for this variable so it is reused as context">Save</button>
-          </div>
-          <label class="small" for="sd-starter-ai-preprompt">Pre-prompt to the LLM</label>
-          <textarea id="sd-starter-ai-preprompt" class="form-input" rows="5" data-starter="ai-preprompt"
-                    placeholder="Describe what the model should write for this variable, e.g. 'Write the role description for an agent.'"></textarea>
-          <div class="sd-starter-choice-list" data-starter="ai-preprompt-list" aria-label="Saved pre-prompts" hidden></div>
-          <div class="sd-starter-ai-preprompt-row">
-            <button type="button" class="btn btn-sm" data-starter="ai-save-preprompt"
-                    title="Save this pre-prompt for this variable so you can reuse it later">Save pre-prompt</button>
-          </div>
-          <label class="small" for="sd-starter-ai-addition">Append to pre-prompt (optional)</label>
-          <input id="sd-starter-ai-addition" class="form-input" data-starter="ai-addition"
-                 placeholder="e.g. engineer — added to the end of the pre-prompt before sending">
-          <div data-starter="ai-context-wrap" hidden>
-            <p class="small text-muted">Append these variables as context:</p>
-            <div class="sd-starter-ai-context" data-starter="ai-context"></div>
-          </div>
+          <fieldset class="sd-starter-ai-section" data-starter="ai-settings-section">
+            <legend>Generation settings</legend>
+            <label class="small">Model
+              <select class="form-select" data-starter="ai-model" aria-label="Model"></select>
+            </label>
+          </fieldset>
+          <fieldset class="sd-starter-ai-section" data-starter="ai-variable-section">
+            <legend>Current variable</legend>
+            <label class="small">Variable to fill
+              <select class="form-select" data-starter="ai-target" aria-label="Variable to fill"></select>
+            </label>
+            <label class="small" for="sd-starter-ai-description">Variable description (what this is, sent to the LLM)</label>
+            <div class="sd-starter-ai-preprompt-row">
+              <textarea id="sd-starter-ai-description" class="form-input" rows="3" data-starter="ai-description"
+                        placeholder="e.g. Who the agent is and its primary responsibility"></textarea>
+              <button type="button" class="btn btn-sm" data-starter="ai-save-description"
+                      title="Save this description for this variable so it is reused as context">Save</button>
+            </div>
+            <label class="small" for="sd-starter-ai-preprompt">Generation instructions (pre-prompt sent to the LLM)</label>
+            <textarea id="sd-starter-ai-preprompt" class="form-input" rows="5" data-starter="ai-preprompt"
+                      placeholder="Describe what the model should write for this variable, e.g. 'Write the role description for an agent.'"></textarea>
+            <div class="sd-starter-choice-list" data-starter="ai-preprompt-list" aria-label="Saved pre-prompts" hidden></div>
+            <div class="sd-starter-ai-preprompt-row">
+              <button type="button" class="btn btn-sm" data-starter="ai-save-preprompt"
+                      title="Save this pre-prompt for this variable so you can reuse it later">Save pre-prompt</button>
+            </div>
+            <label class="small" for="sd-starter-ai-addition">Additional instructions (optional, appended to the pre-prompt)</label>
+            <input id="sd-starter-ai-addition" class="form-input" data-starter="ai-addition"
+                   placeholder="e.g. engineer — added to the end of the pre-prompt before sending">
+          </fieldset>
+          <fieldset class="sd-starter-ai-section" data-starter="ai-context-section">
+            <legend>Context sent to the model</legend>
+            <div data-starter="ai-context-identity-wrap" hidden>
+              <p class="small text-muted sd-starter-ai-context-label">Agent identity</p>
+              <div class="sd-starter-ai-context" data-starter="ai-context-identity"></div>
+            </div>
+            <div data-starter="ai-context-accepted-wrap" hidden>
+              <p class="small text-muted sd-starter-ai-context-label">Previously accepted variables</p>
+              <div class="sd-starter-ai-context" data-starter="ai-context-accepted"></div>
+            </div>
+            <p class="small text-muted sd-starter-ai-context-label" data-starter="ai-context-addition-preview" hidden></p>
+          </fieldset>
           <div class="workspace-save-actions">
             <button type="button" class="btn" data-starter="ai-cancel">Cancel</button>
             <button type="button" class="btn btn-primary" data-starter="ai-generate">Generate</button>
           </div>
         </div>
         <div class="sd-starter-ai-pane" data-starter="ai-response" hidden>
+          <p class="small text-muted sd-starter-ai-response-status" data-starter="ai-response-kind">Generated — not yet accepted</p>
           <label class="small" for="sd-starter-ai-response-text">LLM response (edit before saving)</label>
           <textarea id="sd-starter-ai-response-text" class="form-input sd-starter-ai-response" rows="12"
                     data-starter="ai-response-text"></textarea>
           <div class="workspace-save-actions">
             <button type="button" class="btn btn-sm" data-starter="ai-back">Back</button>
+            <button type="button" class="btn btn-sm" data-starter="ai-regenerate" title="Generate again with the same settings">Regenerate</button>
             <button type="button" class="btn btn-sm" data-starter="ai-markdown">Format as Markdown</button>
             <span class="spacer"></span>
             <button type="button" class="btn" data-starter="ai-cancel">Cancel</button>
             <button type="button" class="btn btn-sm" data-starter="ai-save">Save to variable</button>
             <button type="button" class="btn btn-sm" data-starter="ai-hold"
                     title="Hold this response (with its pre-prompt and variable) in the AI results list">Add to list</button>
+            <button type="button" class="btn btn-sm" data-starter="ai-skip" hidden
+                    title="Discard this variable and continue the chain">Skip</button>
             <button type="button" class="btn btn-primary" data-starter="ai-accept-next" hidden
                     title="Fill this variable and generate the next one in the chain">Accept &amp; next</button>
           </div>
@@ -416,8 +441,15 @@ export function createPromptStarter(container, { embed = false } = {}) {
   const aiDescription = dialog.querySelector('[data-starter="ai-description"]');
   const aiResultsCount = dialog.querySelector('[data-starter="ai-results-count"]');
   const aiResultsList = dialog.querySelector('[data-starter="ai-results-list"]');
-  const aiContextWrap = dialog.querySelector('[data-starter="ai-context-wrap"]');
-  const aiContextList = dialog.querySelector('[data-starter="ai-context"]');
+  const aiContextIdentityWrap = dialog.querySelector('[data-starter="ai-context-identity-wrap"]');
+  const aiContextIdentityList = dialog.querySelector('[data-starter="ai-context-identity"]');
+  const aiContextAcceptedWrap = dialog.querySelector('[data-starter="ai-context-accepted-wrap"]');
+  const aiContextAcceptedList = dialog.querySelector('[data-starter="ai-context-accepted"]');
+  const aiContextAdditionPreview = dialog.querySelector('[data-starter="ai-context-addition-preview"]');
+  const aiProgressWrap = dialog.querySelector('[data-starter="ai-progress"]');
+  const aiProgressLabel = dialog.querySelector('[data-starter="ai-progress-label"]');
+  const aiProgressCount = dialog.querySelector('[data-starter="ai-progress-count"]');
+  const aiProgressBar = dialog.querySelector('[data-starter="ai-progress-bar"]');
   const aiResponseText = dialog.querySelector('[data-starter="ai-response-text"]');
   const aiCompletePane = dialog.querySelector('[data-starter="ai-complete"]');
   const aiFinished = dialog.querySelector('[data-starter="ai-finished"]');
@@ -426,6 +458,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
   const aiTitle = dialog.querySelector('#sd-starter-ai-title');
   const aiGenerateBtn = dialog.querySelector('[data-starter="ai-generate"]');
   const aiAcceptNextBtn = dialog.querySelector('[data-starter="ai-accept-next"]');
+  const aiSkipBtn = dialog.querySelector('[data-starter="ai-skip"]');
   const values = {};
   let choices = {};
   let tools = [];
@@ -935,6 +968,37 @@ export function createPromptStarter(container, { embed = false } = {}) {
     aiCompletePane.hidden = pane !== 'complete';
   }
   function aiShowError(err) { aiErrorLabel.textContent = err ? (err.message || String(err)) : ''; }
+  function buildContextRow(name, value) {
+    const label = document.createElement('label');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = name;
+    const copy = document.createElement('span');
+    const title = document.createElement('strong');
+    title.textContent = name;
+    copy.appendChild(title);
+    const described = variableDescription(name);
+    if (described) {
+      const meaning = document.createElement('span');
+      meaning.className = 'small';
+      meaning.textContent = described;
+      copy.appendChild(meaning);
+    }
+    const preview = document.createElement('span');
+    preview.className = 'text-muted small';
+    preview.textContent = value.trim().slice(0, 120);
+    copy.appendChild(preview);
+    label.append(checkbox, copy);
+    return label;
+  }
+  function aiContextCheckedInputs() {
+    return [...aiContextIdentityList.querySelectorAll('input'), ...aiContextAcceptedList.querySelectorAll('input')];
+  }
+  function updateAiAdditionPreview() {
+    const addition = aiAddition.value.trim();
+    aiContextAdditionPreview.hidden = !addition;
+    aiContextAdditionPreview.textContent = addition ? `Additional context: ${addition}` : '';
+  }
   function renderAiContext() {
     const target = aiTargetSelect.value;
     // Selected tools (bare TOOL N) are useful context for writing role/responsibilities text;
@@ -942,30 +1006,13 @@ export function createPromptStarter(container, { embed = false } = {}) {
     // would only add noise, so they're left out here.
     const entries = Object.entries(values)
       .filter(([name, value]) => name !== target && value?.trim() && !isToolParameterVariable(name));
-    aiContextWrap.hidden = !entries.length;
-    aiContextList.replaceChildren(...entries.map(([name, value]) => {
-      const label = document.createElement('label');
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.value = name;
-      const copy = document.createElement('span');
-      const title = document.createElement('strong');
-      title.textContent = name;
-      copy.appendChild(title);
-      const described = variableDescription(name);
-      if (described) {
-        const meaning = document.createElement('span');
-        meaning.className = 'small';
-        meaning.textContent = described;
-        copy.appendChild(meaning);
-      }
-      const preview = document.createElement('span');
-      preview.className = 'text-muted small';
-      preview.textContent = value.trim().slice(0, 120);
-      copy.appendChild(preview);
-      label.append(checkbox, copy);
-      return label;
-    }));
+    const identity = entries.filter(([name]) => CHAIN_SEED_VARIABLES.includes(name));
+    const accepted = entries.filter(([name]) => !CHAIN_SEED_VARIABLES.includes(name));
+    aiContextIdentityWrap.hidden = !identity.length;
+    aiContextIdentityList.replaceChildren(...identity.map(([name, value]) => buildContextRow(name, value)));
+    aiContextAcceptedWrap.hidden = !accepted.length;
+    aiContextAcceptedList.replaceChildren(...accepted.map(([name, value]) => buildContextRow(name, value)));
+    updateAiAdditionPreview();
   }
   async function loadAiModels() {
     if (aiModelsLoaded) return;
@@ -997,6 +1044,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
     aiShowError(null);
     aiStatus.textContent = '';
     aiAcceptNextBtn.hidden = true;
+    aiSkipBtn.hidden = true;
     aiTitle.textContent = 'AI fill variable';
     aiTargetSelect.replaceChildren(...variables.map(name => new Option(name, name)));
     aiTargetSelect.value = variables.includes(targetName) ? targetName : variables[0];
@@ -1006,6 +1054,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
     aiDescription.value = variableDescription(aiTargetSelect.value);
     populateAiPreprompts();
     renderAiContext();
+    updateChainProgressUI();
     showAiPane('request');
     if (!aiDialog.open) aiDialog.showModal();
     loadAiModels();
@@ -1017,7 +1066,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
     if (!prePrompt) { aiShowError(new Error('Enter a pre-prompt for the LLM.')); return; }
     const model = aiModelSelect.value;
     if (!model) { aiShowError(new Error('Choose a model.')); return; }
-    const chosen = [...aiContextList.querySelectorAll('input:checked')].map(input => input.value);
+    const chosen = aiContextCheckedInputs().filter(input => input.checked).map(input => input.value);
     const addition = aiAddition.value.trim();
     let prompt = addition ? `${prePrompt}\n\n${addition}` : prePrompt;
     lastAiPrompt = prompt;
@@ -1099,6 +1148,19 @@ export function createPromptStarter(container, { embed = false } = {}) {
     return saved || STARTER_VARIABLE_PREPROMPTS[name]
       || `Write the value for the ${name} section of this agent prompt.`;
   }
+  function updateChainProgressUI() {
+    const active = chainTotal > 0;
+    aiProgressWrap.hidden = !active;
+    if (!active) return;
+    const completed = chainTotal - chainQueue.length;
+    const current = Math.min(completed + 1, chainTotal);
+    aiProgressLabel.textContent = chainQueue.length
+      ? `Step ${current} of ${chainTotal}: ${chainQueue[0]}`
+      : 'Chain fill — complete';
+    aiProgressCount.textContent = `${completed}/${chainTotal} completed`;
+    aiProgressBar.max = chainTotal;
+    aiProgressBar.value = completed;
+  }
   function chainStepSetup(name) {
     aiTargetSelect.value = name;
     aiTargetSelect.disabled = true;
@@ -1107,9 +1169,11 @@ export function createPromptStarter(container, { embed = false } = {}) {
     aiAddition.value = '';
     populateAiPreprompts();
     renderAiContext();
-    aiContextList.querySelectorAll('input').forEach(input => { input.checked = true; });
-    aiTitle.textContent = `Chain fill — ${name} (${chainTotal - chainQueue.length + 1}/${chainTotal})`;
+    aiContextCheckedInputs().forEach(input => { input.checked = true; });
+    aiTitle.textContent = 'Chain fill';
+    updateChainProgressUI();
     aiAcceptNextBtn.hidden = false;
+    aiSkipBtn.hidden = false;
   }
   function startChainFill() {
     const variables = starterVariables(editorText())
@@ -1136,6 +1200,8 @@ export function createPromptStarter(container, { embed = false } = {}) {
     chainTotal = 0;
     aiTitle.textContent = 'AI fill variable';
     aiAcceptNextBtn.hidden = true;
+    aiSkipBtn.hidden = true;
+    updateChainProgressUI();
   }
   function aiAcceptNext() {
     const target = aiTargetSelect.value;
@@ -1143,15 +1209,33 @@ export function createPromptStarter(container, { embed = false } = {}) {
     if (!text) { aiShowError(new Error('There is no response text to accept.')); return; }
     aiApplyToVariable(target, text);
     chainQueue = chainQueue.filter(name => name !== target);
+    updateChainProgressUI();
     if (!chainQueue.length) {
-      chainQueue = [];
       chainTotal = 0;
       aiAcceptNextBtn.hidden = true;
-      aiTitle.textContent = 'Chain fill — complete';
+      aiSkipBtn.hidden = true;
       aiFinished.value = finishedPrompt();
       showAiPane('complete');
       aiStatus.textContent = 'Every variable is filled. Review the finished prompt below.';
       status.textContent = 'Chain fill complete — every variable is filled.';
+      return;
+    }
+    chainStepSetup(chainQueue[0]);
+    showAiPane('request');
+    aiGenerate(aiGenerateBtn);
+  }
+  function aiSkip() {
+    const target = aiTargetSelect.value;
+    chainQueue = chainQueue.filter(name => name !== target);
+    updateChainProgressUI();
+    if (!chainQueue.length) {
+      chainTotal = 0;
+      aiAcceptNextBtn.hidden = true;
+      aiSkipBtn.hidden = true;
+      aiFinished.value = finishedPrompt();
+      showAiPane('complete');
+      aiStatus.textContent = 'Chain finished. Some variables were skipped and remain unfilled.';
+      status.textContent = 'Chain fill finished — some variables were skipped.';
       return;
     }
     chainStepSetup(chainQueue[0]);
@@ -1572,6 +1656,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
     renderAiContext();
     populateAiPreprompts();
   });
+  aiAddition.addEventListener('input', updateAiAdditionPreview);
   renderAiResults();
   toolPicker.addEventListener('cancel', event => {
     event.preventDefault();
@@ -1705,6 +1790,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
     if (action === 'ai-fill-toolbar') { openAiDialog(); return; }
     if (action === 'ai-chain-fill') { startChainFill(); return; }
     if (action === 'ai-accept-next') { aiAcceptNext(); return; }
+    if (action === 'ai-skip') { aiSkip(); return; }
     if (action === 'ai-copy-finished') {
       try { await navigator.clipboard.writeText(aiFinished.value); aiStatus.textContent = 'Finished prompt copied.'; }
       catch (err) { aiShowError(new Error(`Could not copy the prompt: ${err.message}.`)); }
@@ -1749,6 +1835,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
     }
     if (action === 'ai-cancel') { aiDialog.close(); return; }
     if (action === 'ai-generate') { aiGenerate(button); return; }
+    if (action === 'ai-regenerate') { aiGenerate(button); return; }
     if (action === 'ai-back') { showAiPane('request'); return; }
     if (action === 'ai-markdown') { aiFormatMarkdown(button); return; }
     if (action === 'ai-save') { aiSave(); return; }
