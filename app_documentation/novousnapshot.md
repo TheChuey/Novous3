@@ -1,7 +1,7 @@
-Date: 2026-11-16
+Date: 2026-11-19
 Name: Novous Application Snapshot
-Filename: NOVOUS_APP_SNAPSHOT_20261116_new.md
-Commit: 01dad7a
+Filename: NOVOUS_APP_SNAPSHOT_20261119_new.md
+Commit: cd53e0b
 Description: Self-contained reference for an AI agent. Captures Novous app purpose, architecture, file structure, and complete source code. Designed for grounding/understanding without repo access.
 
 # NOVOUS APPLICATION SNAPSHOT
@@ -135,6 +135,7 @@ share a process-local inference lock.
 - frontend/static/js/test_suite_runner.js
 - frontend/static/js/testing.js
 - frontend/static/js/tool_categories.js
+- frontend/static/js/tool_wizard.js
 - frontend/static/js/tree.js
 - frontend/static/js/views/
 - frontend/static/js/views/agent_library.js
@@ -148,6 +149,7 @@ share a process-local inference lock.
 - library/code-planer.md
 - library/codingagent.md
 - library/knowledge.md
+- library/planner.md
 - library/problem-orchestrator.md
 - library/rag-presenter.md
 - library/thinke01.md
@@ -223,11 +225,13 @@ share a process-local inference lock.
 - subAgentLibrary/code-analyzer.yaml
 - subAgentLibrary/code-builder.yaml
 - subAgentLibrary/code-troubleshooter.yaml
+- subAgentLibrary/details.yaml
 - subAgentLibrary/inquisitive.yaml
 - subAgentLibrary/problem-analyst.yaml
 - subAgentLibrary/problem-report-builder.yaml
 - subAgentLibrary/problem-statement-builder.yaml
 - subAgentLibrary/rag-retriever.yaml
+- subAgentLibrary/reporter.yaml
 - subAgentLibrary/tester.yaml
 - test_environment/
 - test_environment/__init__.py
@@ -235,9 +239,11 @@ share a process-local inference lock.
 - test_environment/data/saved_suites/
 - test_environment/data/saved_suites/prompts/
 - test_environment/data/saved_suites/prompts/simple-test-for-assistant-agent.json
+- test_environment/data/saved_suites/prompts/tool-test-questions.json
 - test_environment/data/saved_suites/results/
 - test_environment/data/saved_suites/results/prompts/
 - test_environment/data/saved_suites/results/prompts/simple-test-for-assistant-agent.json
+- test_environment/data/saved_suites/results/prompts/tool-test-questions.json
 - test_environment/data/saved_suites/results/squads/
 - test_environment/data/saved_suites/results/squads/how-can-i-live-a-healthy-life-name-three-things.json
 - test_environment/data/saved_suites/results/squads/test-problme-orchestrator.json
@@ -257,6 +263,7 @@ share a process-local inference lock.
 - test_environment/interface_test_environment.py
 - test_environment/logic_test_environment.py
 - test_environment/logic_test_suites.py
+- test_environment/logic_tool_drafts.py
 - test_environment/schemas_test_environment.py
 - tests/
 - tests/__init__.py
@@ -267,11 +274,13 @@ share a process-local inference lock.
 - tests/test_squad_development.py
 - tests/test_studio_paste_markdown.mjs
 - tests/test_tool_categories.mjs
+- tests/test_tool_drafts.py
 - tests/test_tools_and_components.py
 - tools/
 - tools/__init__.py
 - tools/allowed_paths.json
 - tools/data/
+- tools/data/tool_drafts.json
 - tools/data/tool_prompts.json
 - tools/interface_tools.py
 - tools/logic_tools.py
@@ -2155,12 +2164,16 @@ from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from core_engine.logic_core_engine import SessionNotFoundError, agent_library, chat_service, questionnaire
+from core_engine.logic_core_engine import (
+    SessionNotFoundError, agent_library, chat_service, questionnaire,
+    set_current_session_id,
+)
 from core_engine.logic_agent_management import agent_management
 from core_engine.logic_system_state import project_state, system_health
 from core_engine.schemas_core_engine import (
     AgentDefinitionKind,
     AgentEnvironment,
+    AgentReminderRequest,
     AgentToolsRequest,
     AnswerSubmissionRequest,
     ChatRequest,
@@ -2272,6 +2285,16 @@ def api_set_agent_tools(kind: AgentDefinitionKind, agent_id: str, req: AgentTool
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@router.put("/api/agent-reminder/{kind}/{agent_id}")
+def api_set_agent_reminder(kind: AgentDefinitionKind, agent_id: str, req: AgentReminderRequest):
+    try:
+        return agent_library.set_agent_reminder(kind, agent_id, req.remind_every_turn, req.tool_reminder)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.get("/api/agents/{agent_id}/tool-fit")
 def api_agent_tool_fit(agent_id: str, environment: str = "workspace"):
     """Installed models that would cut this agent's tools, plus unregistered tools."""
@@ -2313,13 +2336,26 @@ def api_chat_stream(req: ChatRequest):
         return f"data: {json.dumps(payload)}\n\n"
 
     def events():
+        # Starlette iterates a sync generator for StreamingResponse by dispatching each
+        # next() call through anyio.to_thread.run_sync, which does not guarantee the same
+        # worker thread across calls. A ContextVar set on one thread is invisible once
+        # resumption moves to another, so the session id is re-set on every resumption
+        # that could trigger a tool call, instead of once at the top.
         agent.tool_events = []
         try:
+            set_current_session_id(session_key)
             prepared_message = chat_service.prepare_agent_message(agent, profile, message)
             for event in agent.tool_events:
                 chat_service.publish_tool_event(event, session_key)
                 yield sse({"type": "tool_event", "event": event})
-            for item in agent.think_stream(prepared_message):
+
+            stream = agent.think_stream(prepared_message)
+            while True:
+                set_current_session_id(session_key)
+                try:
+                    item = next(stream)
+                except StopIteration:
+                    break
                 if item["type"] == "tool_event":
                     chat_service.publish_tool_event(item["event"], session_key)
                 elif item["type"] == "done":
@@ -2505,7 +2541,8 @@ Whenever you provide or revise Python code, call `send_code_to_editor` with the 
 
     def _render_frontmatter(self, meta: dict) -> str:
         lines = ["---"]
-        for key in ["id", "name", "description", "mode", "model", "squad", "environment", "environment_name", "version"]:
+        for key in ["id", "name", "description", "mode", "model", "squad", "environment", "environment_name",
+                    "version", "max_tool_rounds", "remind_every_turn", "tool_reminder"]:
             if key not in meta:
                 continue
             value = meta[key]
@@ -3229,6 +3266,8 @@ class AgentLibrary:
                 **sections,
                 **({"max_tool_rounds": meta["max_tool_rounds"]} if "max_tool_rounds" in meta else {}),
                 **({"pinned_tools": [str(tool) for tool in meta["pinned_tools"]]} if meta.get("pinned_tools") else {}),
+                **({"remind_every_turn": bool(meta["remind_every_turn"])} if "remind_every_turn" in meta else {}),
+                **({"tool_reminder": str(meta["tool_reminder"])} if "tool_reminder" in meta else {}),
             },
         )
 
@@ -3642,6 +3681,38 @@ class AgentLibrary:
             raise ValueError("Could not update tools without changing other YAML; edit the file directly.")
         path.write_text(updated, encoding="utf-8", newline="")
         return self.get_agent_tools(kind, agent_id)
+
+    def set_agent_reminder(self, kind: str, agent_id: str, remind_every_turn: bool,
+                           tool_reminder: str = "") -> dict:
+        """Rewrite the ``remind_every_turn``/``tool_reminder`` keys, leaving the rest of the file
+        intact. ``prepare_agent_message`` appends ``tool_reminder`` to the end of the agent's user
+        message every turn when ``remind_every_turn`` is set and a reminder is present."""
+        path = self._definition_file(kind, agent_id)
+        agent_id = path.stem
+        text = path.read_text(encoding="utf-8")
+        newline = "\r\n" if "\r\n" in text else "\n"
+        lines = text.splitlines()
+        reminder = str(tool_reminder or "").strip()
+
+        start, end = self._yaml_bounds(kind, lines)
+        lines = self._replace_top_level_key(lines, start, end, "remind_every_turn",
+                                            [f"remind_every_turn: {'true' if remind_every_turn else 'false'}"])
+        start, end = self._yaml_bounds(kind, lines)
+        reminder_block = yaml.safe_dump({"tool_reminder": reminder}, default_flow_style=False,
+                                        sort_keys=False, allow_unicode=True).rstrip("\n").split("\n") if reminder else []
+        lines = self._replace_top_level_key(lines, start, end, "tool_reminder", reminder_block)
+        updated = newline.join(lines) + (newline if text.endswith(("\n", "\r")) else "")
+
+        # Never write a file whose YAML no longer parses to exactly what was requested.
+        before = self._load_definition_yaml(kind, text)
+        data = self._load_definition_yaml(kind, updated)
+        untouched = {key for key in before if key not in ("remind_every_turn", "tool_reminder")}
+        if bool(data.get("remind_every_turn", False)) != remind_every_turn or (
+            str(data.get("tool_reminder") or "") != reminder
+        ) or any(data.get(key) != before[key] for key in untouched):
+            raise ValueError("Could not update the reminder without changing other YAML; edit the file directly.")
+        path.write_text(updated, encoding="utf-8", newline="")
+        return {"agent_id": agent_id, "remind_every_turn": remind_every_turn, "tool_reminder": reminder}
 
 
 # --- Runtime -----------------------------------------------------------------------
@@ -4195,13 +4266,31 @@ class ToolCatalog:
         "max_bytes": "Maximum number of bytes to read.",
     }
 
-    def prompt_overrides(self) -> dict[str, str]:
-        """Return the saved prompt descriptions, keyed by tool name (empty when none saved)."""
+    def _prompt_entries(self) -> dict[str, dict]:
+        """Raw tool_prompts.json entries, normalized to {"title": str, "prompt": str} each.
+        A legacy bare-string entry (the only shape this file used before titles existed) is
+        read as prompt-only with no title, so old data keeps working unchanged."""
         try:
             data = json.loads(self.PROMPT_DESCRIPTIONS_PATH.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
-        return {str(name): str(text) for name, text in data.items() if str(text).strip()} if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        entries = {}
+        for name, value in data.items():
+            if isinstance(value, dict):
+                prompt = str(value.get("prompt", "")).strip()
+                title = str(value.get("title", "")).strip()
+            else:
+                prompt = str(value).strip()
+                title = ""
+            if prompt or title:
+                entries[str(name)] = {"title": title, "prompt": prompt}
+        return entries
+
+    def prompt_overrides(self) -> dict[str, str]:
+        """Return the saved prompt descriptions, keyed by tool name (empty when none saved)."""
+        return {name: entry["prompt"] for name, entry in self._prompt_entries().items() if entry["prompt"]}
 
     def prompt_text(self, name: str) -> str | None:
         """Prompt wording for a tool as the LLM sees it (one line), or None to use the docstring."""
@@ -4209,21 +4298,46 @@ class ToolCatalog:
         cleaned = " ".join(text.split())
         return cleaned or None
 
+    def title_text(self, name: str) -> str | None:
+        """Saved display title for a tool, or None if it has none."""
+        title = self._prompt_entries().get(name, {}).get("title", "")
+        return title or None
+
+    def _write_prompt_entries(self, entries: dict[str, dict]) -> None:
+        self.PROMPT_DESCRIPTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.PROMPT_DESCRIPTIONS_PATH.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(entries, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        temp_path.replace(self.PROMPT_DESCRIPTIONS_PATH)
+
     def set_prompt_description(self, name: str, text: str) -> None:
         """Save (or, when blank, clear) the prompt wording for a registered tool."""
         self.load_tools()
         if name not in self.registry:
             raise ValueError(f"Tool '{name}' is not registered.")
         with self._prompt_lock:
-            data = self.prompt_overrides()
-            if text.strip():
-                data[name] = text.strip()
+            entries = self._prompt_entries()
+            current = entries.get(name, {"title": "", "prompt": ""})
+            current["prompt"] = text.strip()
+            if current["title"] or current["prompt"]:
+                entries[name] = current
             else:
-                data.pop(name, None)
-            self.PROMPT_DESCRIPTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = self.PROMPT_DESCRIPTIONS_PATH.with_suffix(".tmp")
-            temp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            temp_path.replace(self.PROMPT_DESCRIPTIONS_PATH)
+                entries.pop(name, None)
+            self._write_prompt_entries(entries)
+
+    def set_tool_title(self, name: str, text: str) -> None:
+        """Save (or, when blank, clear) the display title for a registered tool."""
+        self.load_tools()
+        if name not in self.registry:
+            raise ValueError(f"Tool '{name}' is not registered.")
+        with self._prompt_lock:
+            entries = self._prompt_entries()
+            current = entries.get(name, {"title": "", "prompt": ""})
+            current["title"] = text.strip()
+            if current["title"] or current["prompt"]:
+                entries[name] = current
+            else:
+                entries.pop(name, None)
+            self._write_prompt_entries(entries)
 
     def tool_parameters(self, name: str) -> list[dict]:
         """Return parameter details for a registered tool: name, required, description, default."""
@@ -4663,46 +4777,50 @@ class ChatService:
                 "tool_health": self.agent_health(agent)}
 
     def prepare_agent_message(self, agent: Agent, profile: AgentProfile, message: str) -> str:
-        if profile.id not in FORCED_RETRIEVAL_AGENTS:
-            return message
+        if profile.id in FORCED_RETRIEVAL_AGENTS:
+            required_tools = ("call_subagent", "read_chat_scratchpad")
+            missing_tools = [name for name in required_tools if name not in agent.tools]
+            if missing_tools:
+                raise RequiredDelegationError(
+                    f"{profile.name or profile.id} is missing required tools: " + ", ".join(missing_tools)
+                )
 
-        required_tools = ("call_subagent", "read_chat_scratchpad")
-        missing_tools = [name for name in required_tools if name not in agent.tools]
-        if missing_tools:
-            raise RequiredDelegationError(
-                f"{profile.name or profile.id} is missing required tools: " + ", ".join(missing_tools)
-            )
-
-        handoff = {
-            "subagent_id": "rag-retriever",
-            "task_prompt": message,
-            "parameters": "{}",
-        }
-        retrieval_result = agent.act(
-            {"function": {"name": "call_subagent", "arguments": handoff}},
-            origin="orchestrator",
-        )
-        if str(retrieval_result).startswith("Error executing tool 'call_subagent'"):
-            scratchpad_result = "Not read because the required sub-agent call failed."
-        else:
-            scratchpad_result = agent.act(
-                {
-                    "function": {
-                        "name": "read_chat_scratchpad",
-                        "arguments": {"agent": "rag-retriever", "title": "result", "index": "0"},
-                    }
-                },
+            handoff = {
+                "subagent_id": "rag-retriever",
+                "task_prompt": message,
+                "parameters": "{}",
+            }
+            retrieval_result = agent.act(
+                {"function": {"name": "call_subagent", "arguments": handoff}},
                 origin="orchestrator",
             )
+            if str(retrieval_result).startswith("Error executing tool 'call_subagent'"):
+                scratchpad_result = "Not read because the required sub-agent call failed."
+            else:
+                scratchpad_result = agent.act(
+                    {
+                        "function": {
+                            "name": "read_chat_scratchpad",
+                            "arguments": {"agent": "rag-retriever", "title": "result", "index": "0"},
+                        }
+                    },
+                    origin="orchestrator",
+                )
 
-        return (
-            f"{message}\n\n"
-            "Required RAG retrieval handoff (already executed for this turn). "
-            "Do not invoke the sub-agent again. Treat errors or missing evidence "
-            "as retrieval failures and report them honestly.\n"
-            f"call_subagent result:\n{retrieval_result}\n"
-            f"read_chat_scratchpad(agent=rag-retriever, title=result):\n{scratchpad_result}"
-        )
+            message = (
+                f"{message}\n\n"
+                "Required RAG retrieval handoff (already executed for this turn). "
+                "Do not invoke the sub-agent again. Treat errors or missing evidence "
+                "as retrieval failures and report them honestly.\n"
+                f"call_subagent result:\n{retrieval_result}\n"
+                f"read_chat_scratchpad(agent=rag-retriever, title=result):\n{scratchpad_result}"
+            )
+
+        reminder = str(profile.extras.get("tool_reminder") or "").strip()
+        if profile.extras.get("remind_every_turn") and reminder:
+            message = f"{message}\n\n[Reminder] {reminder}"
+
+        return message
 
     def run_single_agent(self, agent_id: str, message: str, model: str | None = None,
                          session_id: str | None = None,
@@ -5304,6 +5422,11 @@ class AgentToolsRequest(BaseModel):
     mode: Literal["chat", "agent"] | None = None
     # None keeps the sub-agents the prompt already lists; [] clears them.
     subagents: List[SubagentUsage] | None = Field(default=None, max_length=50)
+
+
+class AgentReminderRequest(BaseModel):
+    remind_every_turn: bool = False
+    tool_reminder: str = Field(default="", max_length=2000)
 
 
 class ChatRequest(BaseModel):
@@ -8269,7 +8392,7 @@ body.codebuilder-modal-open {
 .sd-starter-divider { flex: 0 0 7px; cursor: col-resize; background: var(--border-color); transition: background 0.1s; position: relative; border-radius: 3px; margin: 0 .25rem; }
 .sd-starter-divider::after { content: '⋮'; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--text-muted); font-size: 0.9rem; pointer-events: none; }
 .sd-starter-divider:hover, .sd-starter-divider:active { background: var(--primary); }
-.sd-starter-fields { flex: 1; min-width: 200px; }
+.sd-starter-fields { flex: 1; min-width: 200px; display: flex; flex-direction: column; }
 .sd-starter-editor { flex: 1; min-height: 180px; overflow: auto; border: 1px solid var(--border-color); border-radius: 4px; padding: 1rem; white-space: pre-wrap; overflow-wrap: anywhere; font: 14px/1.6 Consolas, monospace; background: var(--bg-primary); color: var(--text-main); }
 .sd-starter-token { display: inline; padding: 0 2px; border: 0; border-radius: 3px; background: rgba(88, 166, 255, .18); color: inherit; font: inherit; text-align: left; cursor: pointer; white-space: pre-wrap; }
 .sd-starter-token:hover, .sd-starter-token:focus-visible { outline: 1px solid #58a6ff; }
@@ -8278,9 +8401,11 @@ body.codebuilder-modal-open {
 .sd-starter-picker select, .sd-starter-picker input { width: 100%; margin-top: .4rem; }
 .sd-starter-picker-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
 .sd-starter-fields { overflow: auto; min-height: 0; }
-.sd-starter-fields-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.sd-starter-fields-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; flex: 0 0 auto; }
 .sd-starter-fields-head h3 { margin: 0; }
-.sd-starter-field { display: flex; flex-direction: column; gap: .3rem; padding: .5rem 0; border-bottom: 1px solid var(--border-color); }
+.sd-starter-fields-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+.sd-starter-field-nav { flex: 0 0 auto; }
+.sd-starter-field { display: flex; flex-direction: column; gap: .3rem; padding: .5rem 0; flex: 1; min-height: 0; }
 .sd-starter-field-description { margin: 0; color: var(--text-muted); font-size: .85rem; line-height: 1.4; }
 .sd-starter-field button { align-self: flex-start; }
 .sd-starter-tool-picker { width: min(680px, 92vw); height: min(78vh, 700px); max-width: 92vw; max-height: 92vh; padding: 0; overflow: hidden; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-card); color: var(--text-main); }
@@ -8292,33 +8417,47 @@ body.codebuilder-modal-open {
 .sd-starter-tool-picker-panel .editor-tools-list { flex: 1 1 auto; }
 .sd-starter-tool-picker-panel .workspace-save-actions { justify-content: flex-end; margin-top: .25rem; }
 .sd-starter-field-actions { display: flex; gap: .4rem; }
-.sd-starter-ai-dialog { width: min(640px, 92vw); max-height: 88vh; padding: 0; overflow: hidden; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-card); color: var(--text-main); }
+.sd-starter-ai-dialog { width: min(760px, 92vw); max-height: 88vh; padding: 0; overflow: hidden; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-card); color: var(--text-main); }
 .sd-starter-ai-dialog[open] { display: flex; }
 .sd-starter-ai-dialog::backdrop { background: rgba(0, 0, 0, .72); }
 .sd-starter-ai-panel { display: flex; flex: 1; flex-direction: column; gap: .6rem; min-height: 0; padding: 1rem; overflow: auto; }
+.sd-starter-ai-progress { display: flex; flex-direction: column; gap: .3rem; padding: .4rem .1rem .6rem; border-bottom: 1px solid var(--border-color); }
+.sd-starter-ai-progress[hidden] { display: none; }
+.sd-starter-ai-progress-row { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; }
+.sd-starter-ai-progress-row [data-starter="ai-auto-toggle"] { margin-left: auto; }
+button[data-starter="ai-auto-toggle"].sd-starter-auto-active,
+button[data-starter="ai-auto-toggle-response"].sd-starter-auto-active { background: var(--primary); color: #fff; border-color: var(--primary); }
+.sd-starter-ai-progress-bar { width: 100%; height: 8px; accent-color: var(--primary); }
 .sd-starter-ai-pane { display: flex; flex-direction: column; gap: .6rem; }
 .sd-starter-ai-pane[hidden] { display: none; }
 .sd-starter-ai-pane > label.small { display: flex; flex-direction: column; gap: .25rem; }
+.sd-starter-ai-section { border: 1px solid var(--border-color); border-radius: 6px; padding: .6rem .75rem; margin: 0; display: flex; flex-direction: column; gap: .5rem; }
+.sd-starter-ai-section > legend { padding: 0 .3rem; font-size: .85rem; font-weight: 600; color: var(--text-muted); }
+.sd-starter-ai-context-label { margin: 0 0 .15rem; font-weight: 600; }
 .sd-starter-ai-context { display: flex; flex-direction: column; gap: .35rem; max-height: 180px; overflow: auto; padding: .5rem; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-primary); }
 .sd-starter-ai-context label { display: flex; align-items: baseline; gap: .5rem; cursor: pointer; }
 .sd-starter-ai-context label span { display: flex; flex-direction: column; min-width: 0; }
 .sd-starter-ai-context label span .small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sd-starter-ai-response { min-height: 240px; resize: vertical; }
+.sd-starter-ai-response-status { margin: 0; font-style: italic; }
 .sd-starter-ai-pane .workspace-save-actions { display: flex; gap: .4rem; justify-content: flex-end; margin-top: .25rem; flex-wrap: wrap; }
 .sd-starter-ai-pane .workspace-save-actions .spacer { flex: 1; }
-.sd-starter-ai-preprompt-row { display: flex; gap: .4rem; align-items: center; }
+.sd-starter-ai-preprompt-row { display: flex; gap: .4rem; align-items: flex-start; }
 .sd-starter-ai-preprompt-row select { flex: 1; min-width: 0; }
-.sd-starter-ai-results { margin-top: .75rem; border-top: 1px solid var(--border-color); padding-top: .5rem; }
-.sd-starter-ai-results summary { cursor: pointer; font-weight: 600; }
-.sd-starter-ai-result { display: flex; flex-direction: column; gap: .25rem; padding: .5rem 0; border-bottom: 1px solid var(--border-color); }
-.sd-starter-ai-result-head { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; }
-.sd-starter-ai-result-preprompt { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sd-starter-ai-result-text { margin: 0; white-space: pre-wrap; max-height: 20rem; overflow: auto; border: 1px solid var(--border-color); border-radius: 4px; padding: .4rem; background: var(--bg-primary); }
-.sd-starter-ai-result-actions { display: flex; gap: .3rem; flex-wrap: wrap; }
+.sd-starter-ai-preprompt-row textarea { flex: 1; min-width: 0; resize: vertical; }
+.sd-starter-identity { flex: 0 0 auto; border-bottom: 1px solid var(--border-color); margin-bottom: .5rem; }
+.sd-starter-identity > summary { cursor: pointer; font-weight: 600; padding: .4rem 0; list-style: none; display: flex; align-items: baseline; gap: .4rem; }
+.sd-starter-identity > summary::-webkit-details-marker { display: none; }
+.sd-starter-identity > summary::marker { content: ''; }
+.sd-starter-identity > summary::before { content: '▸'; font-size: .75rem; color: var(--text-muted); }
+.sd-starter-identity[open] > summary::before { content: '▾'; }
+.sd-starter-identity-body { display: flex; flex-direction: column; gap: .6rem; padding: .25rem 0 .75rem; max-height: 45vh; overflow: auto; box-sizing: border-box; }
+.sd-starter-identity .sd-agent-setup-row label { font-weight: 500; }
 .sd-starter-field-nav { display: flex; align-items: center; gap: .35rem; padding: .25rem 0 .4rem; }
 .sd-starter-field-nav select { flex: 1; min-width: 0; }
 .sd-starter-field-count { white-space: nowrap; }
-.sd-starter-field-value { resize: vertical; }
+.sd-starter-field-value { resize: vertical; flex: 1 1 auto; min-height: 140px; height: auto; }
+.sd-starter-choice-list, .sd-starter-field-actions { flex: 0 0 auto; }
 .sd-starter-choice-list { display: flex; flex-direction: column; gap: 2px; max-height: 9rem; overflow: auto; }
 .sd-starter-choice-row { display: flex; gap: 2px; min-width: 0; }
 .sd-starter-choice-row .sd-starter-choice { flex: 1; min-width: 0; }
@@ -8338,6 +8477,18 @@ body.codebuilder-modal-open {
 .sd-starter-create-row[hidden], .sd-starter-create-row label[hidden] { display: none; }
 .sd-starter-create-row label { display: flex; flex-direction: column; gap: .15rem; font-weight: 500; }
 .sd-starter-create-row input, .sd-starter-create-row select { min-width: 140px; }
+.sd-agent-setup-modal { width: min(560px, 92vw); max-width: 92vw; max-height: 92vh; padding: 0; overflow: hidden; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-card); color: var(--text-main); }
+.sd-agent-setup-modal[open] { display: flex; }
+.sd-agent-setup-modal::backdrop { background: rgba(0, 0, 0, .72); }
+.sd-agent-setup-panel { display: flex; flex: 1; flex-direction: column; min-height: 0; gap: .6rem; padding: 1rem; overflow: hidden; }
+.sd-agent-setup-panel > p { margin: 0; }
+.sd-agent-setup-body { display: flex; flex-direction: column; gap: .6rem; flex: 1 1 auto; min-height: 0; overflow: auto; }
+.sd-agent-setup-panel .workspace-save-actions { flex: 0 0 auto; margin-top: .25rem; }
+.sd-agent-setup-row { display: flex; flex-direction: column; gap: .25rem; }
+.sd-agent-setup-row[hidden] { display: none; }
+.sd-agent-setup-row label { display: flex; flex-direction: column; gap: .15rem; font-weight: 500; }
+.sd-agent-setup-checkbox-row { flex-direction: row !important; align-items: center; gap: .4rem; }
+.sd-agent-setup-tools .sd-starter-fields-head { margin-bottom: .35rem; }
 @media (max-width: 800px) {
   .sd-starter-layout { flex-direction: column; overflow: auto; }
   .sd-starter-main { min-height: 360px; flex: none; }
@@ -8356,6 +8507,17 @@ body.codebuilder-modal-open {
 /* Maximized state */
 .sd-starter-dialog.sd-starter-maximized { border-radius: 0; }
 .sd-starter-dialog.sd-starter-maximized .sd-starter-resize { display: none; }
+
+/* --- Tool Creation Wizard --- */
+.tw-param-table { display: flex; flex-direction: column; gap: 0.4rem; }
+.tw-param-row { display: grid; grid-template-columns: 1fr 110px 90px 2fr auto; gap: 0.4rem; align-items: center; }
+.tw-param-row label { display: flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
+@media (max-width: 800px) {
+  .tw-param-row { grid-template-columns: 1fr; }
+}
+.tw-drafts-list { display: flex; flex-direction: column; gap: 0.4rem; }
+.tw-draft-item { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.5rem 0.65rem; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-dark); }
+.tw-draft-item-actions { display: flex; gap: 0.3rem; flex: 0 0 auto; }
 
 /* Minimized bar */
 .sd-starter-minimized-bar { position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; align-items: center; gap: .75rem; padding: .5rem 1rem; background: var(--bg-card); border: 1px solid var(--border-color); border-bottom: none; border-radius: 8px 8px 0 0; box-shadow: 0 -2px 12px rgba(0,0,0,.25); }
@@ -10147,20 +10309,16 @@ body.is-resizing { cursor: col-resize; user-select: none; }
 
 /* --- Testing -------------------------------------------------------------- */
 
-.prompt-creation-flow { display: flex; flex-direction: column; }
-/* Chat Agent | Prompt Starter: resizable columns, same mechanism as the Chat Console. */
+.prompt-creation-flow { display: flex; flex-direction: column; height: calc(100vh - 110px); min-height: 0; gap: 0.5rem; }
+.pc-topbar { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex: 0 0 auto; }
+.pc-topbar h2 { margin: 0; }
+/* Chat Agent tab: the Prompt Starter wizard fills the whole page. */
 .pc-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--starter-gutter, 10px) var(--starter-w, 440px);
-  grid-template-rows: minmax(0, 1fr);
-  height: calc(100vh - 110px);
+  flex: 1 1 auto;
   min-height: 0;
+  display: flex;
 }
-.pc-layout > * { min-height: 0; overflow: hidden; }
-.pc-layout.starter-collapsed { --starter-w: 0px; --starter-gutter: 18px; }
-.pc-layout.starter-collapsed .pc-starter-panel { visibility: hidden; border: 0; }
-.pc-layout.starter-hiding .pc-starter-panel { opacity: 0.35; }
-.pc-starter-panel { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.pc-starter-panel { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; min-width: 0; }
 .prompt-library-create {
   display: grid;
   gap: 0.4rem;
@@ -10207,23 +10365,6 @@ body.is-resizing { cursor: col-resize; user-select: none; }
   gap: 0.3rem;
 }
 .prompt-library-actions .btn { padding: 0.25rem 0.45rem; }
-.prompt-chat-card {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 390px;
-  max-height: none;
-  padding: 0;
-  overflow: hidden;
-}
-.prompt-chat-font-controls { display: inline-flex; gap: 0.25rem; margin-left: auto; }
-.prompt-chat-card .codebuilder-chat-messages,
-.prompt-chat-card .codebuilder-chat-message,
-.prompt-chat-card .form-input { font-size: var(--prompt-chat-font-size, 14px); }
-.prompt-chat-card .codebuilder-chat-message { max-width: 100%; }
-.prompt-chat-note { margin: 0; padding: 0.35rem 0.85rem 0; }
-.prompt-chat-card .codebuilder-chat-messages { min-height: 180px; }
-.prompt-chat-card .codebuilder-chat-form { flex: 0 0 auto; }
 .prompt-rich-markdown {
   overflow-wrap: anywhere;
   line-height: 1.65;
@@ -10514,11 +10655,6 @@ body.is-resizing { cursor: col-resize; user-select: none; }
   .chat-file-sidebar { min-height: 260px; max-height: 40vh; }
   .chat-main { order: -1; height: calc(100vh - 150px); min-height: 420px; }
   .test-panel { width: 100%; min-width: 0; min-height: 360px; border-left: 0; border-top: 1px solid var(--border-color); }
-  .pc-layout { grid-template-columns: 1fr; grid-template-rows: none; height: auto; gap: 0.75rem; }
-  .pc-layout > * { overflow: visible; }
-  .pc-layout > .panel-resizer { display: none; }
-  .pc-layout.starter-collapsed .pc-starter-panel { visibility: visible; border: 1px solid var(--border-color); }
-  .prompt-chat-card { height: calc(100vh - 150px); min-height: 420px; }
   .pc-starter-panel { min-height: 480px; }
   .messages-scroll { min-height: 0; }
   .chat-input-bar { flex-shrink: 0; }
@@ -11205,6 +11341,11 @@ export const Api = {
     return send('PUT', `/api/agent-tools/${encodeURIComponent(kind)}/${encodeURIComponent(agentId)}`, { tools, mode, subagents });
   },
 
+  async setAgentReminder(kind, agentId, remindEveryTurn, toolReminder = '') {
+    return send('PUT', `/api/agent-reminder/${encodeURIComponent(kind)}/${encodeURIComponent(agentId)}`,
+      { remind_every_turn: remindEveryTurn, tool_reminder: toolReminder });
+  },
+
   async getCodeBuilderAgents() {
     return get('/api/codebuilder/agents');
   },
@@ -11698,14 +11839,17 @@ export const Api = {
 
   // --- Testing & Prompt Builder ---
 
-  async executeToolTest(toolCode, functionInput = {}, timeoutSeconds = 5) {
+  async executeToolTest(toolCode, functionInput = {}, timeoutSeconds = 5, internalModules = []) {
     return send('POST', '/api/testing/tool-workbench/execute', {
-      tool_code: toolCode, function_input: functionInput, timeout_seconds: timeoutSeconds
+      tool_code: toolCode, function_input: functionInput, timeout_seconds: timeoutSeconds,
+      internal_modules: internalModules,
     });
   },
 
-  async generateToolFunction(model, description) {
-    return send('POST', '/api/testing/tool-workbench/generate-function', { model, description });
+  async generateToolFunction(model, description, expectedParameters = []) {
+    return send('POST', '/api/testing/tool-workbench/generate-function', {
+      model, description, expected_parameters: expectedParameters,
+    });
   },
 
   async getToolTestHarness(toolCode) {
@@ -11715,14 +11859,39 @@ export const Api = {
   async testToolWithLlm(model, toolCode, userPrompt, timeoutSeconds = 5, options = {}) {
     return send('POST', '/api/testing/tool-workbench/test-with-llm', {
       model, tool_code: toolCode, user_prompt: userPrompt, timeout_seconds: timeoutSeconds,
-      execute: options.execute ?? true, description: options.description ?? null
+      execute: options.execute ?? true, description: options.description ?? null,
+      internal_modules: options.internalModules ?? [],
     });
   },
 
-  async promoteTestedTool(toolCode, functionInput = {}, timeoutSeconds = 5) {
+  async promoteTestedTool(toolCode, functionInput = {}, timeoutSeconds = 5, internalModules = []) {
     return send('POST', '/api/testing/tool-workbench/promote', {
-      tool_code: toolCode, function_input: functionInput, timeout_seconds: timeoutSeconds
+      tool_code: toolCode, function_input: functionInput, timeout_seconds: timeoutSeconds,
+      internal_modules: internalModules,
     });
+  },
+
+  async listInternalModules() {
+    return get('/api/testing/tool-workbench/internal-modules');
+  },
+
+  async setToolTitle(name, title) {
+    return send('PUT', `/api/tools/${encodeURIComponent(name)}/title`, { title });
+  },
+
+  // --- Tool Creation Wizard drafts ---
+
+  async listToolDrafts() {
+    return get('/api/testing/tool-workbench/drafts');
+  },
+  async getToolDraft(draftId) {
+    return get(`/api/testing/tool-workbench/drafts/${encodeURIComponent(draftId)}`);
+  },
+  async saveToolDraft(draftId, data) {
+    return send('PUT', `/api/testing/tool-workbench/drafts/${encodeURIComponent(draftId)}`, data);
+  },
+  async deleteToolDraft(draftId) {
+    return send('DELETE', `/api/testing/tool-workbench/drafts/${encodeURIComponent(draftId)}`);
   },
 
   // --- Prompt Starter Templates ---
@@ -15390,18 +15559,8 @@ export function appendMarkdown(parent, markdown) {
 ### frontend/static/js/prompt_creation.js
 
 ```javascript
-import { Api } from './api.js';
-import { appendMarkdown } from './markdown.js';
 import { navigate } from './shell.js';
 import { createPromptStarter } from './prompt_starter.js';
-import { iconSvg } from './icons.js';
-import { setupSidePanels } from './side_panels.js';
-
-function esc(value) {
-  return String(value ?? '').replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c]));
-}
 
 let activeStarter = null;
 
@@ -15413,263 +15572,21 @@ export function leavePromptCreationView() {
 export function renderPromptCreationView(container) {
   container.innerHTML = `
     <div class="prompt-creation-flow">
+      <div class="pc-topbar">
+        <h2>Chat Agent</h2>
+        <button type="button" class="btn btn-sm" id="pc-squad-development">Squad Development</button>
+      </div>
       <div class="pc-layout">
-        <section class="card prompt-chat-card" aria-labelledby="pc-chat-title">
-          <div class="codebuilder-chat-heading">
-            <h2 id="pc-chat-title">Chat Agent</h2>
-            <span id="pc-chat-status" class="text-muted small">Loading agents…</span>
-            <button type="button" class="btn btn-sm" id="pc-squad-development">Squad Development</button>
-            <span class="prompt-chat-font-controls" role="group" aria-label="Chat text size">
-              <button type="button" class="btn btn-sm" id="pc-font-smaller" title="Smaller text" aria-label="Decrease chat text size">A−</button>
-              <button type="button" class="btn btn-sm" id="pc-font-larger" title="Larger text" aria-label="Increase chat text size">A+</button>
-            </span>
-          </div>
-          <p class="text-muted small prompt-chat-note">
-            Chat with an available agent to clarify and shape your prompt. Responses use cleaner Markdown formatting when possible.
-          </p>
-          <div id="pc-chat-messages" class="codebuilder-chat-messages" aria-live="polite">
-            <div class="codebuilder-chat-message system">Describe the prompt you want to create, and we’ll work through it together.</div>
-          </div>
-          <form id="pc-chat-form" class="codebuilder-chat-form">
-            <label class="codebuilder-model-picker">
-              <span class="text-muted small">Agent</span>
-              <select id="pc-chat-agent" class="form-select" aria-label="Choose chat agent">
-                <option value="">Loading agents…</option>
-              </select>
-              <span class="text-muted small">Model</span>
-              <select id="pc-chat-model" class="form-select" aria-label="Choose model">
-                <option value="">Loading models…</option>
-              </select>
-            </label>
-            <textarea id="pc-chat-input" class="form-input" rows="3"
-                      placeholder="What should this prompt help its agent do?"
-                      aria-label="Message to chat agent"></textarea>
-            <div class="codebuilder-chat-actions">
-              <button id="pc-chat-clear" class="btn btn-sm" type="button">Clear</button>
-              <button class="btn btn-primary" type="submit" disabled>Send</button>
-            </div>
-          </form>
-        </section>
-
-        <div class="panel-resizer" data-resize="starter" role="separator" tabindex="0"
-             aria-orientation="vertical" aria-label="Resize Prompt Starter panel"><span class="cb-grip">${iconSvg('chevron-left', 14)}</span></div>
-
         <aside class="pc-starter-panel" aria-label="Prompt Starter" id="pc-starter-panel"></aside>
       </div>
     </div>`;
 
-  const pcLayout = container.querySelector('.pc-layout');
   const starterPanel = container.querySelector('#pc-starter-panel');
   const starter = createPromptStarter(starterPanel, { embed: true });
   activeStarter = starter;
   starter.open();
-  setupSidePanels({
-    shell: pcLayout,
-    layout: pcLayout,
-    prefsKey: 'novous2.prompt-creation.',
-    centerMin: 360,
-    panels: {
-      starter: {
-        var: '--starter-w', edge: 'right', min: 320, hideBelow: 200, default: 440, label: 'Prompt Starter',
-        resizer: container.querySelector('.panel-resizer[data-resize="starter"]'),
-        toggle: null,
-      },
-    },
-  });
 
-  const chatAgentSel = container.querySelector('#pc-chat-agent');
-  const chatModelSel = container.querySelector('#pc-chat-model');
-  const chatInput = container.querySelector('#pc-chat-input');
-  const chatMessages = container.querySelector('#pc-chat-messages');
-  const chatStatus = container.querySelector('#pc-chat-status');
-  const chatForm = container.querySelector('#pc-chat-form');
-  const flow = container.querySelector('.prompt-creation-flow');
   container.querySelector('#pc-squad-development').addEventListener('click', () => navigate('squad-development'));
-
-  let promptAgents = [];
-  let selectedChatAgent = null;
-  let chatPending = false;
-
-  async function loadPromptAgents() {
-    try {
-      const [workspaceData, codeBuilderData, promptData] = await Promise.all([
-        Api.getAgents(),
-        Api.getCodeBuilderAgents(),
-        Api.getAgents('prompt-creation')
-      ]);
-      const label = environment => ({ codebuilder: 'CodeBuilder', 'prompt-creation': 'Prompt Creation' })[environment] || 'Workspace';
-      const agents = [
-        ...(workspaceData.agents || []).map(agent => ({ ...agent, environment: 'workspace' })),
-        ...(codeBuilderData.agents || []).map(agent => ({ ...agent, environment: 'codebuilder' })),
-        ...(promptData.agents || []).map(agent => ({ ...agent, environment: 'prompt-creation' }))
-      ];
-      promptAgents = agents;
-      chatAgentSel.innerHTML = agents.length
-        ? agents.map(a => `<option value="${esc(a.environment)}:${esc(a.id)}">${esc(a.name)} — ${label(a.environment)}</option>`).join('')
-        : '<option value="">No agents available</option>';
-      let lastAgent = null;
-      try { lastAgent = localStorage.getItem('novous2.prompt-creation.lastChatAgent'); } catch { /* storage unavailable */ }
-      selectedChatAgent = agents.find(agent => `${agent.environment}:${agent.id}` === lastAgent)
-        || agents.find(agent => agent.environment === 'workspace') || agents[0] || null;
-      if (selectedChatAgent) {
-        chatAgentSel.value = `${selectedChatAgent.environment}:${selectedChatAgent.id}`;
-        chatStatus.textContent = `Agent: ${selectedChatAgent.name}`;
-      } else {
-        chatStatus.textContent = 'No agents available.';
-      }
-
-      await loadPromptChatModels();
-      updateChatControls();
-    } catch (err) {
-      chatAgentSel.innerHTML = `<option value="">${esc(err.message)}</option>`;
-      chatStatus.textContent = 'Could not load agents.';
-    }
-  }
-
-  function updateChatControls() {
-    const sendButton = chatForm.querySelector('button[type="submit"]');
-    sendButton.disabled = chatPending || !selectedChatAgent || !chatModelSel.value || chatModelSel.disabled;
-    chatInput.disabled = chatPending;
-    chatAgentSel.disabled = chatPending || !promptAgents.length;
-  }
-
-  function appendChatMessage(role, content) {
-    const message = document.createElement('div');
-    message.className = `codebuilder-chat-message ${role}`;
-    if (role === 'assistant') {
-      message.classList.add('prompt-rich-markdown');
-      appendMarkdown(message, content);
-    } else {
-      message.textContent = content;
-    }
-    chatMessages.appendChild(message);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-  }
-
-  const chatFontKey = 'novous2.prompt-creation.chat-font-size';
-  let chatFontSize = 14;
-  try {
-    const storedSize = Number(localStorage.getItem(chatFontKey));
-    if (Number.isFinite(storedSize) && storedSize >= 11 && storedSize <= 32) chatFontSize = storedSize;
-  } catch (error) {
-    console.warn('Could not load saved chat text size.', error);
-  }
-  function setChatFontSize(size) {
-    chatFontSize = Math.min(32, Math.max(11, size));
-    flow.style.setProperty('--prompt-chat-font-size', `${chatFontSize}px`);
-    try {
-      localStorage.setItem(chatFontKey, String(chatFontSize));
-    } catch (error) {
-      console.warn('Could not save chat text size.', error);
-    }
-  }
-  setChatFontSize(chatFontSize);
-  container.querySelector('#pc-font-smaller').addEventListener('click', () => setChatFontSize(chatFontSize - 1));
-  container.querySelector('#pc-font-larger').addEventListener('click', () => setChatFontSize(chatFontSize + 2));
-
-  async function loadPromptChatModels() {
-    chatModelSel.disabled = true;
-    chatModelSel.innerHTML = '<option value="">Loading models…</option>';
-    try {
-      const data = await Api.getModels();
-      const models = (data.models || []).slice().sort();
-      if (!models.length) {
-        chatModelSel.innerHTML = '<option value="">No installed models</option>';
-        chatStatus.textContent = data.error || 'No installed models detected.';
-        updateChatControls();
-        return;
-      }
-      chatModelSel.innerHTML = models.map(model =>
-        `<option value="${esc(model)}">${esc(model)}</option>`
-      ).join('');
-      const preferred = selectedChatAgent?.model || data.default;
-      chatModelSel.value = models.includes(preferred) ? preferred : models[0];
-      chatModelSel.disabled = false;
-      updateChatControls();
-    } catch (err) {
-      chatModelSel.innerHTML = `<option value="">${esc(err.message)}</option>`;
-      chatStatus.textContent = 'Could not load models.';
-      updateChatControls();
-    }
-  }
-
-  loadPromptAgents();
-
-  chatAgentSel.addEventListener('change', () => {
-    const [environment, agentId] = chatAgentSel.value.split(':', 2);
-    try { localStorage.setItem('novous2.prompt-creation.lastChatAgent', chatAgentSel.value); } catch { /* storage unavailable */ }
-    selectedChatAgent = promptAgents.find(agent =>
-      agent.environment === environment && agent.id === agentId
-    ) || null;
-    chatMessages.replaceChildren();
-    if (selectedChatAgent) {
-      appendChatMessage('system', `Chatting with ${selectedChatAgent.name}.`);
-      chatStatus.textContent = `Agent: ${selectedChatAgent.name}`;
-    } else {
-      chatStatus.textContent = 'Select an agent to start.';
-    }
-    updateChatControls();
-    loadPromptChatModels();
-  });
-
-  chatModelSel.addEventListener('change', updateChatControls);
-
-  chatForm.addEventListener('submit', async event => {
-    event.preventDefault();
-    const message = chatInput.value.trim();
-    if (!message || chatPending || !selectedChatAgent || !chatModelSel.value) return;
-
-    appendChatMessage('user', message);
-    chatInput.value = '';
-    chatPending = true;
-    chatStatus.textContent = `Waiting for ${selectedChatAgent.name}…`;
-    updateChatControls();
-    const sessionId = `prompt-creation-${selectedChatAgent.environment}-${selectedChatAgent.id}`;
-    try {
-      const response = await Api.sendMessage(
-        `${message}\n\nWhen you write a prompt, reply with only the prompt as a Markdown document: one "# Title" line, a one-sentence description, then "## " headings named only for what they contain (for example "## Role", never "## Section: Role" or "## Role Section") each followed by plain-text instructions. No preamble or closing commentary.`,
-        selectedChatAgent.id,
-        chatModelSel.value,
-        sessionId,
-        selectedChatAgent.environment
-      );
-      const reply = String(response.reply || '').trim();
-      appendChatMessage('assistant', reply || 'The agent returned an empty response.');
-      chatStatus.textContent = `${selectedChatAgent.name} · ${response.model || chatModelSel.value}`;
-    } catch (err) {
-      appendChatMessage('system', `Request failed: ${err.message}`);
-      chatStatus.textContent = 'Request failed.';
-    } finally {
-      chatPending = false;
-      updateChatControls();
-      chatInput.focus();
-    }
-  });
-
-  chatInput.addEventListener('keydown', event => {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      chatForm.requestSubmit();
-    }
-  });
-
-  container.querySelector('#pc-chat-clear').addEventListener('click', async () => {
-    if (selectedChatAgent) {
-      const sessionId = `prompt-creation-${selectedChatAgent.environment}-${selectedChatAgent.id}`;
-      try {
-        await Api.resetChat(sessionId);
-      } catch (err) {
-        chatStatus.textContent = `Could not clear chat: ${err.message}`;
-        return;
-      }
-    }
-    chatMessages.replaceChildren();
-    appendChatMessage('system', selectedChatAgent
-      ? `Chat cleared. Continue with ${selectedChatAgent.name}.`
-      : 'Chat cleared.');
-    updateChatControls();
-    chatInput.focus();
-  });
 }
 
 ```
@@ -15700,6 +15617,8 @@ const STARTER_VARIABLE_DESCRIPTIONS = {
   'TASK': 'The task to send to a sub-agent.',
   'OUTPUT FORMAT': 'The format the agent must use for its final answer.',
   'CONDITION': 'When the action should happen.',
+  'TOOL REMINDER': "A short reminder appended to the end of the agent's user message every turn, "
+    + 'telling it how to correctly use its tools (remind_every_turn in the frontmatter).',
 };
 
 // Default pre-prompts the chain-fill wizard starts each variable with.
@@ -15712,10 +15631,14 @@ const STARTER_VARIABLE_PREPROMPTS = {
   'COMMUNICATION': 'Write the Communication section: a short bullet list of how the agent reports and communicates results.',
   'DESCRIPTION': 'Write a one-sentence description of what this agent does.',
   'OUTPUT FORMAT': 'Write the Output Format section: the exact format the agent must use for its final answer.',
+  'TOOL REMINDER': 'Write ONE short, imperative reminder (1-2 sentences) telling the agent to correctly use '
+    + 'its tools every turn, condensed from the Execution Instructions and tool descriptions in context below. '
+    + 'Output only the reminder text — no preamble, no quotes, no heading.',
 };
 
 export function starterVariables(text) {
-  return [...new Set([...text.matchAll(VARIABLE)].map(match => match[1]))];
+  return [...new Set([...text.matchAll(VARIABLE)].map(match => match[1]))]
+    .filter(name => !/^TOOL \d+$/.test(name));
 }
 
 export function renderStarter(text, values) {
@@ -15726,21 +15649,57 @@ export function renderStarter(text, values) {
   });
 }
 
-export function replaceToolVariables(text, indexes) {
+// Finds the `tools:` block-list in YAML frontmatter, if any.
+// Returns { end, toolsIndex, blockEnd } where toolsIndex/blockEnd mark the
+// list items' line range, or null if there's no frontmatter, no `tools:`
+// key, or the field isn't a plain empty-list/block-list.
+function findToolsBlock(lines) {
+  if (lines[0]?.trim() !== '---') return null;
+  const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+  if (end < 0) return null;
+  const toolsIndex = lines.findIndex((line, index) => index > 0 && index < end && /^tools\s*:/.test(line));
+  if (toolsIndex < 0) return { end, toolsIndex: -1, blockEnd: -1 };
+  const toolsLine = lines[toolsIndex].trim();
+  if (/^tools\s*:\s*\[\s*\]$/.test(toolsLine)) return { end, toolsIndex, blockEnd: toolsIndex + 1 };
+  if (!/^tools\s*:\s*$/.test(toolsLine)) return null;
+  let blockEnd = toolsIndex + 1;
+  while (blockEnd < end && (!lines[blockEnd].trim() || /^\s+-\s/.test(lines[blockEnd]))) blockEnd += 1;
+  if (blockEnd < end && /^\s/.test(lines[blockEnd])) return null;
+  return { end, toolsIndex, blockEnd };
+}
+
+// Reads the real tool names currently listed under YAML frontmatter `tools:`.
+// Tolerant: returns [] for missing/malformed frontmatter instead of throwing,
+// and drops any stale `[TOOL N]`-style bracket entry left over from a
+// template saved before tool names were written directly.
+export function currentToolNames(text) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const found = findToolsBlock(lines);
+  if (!found || found.toolsIndex < 0) return [];
+  const names = [];
+  for (let i = found.toolsIndex + 1; i < found.blockEnd; i++) {
+    const match = lines[i].match(/^\s*-\s*"?([^"\r\n]*?)"?\s*$/);
+    const name = match?.[1]?.trim();
+    if (name && !/^\[.*\]$/.test(name)) names.push(name);
+  }
+  return names;
+}
+
+export function replaceToolVariables(text, toolNames) {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   if (lines[0]?.trim() !== '---') throw new Error('Add tools only to an agent definition with YAML frontmatter.');
   let end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
   if (end < 0) throw new Error('The agent definition is missing its YAML frontmatter closing delimiter.');
   let toolsIndex = lines.findIndex((line, index) => index > 0 && index < end && /^tools\s*:/.test(line));
   if (toolsIndex < 0) {
-    lines.splice(end, 0, indexes.length ? 'tools:' : 'tools: []');
-    if (!indexes.length) return lines.join('\n');
+    lines.splice(end, 0, toolNames.length ? 'tools:' : 'tools: []');
+    if (!toolNames.length) return lines.join('\n');
     toolsIndex = end;
     end += 1;
   }
   const toolsLine = lines[toolsIndex].trim();
   if (/^tools\s*:\s*\[\s*\]$/.test(toolsLine)) {
-    if (!indexes.length) return lines.join('\n');
+    if (!toolNames.length) return lines.join('\n');
     lines[toolsIndex] = 'tools:';
   } else if (!/^tools\s*:\s*$/.test(toolsLine)) {
     throw new Error('The tools field must be an empty list or a block list before adding a tool.');
@@ -15750,30 +15709,31 @@ export function replaceToolVariables(text, indexes) {
   if (blockEnd < end && /^\s/.test(lines[blockEnd])) {
     throw new Error('The tools field contains an unsupported YAML entry.');
   }
-  lines.splice(toolsIndex + 1, blockEnd - toolsIndex - 1, ...indexes.map(index => `  - "[TOOL ${index}]"`));
-  if (!indexes.length) lines[toolsIndex] = 'tools: []';
+  lines.splice(toolsIndex + 1, blockEnd - toolsIndex - 1, ...toolNames.map(name => `  - ${name}`));
+  if (!toolNames.length) lines[toolsIndex] = 'tools: []';
   return lines.join('\n');
 }
 
-export function addToolParameterVariables(instructions, toolIndex, descriptions = {}) {
-  let inParameters = false;
-  return instructions.split(/\r?\n/).map(line => {
-    if (line.trim() === 'Parameters:') {
-      inParameters = true;
-      return line;
+// Sets or inserts top-level scalar fields (e.g. remind_every_turn, tool_reminder) in
+// YAML frontmatter. Updates an existing `key: ...` line in place, or appends a new
+// one just before the closing `---` when the key isn't present yet.
+export function setFrontmatterFields(text, fields) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  if (lines[0]?.trim() !== '---') throw new Error('This definition has no YAML frontmatter to update.');
+  let end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+  if (end < 0) throw new Error('The agent definition is missing its YAML frontmatter closing delimiter.');
+  for (const [key, rawValue] of fields) {
+    const line = `${key}: ${rawValue}`;
+    const existingIndex = lines.findIndex((entry, index) =>
+      index > 0 && index < end && new RegExp(`^${key}\\s*:`).test(entry));
+    if (existingIndex >= 0) {
+      lines[existingIndex] = line;
+    } else {
+      lines.splice(end, 0, line);
+      end += 1;
     }
-    if (inParameters && line.trim().startsWith('Return format:')) inParameters = false;
-    const match = inParameters && line.match(/^(-\s+)(.+?):\s*(.*)$/);
-    if (!match) return line;
-    const parameterName = match[2].replace(/\s*\(required\)$/i, '');
-    const tokenName = parameterName.toUpperCase()
-      .replace(/[^A-Z0-9 _-]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim() || 'VALUE';
-    const variable = `TOOL ${toolIndex} ${tokenName}`.slice(0, 63).trimEnd();
-    if (match[3]?.trim()) descriptions[variable] = match[3].trim();
-    return `${match[1]}${match[2]}: [${variable}]${match[3] ? ` - ${match[3]}` : ''}`;
-  }).join('\n');
+  }
+  return lines.join('\n');
 }
 
 export function starterEditorText(node) {
@@ -15870,6 +15830,9 @@ export function createPromptStarter(container, { embed = false } = {}) {
       <button type="button" class="btn btn-sm" data-starter="tpl-save" title="Save current editor as a reusable template">Save as Template</button>
       <button type="button" class="btn btn-sm" data-starter="tpl-delete" title="Delete the selected template" disabled>Delete</button>
       <button type="button" class="btn btn-sm" data-starter="tpl-load-generic" title="Load the generic prompt from the server">Load Generic</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-sm btn-primary" data-starter="new-agent-wizard"
+              title="Reopen the setup dialog to start a new agent">New Agent…</button>
     </div>
     <p class="small text-danger" role="alert" data-starter="error"></p>
     <div class="sd-starter-layout">
@@ -15878,25 +15841,56 @@ export function createPromptStarter(container, { embed = false } = {}) {
           <h3 data-starter="editor-heading">Agent definition</h3>
           <button type="button" class="btn btn-sm" data-starter="add-variable">+ Add variable</button>
           <button type="button" class="btn btn-sm" data-starter="add-tool">+ Add tools</button>
+          <span class="spacer"></span>
+          <button type="button" class="btn btn-sm" data-starter="ai-fill-toolbar" title="Fill a variable with an LLM response">AI Fill</button>
+          <button type="button" class="btn btn-sm" data-starter="ai-fill-all" title="Run the chain and fill every remaining variable automatically">Fill all variables</button>
+          <button type="button" class="btn btn-sm" data-starter="save-all-choices">Save All</button>
         </div>
         <div class="sd-starter-editor" data-starter="editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Prompt Starter Markdown editor" spellcheck="false"
              title="Add a placeholder like [NEW VARIABLE] to create its own field. Click a variable token to jump to its field."></div>
       </section>
       <div class="sd-starter-divider" data-starter="layout-divider" title="Drag to resize"></div>
       <aside class="sd-starter-fields" aria-label="Prompt variables">
+        <details class="sd-starter-identity" data-starter="identity-panel">
+          <summary>Agent setup <span class="small text-muted" data-starter="identity-kind"></span></summary>
+          <div class="sd-starter-identity-body">
+            <div class="sd-agent-setup-row">
+              <label class="small" data-starter="identity-name-label"><span>Agent Name</span>
+                <input class="form-input" data-starter="identity-name" placeholder="e.g. Report Builder"></label>
+            </div>
+            <div class="sd-agent-setup-row">
+              <label class="small" data-starter="identity-id-label"><span>Agent ID</span>
+                <input class="form-input" data-starter="identity-id" placeholder="auto-generated"></label>
+            </div>
+            <div class="sd-agent-setup-row" data-starter="identity-description-row">
+              <label class="small">Description
+                <textarea class="form-input" rows="3" data-starter="identity-description"
+                          placeholder="A short description of what this agent does"></textarea></label>
+            </div>
+            <div class="sd-agent-setup-row sd-agent-setup-tools" data-starter="identity-tools-row">
+              <div class="sd-starter-fields-head">
+                <span class="small">Required tools</span>
+                <button type="button" class="btn btn-sm" data-starter="identity-add-tools">+ Add required tools</button>
+              </div>
+              <div class="sq-chip-row" data-starter="identity-tool-chips"></div>
+            </div>
+            <div class="sd-agent-setup-row" data-starter="identity-reminder-row">
+              <label class="small sd-agent-setup-checkbox-row">
+                <input type="checkbox" data-starter="identity-remind"> Remind every turn
+              </label>
+              <textarea class="form-input" rows="2" data-starter="identity-reminder-text" disabled
+                        placeholder="Leave blank to generate automatically via chain-fill"></textarea>
+            </div>
+            <div class="sd-agent-setup-row">
+              <button type="button" class="btn btn-primary" data-starter="identity-start"
+                      title="Fill the remaining variables one at a time with an LLM">Start building this agent</button>
+            </div>
+          </div>
+        </details>
         <div class="sd-starter-fields-head">
           <h3>Variables</h3>
-          <button type="button" class="btn btn-sm" data-starter="ai-fill-toolbar" title="Fill a variable with an LLM response">AI Fill</button>
-          <button type="button" class="btn btn-sm btn-primary" data-starter="ai-chain-fill"
-                  title="Generate every unfilled variable in order; each step uses the already-accepted ones as context">Chain Fill</button>
-          <button type="button" class="btn btn-sm" data-starter="save-all-choices">Save All</button>
         </div>
-        <div data-starter="fields"></div>
-        <details class="sd-starter-ai-results" data-starter="ai-results" open>
-          <summary>AI results (<span data-starter="ai-results-count">0</span>)</summary>
-          <p class="small text-muted">Held LLM responses with their pre-prompt and target variable. Use one to copy it into the prompt.</p>
-          <div data-starter="ai-results-list"></div>
-        </details>
+        <div data-starter="fields" class="sd-starter-fields-body"></div>
       </aside>
     </div>
     <dialog class="sd-starter-tool-picker" data-starter="tool-picker" aria-labelledby="sd-starter-tool-picker-title">
@@ -15921,58 +15915,137 @@ export function createPromptStarter(container, { embed = false } = {}) {
         </div>
       </section>
     </dialog>
+    <dialog class="sd-agent-setup-modal" data-starter="setup-dialog" aria-labelledby="sd-setup-title">
+      <section class="sd-agent-setup-panel">
+        <div class="sd-starter-tool-picker-head">
+          <h3 id="sd-setup-title">New Agent</h3>
+        </div>
+        <p class="small text-muted">Set up the basics, then the wizard will help write the rest.</p>
+        <div class="sd-agent-setup-body">
+          <div class="sd-agent-setup-row">
+            <label class="small">Kind
+              <select class="form-select form-select-sm" data-starter="setup-kind">
+                <option value="agent">Agent (Markdown)</option>
+                <option value="subagent">Sub-agent (YAML)</option>
+              </select>
+            </label>
+          </div>
+          <div class="sd-agent-setup-row">
+            <label class="small" data-starter="setup-name-label"><span>Agent Name</span>
+              <input class="form-input" data-starter="setup-name" placeholder="e.g. Report Builder"></label>
+          </div>
+          <div class="sd-agent-setup-row">
+            <label class="small" data-starter="setup-id-label"><span>Agent ID</span>
+              <input class="form-input" data-starter="setup-id" placeholder="auto-generated"></label>
+          </div>
+          <div class="sd-agent-setup-row" data-starter="setup-description-row">
+            <label class="small">Description
+              <textarea class="form-input" rows="3" data-starter="setup-description"
+                        placeholder="A short description of what this agent does"></textarea></label>
+          </div>
+          <div class="sd-agent-setup-row sd-agent-setup-tools" data-starter="setup-tools-row">
+            <div class="sd-starter-fields-head">
+              <span class="small">Required tools</span>
+              <button type="button" class="btn btn-sm" data-starter="setup-add-tools">+ Add required tools</button>
+            </div>
+            <div class="sq-chip-row" data-starter="setup-tool-chips"></div>
+          </div>
+          <div class="sd-agent-setup-row" data-starter="setup-reminder-row">
+            <label class="small sd-agent-setup-checkbox-row">
+              <input type="checkbox" data-starter="setup-remind"> Remind every turn
+            </label>
+            <textarea class="form-input" rows="2" data-starter="setup-reminder-text" disabled
+                      placeholder="Leave blank to generate automatically once the rest of the prompt is written"></textarea>
+          </div>
+          <p class="small text-danger" role="alert" data-starter="setup-error"></p>
+        </div>
+        <div class="workspace-save-actions">
+          <button type="button" class="btn" data-starter="setup-cancel">Cancel</button>
+          <button type="button" class="btn btn-primary" data-starter="setup-start">Start Wizard</button>
+        </div>
+      </section>
+    </dialog>
     <dialog class="sd-starter-ai-dialog" data-starter="ai-dialog" aria-labelledby="sd-starter-ai-title">
       <section class="sd-starter-ai-panel">
         <div class="sd-starter-tool-picker-head">
           <h3 id="sd-starter-ai-title">AI fill variable</h3>
           <button type="button" class="btn btn-sm" data-starter="ai-cancel">Close</button>
         </div>
+        <div class="sd-starter-ai-progress" data-starter="ai-progress" hidden>
+          <div class="sd-starter-ai-progress-row">
+            <span class="small" data-starter="ai-progress-label"></span>
+            <span class="small text-muted" data-starter="ai-progress-count"></span>
+            <button type="button" class="btn btn-sm" data-starter="ai-auto-toggle">Fill all remaining</button>
+          </div>
+          <progress class="sd-starter-ai-progress-bar" data-starter="ai-progress-bar" max="1" value="0"></progress>
+        </div>
         <div class="sd-starter-ai-pane" data-starter="ai-request">
-          <label class="small">Variable to fill
-            <select class="form-select" data-starter="ai-target" aria-label="Variable to fill"></select>
-          </label>
-          <label class="small">Model
-            <select class="form-select" data-starter="ai-model" aria-label="Model"></select>
-          </label>
-          <label class="small" for="sd-starter-ai-description">What this variable is (sent to the LLM with the pre-prompt)</label>
-          <div class="sd-starter-ai-preprompt-row">
-            <input id="sd-starter-ai-description" class="form-input" data-starter="ai-description"
-                   placeholder="e.g. Who the agent is and its primary responsibility">
-            <button type="button" class="btn btn-sm" data-starter="ai-save-description"
-                    title="Save this description for this variable so it is reused as context">Save</button>
-          </div>
-          <label class="small" for="sd-starter-ai-preprompt">Pre-prompt to the LLM</label>
-          <textarea id="sd-starter-ai-preprompt" class="form-input" rows="5" data-starter="ai-preprompt"
-                    placeholder="Describe what the model should write for this variable, e.g. 'Write the role description for an agent.'"></textarea>
-          <div class="sd-starter-choice-list" data-starter="ai-preprompt-list" aria-label="Saved pre-prompts" hidden></div>
-          <div class="sd-starter-ai-preprompt-row">
-            <button type="button" class="btn btn-sm" data-starter="ai-save-preprompt"
-                    title="Save this pre-prompt for this variable so you can reuse it later">Save pre-prompt</button>
-          </div>
-          <label class="small" for="sd-starter-ai-addition">Append to pre-prompt (optional)</label>
-          <input id="sd-starter-ai-addition" class="form-input" data-starter="ai-addition"
-                 placeholder="e.g. engineer — added to the end of the pre-prompt before sending">
-          <div data-starter="ai-context-wrap" hidden>
-            <p class="small text-muted">Append these variables as context:</p>
-            <div class="sd-starter-ai-context" data-starter="ai-context"></div>
-          </div>
+          <fieldset class="sd-starter-ai-section" data-starter="ai-settings-section">
+            <legend>Generation settings</legend>
+            <label class="small">Model
+              <select class="form-select" data-starter="ai-model" aria-label="Model"></select>
+            </label>
+          </fieldset>
+          <fieldset class="sd-starter-ai-section" data-starter="ai-variable-section">
+            <legend>Current variable</legend>
+            <label class="small">Variable to fill
+              <select class="form-select" data-starter="ai-target" aria-label="Variable to fill"></select>
+            </label>
+            <label class="small" for="sd-starter-ai-description">Variable description (what this is, sent to the LLM)</label>
+            <div class="sd-starter-ai-preprompt-row">
+              <textarea id="sd-starter-ai-description" class="form-input" rows="3" data-starter="ai-description"
+                        placeholder="e.g. Who the agent is and its primary responsibility"></textarea>
+              <button type="button" class="btn btn-sm" data-starter="ai-save-description"
+                      title="Save this description for this variable so it is reused as context">Save</button>
+            </div>
+            <label class="small" for="sd-starter-ai-preprompt">Generation instructions (pre-prompt sent to the LLM)</label>
+            <textarea id="sd-starter-ai-preprompt" class="form-input" rows="5" data-starter="ai-preprompt"
+                      placeholder="Describe what the model should write for this variable, e.g. 'Write the role description for an agent.'"></textarea>
+            <div class="sd-starter-choice-list" data-starter="ai-preprompt-list" aria-label="Saved pre-prompts" hidden></div>
+            <div class="sd-starter-ai-preprompt-row">
+              <button type="button" class="btn btn-sm" data-starter="ai-save-preprompt"
+                      title="Save this pre-prompt for this variable so you can reuse it later">Save pre-prompt</button>
+            </div>
+            <label class="small" for="sd-starter-ai-addition">Additional instructions (optional, appended to the pre-prompt)</label>
+            <input id="sd-starter-ai-addition" class="form-input" data-starter="ai-addition"
+                   placeholder="e.g. engineer — added to the end of the pre-prompt before sending">
+          </fieldset>
+          <fieldset class="sd-starter-ai-section" data-starter="ai-context-section">
+            <legend>Context sent to the model</legend>
+            <div data-starter="ai-context-identity-wrap" hidden>
+              <p class="small text-muted sd-starter-ai-context-label">Agent identity</p>
+              <div class="sd-starter-ai-context" data-starter="ai-context-identity"></div>
+            </div>
+            <div data-starter="ai-context-tools-wrap" hidden>
+              <p class="small text-muted sd-starter-ai-context-label">Available tools</p>
+              <div class="sd-starter-ai-context" data-starter="ai-context-tools"></div>
+            </div>
+            <div data-starter="ai-context-accepted-wrap" hidden>
+              <p class="small text-muted sd-starter-ai-context-label">Previously accepted variables</p>
+              <div class="sd-starter-ai-context" data-starter="ai-context-accepted"></div>
+            </div>
+            <p class="small text-muted sd-starter-ai-context-label" data-starter="ai-context-addition-preview" hidden></p>
+          </fieldset>
           <div class="workspace-save-actions">
             <button type="button" class="btn" data-starter="ai-cancel">Cancel</button>
             <button type="button" class="btn btn-primary" data-starter="ai-generate">Generate</button>
           </div>
         </div>
         <div class="sd-starter-ai-pane" data-starter="ai-response" hidden>
+          <p class="small text-muted sd-starter-ai-response-status" data-starter="ai-response-kind">Generated — not yet accepted</p>
           <label class="small" for="sd-starter-ai-response-text">LLM response (edit before saving)</label>
           <textarea id="sd-starter-ai-response-text" class="form-input sd-starter-ai-response" rows="12"
                     data-starter="ai-response-text"></textarea>
           <div class="workspace-save-actions">
             <button type="button" class="btn btn-sm" data-starter="ai-back">Back</button>
+            <button type="button" class="btn btn-sm" data-starter="ai-regenerate" title="Generate again with the same settings">Regenerate</button>
             <button type="button" class="btn btn-sm" data-starter="ai-markdown">Format as Markdown</button>
             <span class="spacer"></span>
             <button type="button" class="btn" data-starter="ai-cancel">Cancel</button>
             <button type="button" class="btn btn-sm" data-starter="ai-save">Save to variable</button>
-            <button type="button" class="btn btn-sm" data-starter="ai-hold"
-                    title="Hold this response (with its pre-prompt and variable) in the AI results list">Add to list</button>
+            <button type="button" class="btn btn-sm" data-starter="ai-skip" hidden
+                    title="Discard this variable and continue the chain">Skip</button>
+            <button type="button" class="btn btn-sm" data-starter="ai-auto-toggle-response" hidden>Fill all remaining</button>
             <button type="button" class="btn btn-primary" data-starter="ai-accept-next" hidden
                     title="Fill this variable and generate the next one in the chain">Accept &amp; next</button>
           </div>
@@ -16051,7 +16124,6 @@ export function createPromptStarter(container, { embed = false } = {}) {
   // regardless of whether `dialog` is a real <dialog> or a plain <div>.
   function showHost() { if (!embed) dialog.showModal(); }
   function closeHost() { if (!embed) dialog.close(); }
-  function isHostOpen() { return embed || dialog.open; }
   const fields = dialog.querySelector('[data-starter="fields"]');
   const editor = dialog.querySelector('[data-starter="editor"]');
   const picker = dialog.querySelector('[data-starter="picker"]');
@@ -16084,6 +16156,21 @@ export function createPromptStarter(container, { embed = false } = {}) {
   const createAgentButton = dialog.querySelector('[data-starter="create-agent"]');
   const createSquadButton = dialog.querySelector('[data-starter="create-squad"]');
   const applyToEditorButton = dialog.querySelector('[data-starter="apply-to-editor"]');
+  const setupDialog = dialog.querySelector('[data-starter="setup-dialog"]');
+  const setupTitle = dialog.querySelector('#sd-setup-title');
+  const setupKindSelect = dialog.querySelector('[data-starter="setup-kind"]');
+  const setupNameLabel = dialog.querySelector('[data-starter="setup-name-label"]');
+  const setupNameInput = dialog.querySelector('[data-starter="setup-name"]');
+  const setupIdLabel = dialog.querySelector('[data-starter="setup-id-label"]');
+  const setupIdInput = dialog.querySelector('[data-starter="setup-id"]');
+  const setupDescriptionRow = dialog.querySelector('[data-starter="setup-description-row"]');
+  const setupDescriptionInput = dialog.querySelector('[data-starter="setup-description"]');
+  const setupToolsRow = dialog.querySelector('[data-starter="setup-tools-row"]');
+  const setupToolChips = dialog.querySelector('[data-starter="setup-tool-chips"]');
+  const setupReminderRow = dialog.querySelector('[data-starter="setup-reminder-row"]');
+  const setupRemindCheckbox = dialog.querySelector('[data-starter="setup-remind"]');
+  const setupReminderInput = dialog.querySelector('[data-starter="setup-reminder-text"]');
+  const setupError = dialog.querySelector('[data-starter="setup-error"]');
   const aiDialog = dialog.querySelector('[data-starter="ai-dialog"]');
   const aiRequestPane = dialog.querySelector('[data-starter="ai-request"]');
   const aiResponsePane = dialog.querySelector('[data-starter="ai-response"]');
@@ -16093,10 +16180,27 @@ export function createPromptStarter(container, { embed = false } = {}) {
   const aiPrepromptList = dialog.querySelector('[data-starter="ai-preprompt-list"]');
   const aiAddition = dialog.querySelector('[data-starter="ai-addition"]');
   const aiDescription = dialog.querySelector('[data-starter="ai-description"]');
-  const aiResultsCount = dialog.querySelector('[data-starter="ai-results-count"]');
-  const aiResultsList = dialog.querySelector('[data-starter="ai-results-list"]');
-  const aiContextWrap = dialog.querySelector('[data-starter="ai-context-wrap"]');
-  const aiContextList = dialog.querySelector('[data-starter="ai-context"]');
+  const identityKindLabel = dialog.querySelector('[data-starter="identity-kind"]');
+  const identityNameInput = dialog.querySelector('[data-starter="identity-name"]');
+  const identityIdInput = dialog.querySelector('[data-starter="identity-id"]');
+  const identityDescriptionRow = dialog.querySelector('[data-starter="identity-description-row"]');
+  const identityDescriptionInput = dialog.querySelector('[data-starter="identity-description"]');
+  const identityToolsRow = dialog.querySelector('[data-starter="identity-tools-row"]');
+  const identityToolChips = dialog.querySelector('[data-starter="identity-tool-chips"]');
+  const identityReminderRow = dialog.querySelector('[data-starter="identity-reminder-row"]');
+  const identityRemindCheckbox = dialog.querySelector('[data-starter="identity-remind"]');
+  const identityReminderInput = dialog.querySelector('[data-starter="identity-reminder-text"]');
+  const aiContextIdentityWrap = dialog.querySelector('[data-starter="ai-context-identity-wrap"]');
+  const aiContextIdentityList = dialog.querySelector('[data-starter="ai-context-identity"]');
+  const aiContextToolsWrap = dialog.querySelector('[data-starter="ai-context-tools-wrap"]');
+  const aiContextToolsList = dialog.querySelector('[data-starter="ai-context-tools"]');
+  const aiContextAcceptedWrap = dialog.querySelector('[data-starter="ai-context-accepted-wrap"]');
+  const aiContextAcceptedList = dialog.querySelector('[data-starter="ai-context-accepted"]');
+  const aiContextAdditionPreview = dialog.querySelector('[data-starter="ai-context-addition-preview"]');
+  const aiProgressWrap = dialog.querySelector('[data-starter="ai-progress"]');
+  const aiProgressLabel = dialog.querySelector('[data-starter="ai-progress-label"]');
+  const aiProgressCount = dialog.querySelector('[data-starter="ai-progress-count"]');
+  const aiProgressBar = dialog.querySelector('[data-starter="ai-progress-bar"]');
   const aiResponseText = dialog.querySelector('[data-starter="ai-response-text"]');
   const aiCompletePane = dialog.querySelector('[data-starter="ai-complete"]');
   const aiFinished = dialog.querySelector('[data-starter="ai-finished"]');
@@ -16105,6 +16209,10 @@ export function createPromptStarter(container, { embed = false } = {}) {
   const aiTitle = dialog.querySelector('#sd-starter-ai-title');
   const aiGenerateBtn = dialog.querySelector('[data-starter="ai-generate"]');
   const aiAcceptNextBtn = dialog.querySelector('[data-starter="ai-accept-next"]');
+  const aiSkipBtn = dialog.querySelector('[data-starter="ai-skip"]');
+  const aiAutoToggleBtn = dialog.querySelector('[data-starter="ai-auto-toggle"]');
+  const aiAutoToggleResponseBtn = dialog.querySelector('[data-starter="ai-auto-toggle-response"]');
+  let chainAuto = false;
   const values = {};
   let choices = {};
   let tools = [];
@@ -16126,6 +16234,8 @@ export function createPromptStarter(container, { embed = false } = {}) {
   let toolPickerSelection = new Set();
   let toolPickerReturnFocus = null;
   let applyTarget = null;
+  let setupResolve = null;
+  let pendingToolReminder = false;
   const maximizeBtn = dialog.querySelector('[data-starter="maximize"]');
 
   function toggleMaximize() {
@@ -16266,7 +16376,6 @@ export function createPromptStarter(container, { embed = false } = {}) {
   }
 
   function showError(err) { error.textContent = err.message || String(err); }
-  function isToolParameterVariable(name) { return /^TOOL \d+ [A-Z0-9 _-]+$/.test(name); }
   function isToolPickerVariable(name) { return /^TOOL \d+$/.test(name); }
   function isCatalogVariable(name) {
     return isToolPickerVariable(name) || name === 'SUB-AGENT ID' || name === 'SUBAGENT ID';
@@ -16289,11 +16398,11 @@ export function createPromptStarter(container, { embed = false } = {}) {
     return marker ? text.slice(0, marker.index).replace(/\s+$/, '') : text;
   }
   function finishedPrompt() { return renderStarter(editorText(), values); }
-  // Bakes every filled, non-tool variable's text directly into the editor, leaving tool
-  // placeholders (TOOL N / TOOL N <PARAM>) as live tokens so tool management keeps working.
+  // Bakes every filled, non-tool variable's text directly into the editor, leaving any
+  // legacy TOOL N placeholder as a live token so tool management keeps working.
   function bakeFilledVariables(text) {
     return text.replace(VARIABLE, (match, name) => {
-      if (isToolPickerVariable(name) || isToolParameterVariable(name)) return match;
+      if (isToolPickerVariable(name)) return match;
       const value = (values[name] || values[name.replace(/-/g, ' ')])?.trim();
       return value || match;
     });
@@ -16327,15 +16436,9 @@ export function createPromptStarter(container, { embed = false } = {}) {
       token.setAttribute('aria-label', `${name}: ${values[name]?.trim() || 'unfilled'}`);
     });
   }
-  function selectedToolNames() {
-    return Object.entries(values)
-      .filter(([name, value]) => /^TOOL \d+$/.test(name) && value?.trim())
-      .map(([variable, value]) => ({ index: Number(variable.slice(5)), name: value.trim() }))
-      .sort((left, right) => left.index - right.index);
-  }
   async function refreshToolInstructions() {
     const request = ++toolInstructionsRequest;
-    const selected = selectedToolNames().filter(entry => tools.some(tool => tool.name === entry.name));
+    const selected = currentToolNames(editorText()).filter(name => tools.some(tool => tool.name === name));
     const body = promptBodyText();
     toolInstructionEntries = [];
     renderEditor(body);
@@ -16346,12 +16449,11 @@ export function createPromptStarter(container, { embed = false } = {}) {
     }
     toolInstructionsState = 'loading';
     try {
-      const entries = await Promise.all(selected.map(async ({ index, name }) => {
+      const entries = await Promise.all(selected.map(async name => {
         const result = await Api.getStarterToolInstructions(name);
         const lines = result.content.split(/\r?\n/);
-        const parameterDescriptions = {};
-        const description = addToolParameterVariables(lines.slice(1).join('\n').trim(), index, parameterDescriptions);
-        return { name, description, parameterDescriptions };
+        const description = lines.slice(1).join('\n').trim();
+        return { name, description };
       }));
       if (request !== toolInstructionsRequest || disposed) return;
       toolInstructionEntries = entries;
@@ -16474,7 +16576,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
       showError(new Error('The tool catalog is not available yet. Close and reopen Prompt Starter to retry.'));
       return;
     }
-    toolPickerSelection = new Set(selectedToolNames().map(tool => tool.name));
+    toolPickerSelection = new Set(currentToolNames(editorText()));
     toolPickerReturnFocus = trigger;
     toolPickerError.textContent = '';
     toolFilter.value = '';
@@ -16489,24 +16591,18 @@ export function createPromptStarter(container, { embed = false } = {}) {
     toolPickerReturnFocus = null;
   }
   function applyToolSelection() {
-    const currentTools = selectedToolNames();
-    const indexByName = new Map(currentTools.map(tool => [tool.name, tool.index]));
-    const frontmatterNumbers = [...editorText().matchAll(/\[TOOL (\d+)\]/g)].map(match => Number(match[1]));
-    let nextIndex = Math.max(0, ...frontmatterNumbers);
-    const assignments = [...toolPickerSelection].map(name => ({
-      name,
-      index: indexByName.get(name) || ++nextIndex,
-    }));
+    const existing = currentToolNames(editorText());
+    const finalNames = [
+      ...existing.filter(name => toolPickerSelection.has(name)),
+      ...[...toolPickerSelection].filter(name => !existing.includes(name)),
+    ];
     try {
-      const updatedText = replaceToolVariables(editorText(), assignments.map(tool => tool.index));
-      const retained = new Set(assignments.map(tool => `TOOL ${tool.index}`));
-      Object.keys(values).forEach(name => {
-        if (/^TOOL \d+$/.test(name) && !retained.has(name)) delete values[name];
-      });
-      assignments.forEach(tool => { values[`TOOL ${tool.index}`] = tool.name; });
+      const updatedText = replaceToolVariables(editorText(), finalNames);
       variablesKey = '';
       renderEditor(updatedText);
       renderFields();
+      renderSetupToolChips();
+      renderIdentityToolChips();
       closeToolPicker();
       refreshToolInstructions();
     } catch (err) {
@@ -16517,60 +16613,197 @@ export function createPromptStarter(container, { embed = false } = {}) {
     openToolPicker();
   }
 
+  // --- Agent Setup Dialog: upfront step shown when launching a fresh wizard session ---
+  function renderSetupToolChips() {
+    const names = [...toolPickerSelection];
+    setupToolChips.innerHTML = names.map(name => `<span class="sq-chip">${esc(name)}
+      <button type="button" class="sq-chip-x" data-starter="setup-remove-tool" data-tool="${esc(name)}"
+              aria-label="Remove ${esc(name)}">×</button></span>`).join('');
+  }
+  function updateSetupKindVisibility() {
+    const isSubagent = setupKindSelect.value === 'subagent';
+    setupTitle.textContent = isSubagent ? 'New Sub-agent' : 'New Agent';
+    setupNameLabel.querySelector('span').textContent = isSubagent ? 'Sub-agent Name' : 'Agent Name';
+    setupIdLabel.querySelector('span').textContent = isSubagent ? 'Sub-agent ID' : 'Agent ID';
+    setupDescriptionRow.hidden = isSubagent;
+    setupToolsRow.hidden = isSubagent;
+    setupReminderRow.hidden = isSubagent;
+  }
+  function closeSetupDialog(outcome) {
+    const resolve = setupResolve;
+    setupResolve = null;
+    if (setupDialog.open) setupDialog.close();
+    if (resolve) resolve(outcome);
+  }
+  // Shows the Setup Dialog and resolves once it's dismissed: 'started' if the
+  // user confirmed Start Wizard (values/tools are already seeded by then), or
+  // 'cancelled' if they backed out (caller falls back to its old behavior).
+  function openSetupDialog() {
+    setupError.textContent = '';
+    setupKindSelect.value = tplSelect.value === 'subagent' ? 'subagent' : 'agent';
+    setupKindSelect.disabled = Boolean(applyTarget);
+    const presetName = applyTarget?.agentName || '';
+    setupNameInput.value = presetName;
+    setupIdInput.value = applyTarget?.agentId || (presetName ? toAgentId(presetName) : '');
+    setupIdInput.readOnly = Boolean(applyTarget);
+    setupDescriptionInput.value = '';
+    setupRemindCheckbox.checked = false;
+    setupReminderInput.value = '';
+    setupReminderInput.disabled = true;
+    pendingToolReminder = false;
+    toolPickerSelection = new Set();
+    renderSetupToolChips();
+    updateSetupKindVisibility();
+    return new Promise(resolve => {
+      setupResolve = resolve;
+      setupDialog.showModal();
+      setupNameInput.focus();
+    });
+  }
+  async function handleSetupStart(button) {
+    const name = setupNameInput.value.trim();
+    if (!name) { setupError.textContent = 'Enter a name.'; return; }
+    const kind = setupKindSelect.value === 'subagent' ? 'subagent' : 'agent';
+    const id = applyTarget?.agentId || (normalizeAgentId(setupIdInput.value) || toAgentId(name));
+    setupIdInput.value = id;
+    const currentKind = tplSelect.value === 'subagent' ? 'subagent' : 'agent';
+    if (kind !== currentKind) {
+      tplSelect.value = kind;
+      tplDeleteBtn.disabled = true;
+      applyTemplate(kind);
+    }
+    const nameVariable = kind === 'subagent' ? 'SUB-AGENT NAME' : 'AGENT NAME';
+    const idVariable = kind === 'subagent' ? 'SUB-AGENT ID' : 'AGENT ID';
+    values[nameVariable] = name;
+    values[idVariable] = id;
+    updateTokens(nameVariable);
+    updateTokens(idVariable);
+    if (kind === 'agent') {
+      values['DESCRIPTION'] = setupDescriptionInput.value.trim();
+      updateTokens('DESCRIPTION');
+      try {
+        let updated = replaceToolVariables(editorText(), [...toolPickerSelection]);
+        const reminderText = setupReminderInput.value.trim();
+        if (setupRemindCheckbox.checked && reminderText) {
+          updated = setFrontmatterFields(updated, [
+            ['remind_every_turn', 'true'],
+            ['tool_reminder', JSON.stringify(reminderText)],
+          ]);
+          pendingToolReminder = false;
+        } else {
+          // Checked but left blank: generate the wording as the last chain-fill
+          // step, once Execution Instructions exists to condense it from.
+          pendingToolReminder = setupRemindCheckbox.checked && toolPickerSelection.size > 0;
+        }
+        renderEditor(updated);
+      } catch (err) {
+        setupError.textContent = err.message || String(err);
+        return;
+      }
+      button.disabled = true;
+      await refreshToolInstructions();
+      button.disabled = false;
+      if (disposed) return;
+    }
+    variablesKey = '';
+    renderFields();
+    closeSetupDialog('started');
+    startChainFill();
+  }
+  setupKindSelect.addEventListener('change', updateSetupKindVisibility);
+  setupRemindCheckbox.addEventListener('change', () => {
+    setupReminderInput.disabled = !setupRemindCheckbox.checked;
+    if (setupRemindCheckbox.checked) setupReminderInput.focus();
+  });
+  setupNameInput.addEventListener('input', () => {
+    if (!setupIdInput.readOnly) setupIdInput.value = toAgentId(setupNameInput.value);
+  });
+  setupIdInput.addEventListener('change', () => {
+    if (setupIdInput.readOnly) return;
+    setupIdInput.value = normalizeAgentId(setupIdInput.value) || toAgentId(setupNameInput.value);
+  });
+  setupDialog.addEventListener('cancel', event => {
+    event.preventDefault();
+    closeSetupDialog('cancelled');
+  });
+  setupDialog.addEventListener('close', () => {
+    if (setupResolve) { const resolve = setupResolve; setupResolve = null; resolve('cancelled'); }
+  });
+
   // --- AI variable fill -----------------------------------------------------
   let aiModelsLoaded = false;
   let aiBusy = false;
-  let lastAiPrompt = '';
-  const aiResultsKey = 'novous2.starter.ai-results';
-  let aiResults = [];
-  try {
-    const stored = JSON.parse(localStorage.getItem(aiResultsKey) || '[]');
-    if (Array.isArray(stored)) aiResults = stored.filter(entry => entry && typeof entry.text === 'string');
-  } catch { /* storage unavailable */ }
-  function persistAiResults() {
-    try { localStorage.setItem(aiResultsKey, JSON.stringify(aiResults.slice(0, 50))); }
-    catch { /* storage unavailable */ }
+  // --- Agent setup panel: inline identity/tools/reminder editing, always visible
+  // (mirrors the Setup Dialog's fields so they stay editable after creation). ---
+  function readFrontmatterField(text, key) {
+    const lines = text.replace(/\r\n/g, '\n').split('\n');
+    if (lines[0]?.trim() !== '---') return null;
+    const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+    if (end < 0) return null;
+    const re = new RegExp(`^${key}\\s*:\\s*(.*)$`);
+    for (let i = 1; i < end; i++) {
+      const match = lines[i].match(re);
+      if (match) return match[1].trim();
+    }
+    return null;
   }
-  function renderAiResults() {
-    aiResultsCount.textContent = String(aiResults.length);
-    aiResultsList.replaceChildren(...aiResults.map((entry, index) => {
-      const row = document.createElement('div');
-      row.className = 'sd-starter-ai-result';
-      const head = document.createElement('div');
-      head.className = 'sd-starter-ai-result-head';
-      const variable = document.createElement('strong');
-      variable.textContent = entry.variable || '';
-      const when = document.createElement('span');
-      when.className = 'text-muted small';
-      when.textContent = entry.time ? new Date(entry.time).toLocaleString() : '';
-      head.append(variable, when);
-      const prePrompt = document.createElement('p');
-      prePrompt.className = 'small text-muted sd-starter-ai-result-preprompt';
-      prePrompt.textContent = entry.prePrompt || '';
-      prePrompt.title = entry.prePrompt || '';
-      const preview = document.createElement('p');
-      preview.className = 'small sd-starter-ai-result-text';
-      preview.textContent = entry.text;
-      const actions = document.createElement('div');
-      actions.className = 'sd-starter-ai-result-actions';
-      for (const [action, label, title] of [
-        ['ai-result-use', 'To prompt', `Copy this response into the ${entry.variable || ''} variable`],
-        ['ai-result-copy', 'Copy', 'Copy the response text to the clipboard'],
-        ['ai-result-reuse', 'Reuse', 'Reopen the AI dialog with this variable and pre-prompt'],
-        ['ai-result-delete', 'Delete', 'Remove this entry from the list'],
-      ]) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = action === 'ai-result-delete' ? 'btn btn-sm btn-danger' : 'btn btn-sm';
-        button.dataset.starter = action;
-        button.dataset.index = String(index);
-        button.textContent = label;
-        button.title = title;
-        actions.appendChild(button);
+  function currentKind() {
+    return /^type:\s*subagent\s*$/m.test(editorText()) ? 'subagent' : 'agent';
+  }
+  function renderIdentityToolChips() {
+    const names = currentToolNames(editorText());
+    identityToolChips.innerHTML = names.map(name => `<span class="sq-chip">${esc(name)}
+      <button type="button" class="sq-chip-x" data-starter="identity-remove-tool" data-tool="${esc(name)}"
+              aria-label="Remove ${esc(name)}">×</button></span>`).join('');
+  }
+  function renderIdentityPanel() {
+    const isSubagent = currentKind() === 'subagent';
+    identityKindLabel.textContent = isSubagent ? 'Sub-agent (YAML)' : 'Agent (Markdown)';
+    const nameVariable = isSubagent ? 'SUB-AGENT NAME' : 'AGENT NAME';
+    const idVariable = isSubagent ? 'SUB-AGENT ID' : 'AGENT ID';
+    identityNameInput.value = values[nameVariable] || '';
+    identityIdInput.value = values[idVariable] || '';
+    identityDescriptionRow.hidden = isSubagent;
+    identityDescriptionInput.value = values['DESCRIPTION'] || '';
+    identityToolsRow.hidden = isSubagent;
+    renderIdentityToolChips();
+    identityReminderRow.hidden = isSubagent;
+    const remindRaw = readFrontmatterField(editorText(), 'remind_every_turn');
+    const reminderRaw = readFrontmatterField(editorText(), 'tool_reminder');
+    let reminderText = '';
+    if (reminderRaw) {
+      try { reminderText = JSON.parse(reminderRaw); }
+      catch { reminderText = reminderRaw.replace(/^["']|["']$/g, ''); }
+    }
+    identityRemindCheckbox.checked = remindRaw === 'true';
+    identityReminderInput.value = reminderText;
+    identityReminderInput.disabled = !identityRemindCheckbox.checked;
+  }
+  function applyIdentityName() {
+    const nameVariable = currentKind() === 'subagent' ? 'SUB-AGENT NAME' : 'AGENT NAME';
+    values[nameVariable] = identityNameInput.value;
+    updateTokens(nameVariable);
+  }
+  function applyIdentityId() {
+    const idVariable = currentKind() === 'subagent' ? 'SUB-AGENT ID' : 'AGENT ID';
+    values[idVariable] = identityIdInput.value;
+    updateTokens(idVariable);
+  }
+  function applyIdentityDescription() {
+    values['DESCRIPTION'] = identityDescriptionInput.value;
+    updateTokens('DESCRIPTION');
+  }
+  function applyIdentityReminder() {
+    try {
+      if (!identityRemindCheckbox.checked) {
+        renderEditor(setFrontmatterFields(editorText(), [['remind_every_turn', 'false'], ['tool_reminder', '""']]));
+      } else {
+        const text = identityReminderInput.value.trim();
+        if (!text) return;
+        renderEditor(setFrontmatterFields(editorText(), [['remind_every_turn', 'true'], ['tool_reminder', JSON.stringify(text)]]));
       }
-      row.append(head, prePrompt, preview, actions);
-      return row;
-    }));
+      renderFields();
+    } catch (err) { showError(err); }
   }
   function aiPrepromptKey(name) {
     return `AI PRE-PROMPT ${name}`.slice(0, 64).trimEnd();
@@ -16578,12 +16811,10 @@ export function createPromptStarter(container, { embed = false } = {}) {
   function aiDescriptionKey(name) {
     return `AI DESCRIPTION ${name}`.slice(0, 64).trimEnd();
   }
-  // A variable's description: the user-saved one, else a tool parameter's, else the built-in default.
+  // A variable's description: the user-saved one, else the built-in default.
   function variableDescription(name) {
     const saved = (choices[aiDescriptionKey(name)] || []).slice(-1)[0];
-    if (saved) return saved;
-    const parameterDescriptions = Object.assign({}, ...toolInstructionEntries.map(entry => entry.parameterDescriptions));
-    return parameterDescriptions[name] || STARTER_VARIABLE_DESCRIPTIONS[name] || '';
+    return saved || STARTER_VARIABLE_DESCRIPTIONS[name] || '';
   }
   function populateAiPreprompts() {
     const saved = choices[aiPrepromptKey(aiTargetSelect.value)] || [];
@@ -16614,37 +16845,52 @@ export function createPromptStarter(container, { embed = false } = {}) {
     aiCompletePane.hidden = pane !== 'complete';
   }
   function aiShowError(err) { aiErrorLabel.textContent = err ? (err.message || String(err)) : ''; }
+  function buildContextRow(name, value) {
+    const label = document.createElement('label');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = name;
+    const copy = document.createElement('span');
+    const title = document.createElement('strong');
+    title.textContent = name;
+    copy.appendChild(title);
+    const described = variableDescription(name);
+    if (described) {
+      const meaning = document.createElement('span');
+      meaning.className = 'small';
+      meaning.textContent = described;
+      copy.appendChild(meaning);
+    }
+    const preview = document.createElement('span');
+    preview.className = 'text-muted small';
+    preview.textContent = value.trim().slice(0, 120);
+    copy.appendChild(preview);
+    label.append(checkbox, copy);
+    return label;
+  }
+  function aiContextCheckedInputs() {
+    return [...aiContextIdentityList.querySelectorAll('input'), ...aiContextToolsList.querySelectorAll('input'),
+            ...aiContextAcceptedList.querySelectorAll('input')];
+  }
+  function updateAiAdditionPreview() {
+    const addition = aiAddition.value.trim();
+    aiContextAdditionPreview.hidden = !addition;
+    aiContextAdditionPreview.textContent = addition ? `Additional context: ${addition}` : '';
+  }
   function renderAiContext() {
     const target = aiTargetSelect.value;
-    // Selected tools (bare TOOL N) are useful context for writing role/responsibilities text;
-    // their injected parameter placeholders (TOOL N <PARAM>) are just documentation tokens and
-    // would only add noise, so they're left out here.
     const entries = Object.entries(values)
-      .filter(([name, value]) => name !== target && value?.trim() && !isToolParameterVariable(name));
-    aiContextWrap.hidden = !entries.length;
-    aiContextList.replaceChildren(...entries.map(([name, value]) => {
-      const label = document.createElement('label');
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.value = name;
-      const copy = document.createElement('span');
-      const title = document.createElement('strong');
-      title.textContent = name;
-      copy.appendChild(title);
-      const described = variableDescription(name);
-      if (described) {
-        const meaning = document.createElement('span');
-        meaning.className = 'small';
-        meaning.textContent = described;
-        copy.appendChild(meaning);
-      }
-      const preview = document.createElement('span');
-      preview.className = 'text-muted small';
-      preview.textContent = value.trim().slice(0, 120);
-      copy.appendChild(preview);
-      label.append(checkbox, copy);
-      return label;
-    }));
+      .filter(([name, value]) => name !== target && value?.trim());
+    const identity = entries.filter(([name]) => CHAIN_SEED_VARIABLES.includes(name));
+    const accepted = entries.filter(([name]) => !CHAIN_SEED_VARIABLES.includes(name));
+    aiContextIdentityWrap.hidden = !identity.length;
+    aiContextIdentityList.replaceChildren(...identity.map(([name, value]) => buildContextRow(name, value)));
+    aiContextToolsWrap.hidden = !toolInstructionEntries.length;
+    aiContextToolsList.replaceChildren(
+      ...toolInstructionEntries.map(entry => buildContextRow(entry.name, entry.description)));
+    aiContextAcceptedWrap.hidden = !accepted.length;
+    aiContextAcceptedList.replaceChildren(...accepted.map(([name, value]) => buildContextRow(name, value)));
+    updateAiAdditionPreview();
   }
   async function loadAiModels() {
     if (aiModelsLoaded) return;
@@ -16667,8 +16913,12 @@ export function createPromptStarter(container, { embed = false } = {}) {
     }
   }
   function openAiDialog(targetName = '', prePrompt = null) {
-    const variables = starterVariables(editorText())
-      .filter(name => !isCatalogVariable(name) && !isToolParameterVariable(name));
+    const bodyVariables = starterVariables(editorText())
+      .filter(name => !isCatalogVariable(name));
+    // Offer the tool reminder as a fillable target too, whenever tools exist — both
+    // for the automatic end-of-chain step and as a manually pickable "AI Fill" target.
+    const variables = currentToolNames(editorText()).length
+      ? [...bodyVariables, 'TOOL REMINDER'] : bodyVariables;
     if (!variables.length) {
       showError(new Error('Add a variable placeholder to the prompt before using AI fill.'));
       return;
@@ -16676,6 +16926,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
     aiShowError(null);
     aiStatus.textContent = '';
     aiAcceptNextBtn.hidden = true;
+    aiSkipBtn.hidden = true;
     aiTitle.textContent = 'AI fill variable';
     aiTargetSelect.replaceChildren(...variables.map(name => new Option(name, name)));
     aiTargetSelect.value = variables.includes(targetName) ? targetName : variables[0];
@@ -16685,6 +16936,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
     aiDescription.value = variableDescription(aiTargetSelect.value);
     populateAiPreprompts();
     renderAiContext();
+    updateChainProgressUI();
     showAiPane('request');
     if (!aiDialog.open) aiDialog.showModal();
     loadAiModels();
@@ -16696,20 +16948,22 @@ export function createPromptStarter(container, { embed = false } = {}) {
     if (!prePrompt) { aiShowError(new Error('Enter a pre-prompt for the LLM.')); return; }
     const model = aiModelSelect.value;
     if (!model) { aiShowError(new Error('Choose a model.')); return; }
-    const chosen = [...aiContextList.querySelectorAll('input:checked')].map(input => input.value);
+    const chosen = aiContextCheckedInputs().filter(input => input.checked).map(input => input.value);
     const addition = aiAddition.value.trim();
     let prompt = addition ? `${prePrompt}\n\n${addition}` : prePrompt;
-    lastAiPrompt = prompt;
     const target = aiTargetSelect.value;
     const targetDescription = aiDescription.value.trim();
     prompt += `\n\nYou are writing the value for the "${target}" variable of an AI agent prompt.`;
     if (targetDescription) prompt += ` ${target} means: ${targetDescription}`;
     prompt += ' Output only the text for this variable — no section heading and no preamble.';
     if (chosen.length) {
-      prompt += '\n\nContext — already-filled variables of this agent prompt:\n' + chosen.map(name => {
-        const described = variableDescription(name);
-        return `- ${name}${described ? ` (${described})` : ''}: ${values[name].trim()}`;
-      }).join('\n');
+      prompt += '\n\nContext — already-filled variables and available tools of this agent prompt:\n'
+        + chosen.map(name => {
+          const toolEntry = toolInstructionEntries.find(entry => entry.name === name);
+          if (toolEntry) return `- Tool: ${name}\n  ${toolEntry.description.replace(/\n/g, '\n  ')}`;
+          const described = variableDescription(name);
+          return `- ${name}${described ? ` (${described})` : ''}: ${values[name].trim()}`;
+        }).join('\n');
     }
     aiBusy = true;
     button.disabled = true;
@@ -16726,6 +16980,10 @@ export function createPromptStarter(container, { embed = false } = {}) {
     } finally {
       aiBusy = false;
       button.disabled = false;
+    }
+    if (!disposed && chainAuto && chainQueue.length && aiDialog.open
+        && !aiResponsePane.hidden && aiResponseText.value.trim()) {
+      aiAcceptNext();
     }
   }
   async function aiFormatMarkdown(button) {
@@ -16756,6 +17014,16 @@ export function createPromptStarter(container, { embed = false } = {}) {
   // Fills the variable's text area in the Variables panel (and the value used by the
   // finished prompt) without rewriting the token shown in the Markdown editor.
   function aiApplyToVariable(variable, text) {
+    if (variable === 'TOOL REMINDER') {
+      try {
+        renderEditor(setFrontmatterFields(editorText(), [
+          ['remind_every_turn', 'true'],
+          ['tool_reminder', JSON.stringify(text.trim())],
+        ]));
+        renderFields();
+      } catch (err) { showError(err); }
+      return;
+    }
     values[variable] = text;
     showVariableField(variable, true);
     fields.querySelector('[data-starter-value]')?.scrollIntoView({ block: 'nearest' });
@@ -16778,6 +17046,29 @@ export function createPromptStarter(container, { embed = false } = {}) {
     return saved || STARTER_VARIABLE_PREPROMPTS[name]
       || `Write the value for the ${name} section of this agent prompt.`;
   }
+  function updateChainAutoToggleUI() {
+    const label = chainAuto ? 'Stop auto-fill' : 'Fill all remaining';
+    aiAutoToggleBtn.textContent = label;
+    aiAutoToggleResponseBtn.textContent = label;
+    aiAutoToggleBtn.hidden = chainTotal <= 0;
+    aiAutoToggleResponseBtn.hidden = aiAcceptNextBtn.hidden;
+    aiAutoToggleBtn.classList.toggle('sd-starter-auto-active', chainAuto);
+    aiAutoToggleResponseBtn.classList.toggle('sd-starter-auto-active', chainAuto);
+  }
+  function updateChainProgressUI() {
+    const active = chainTotal > 0;
+    aiProgressWrap.hidden = !active;
+    updateChainAutoToggleUI();
+    if (!active) return;
+    const completed = chainTotal - chainQueue.length;
+    const current = Math.min(completed + 1, chainTotal);
+    aiProgressLabel.textContent = chainQueue.length
+      ? `Step ${current} of ${chainTotal}: ${chainQueue[0]}`
+      : 'Chain fill — complete';
+    aiProgressCount.textContent = `${completed}/${chainTotal} completed`;
+    aiProgressBar.max = chainTotal;
+    aiProgressBar.value = completed;
+  }
   function chainStepSetup(name) {
     aiTargetSelect.value = name;
     aiTargetSelect.disabled = true;
@@ -16786,14 +17077,22 @@ export function createPromptStarter(container, { embed = false } = {}) {
     aiAddition.value = '';
     populateAiPreprompts();
     renderAiContext();
-    aiContextList.querySelectorAll('input').forEach(input => { input.checked = true; });
-    aiTitle.textContent = `Chain fill — ${name} (${chainTotal - chainQueue.length + 1}/${chainTotal})`;
+    aiContextCheckedInputs().forEach(input => { input.checked = true; });
+    aiTitle.textContent = 'Chain fill';
+    updateChainProgressUI();
     aiAcceptNextBtn.hidden = false;
+    aiSkipBtn.hidden = false;
+    updateChainAutoToggleUI();
   }
   function startChainFill() {
+    chainAuto = false;
     const variables = starterVariables(editorText())
-      .filter(name => !isCatalogVariable(name) && !isToolParameterVariable(name));
+      .filter(name => !isCatalogVariable(name));
     const queue = variables.filter(name => !values[name]?.trim() && !CHAIN_SEED_VARIABLES.includes(name));
+    if (pendingToolReminder && currentToolNames(editorText()).length) {
+      queue.push('TOOL REMINDER');
+      pendingToolReminder = false;
+    }
     if (!queue.length) {
       showError(new Error('All variables are already filled; nothing to chain-fill.'));
       return;
@@ -16813,8 +17112,11 @@ export function createPromptStarter(container, { embed = false } = {}) {
   function endChain() {
     chainQueue = [];
     chainTotal = 0;
+    chainAuto = false;
     aiTitle.textContent = 'AI fill variable';
     aiAcceptNextBtn.hidden = true;
+    aiSkipBtn.hidden = true;
+    updateChainProgressUI();
   }
   function aiAcceptNext() {
     const target = aiTargetSelect.value;
@@ -16822,11 +17124,13 @@ export function createPromptStarter(container, { embed = false } = {}) {
     if (!text) { aiShowError(new Error('There is no response text to accept.')); return; }
     aiApplyToVariable(target, text);
     chainQueue = chainQueue.filter(name => name !== target);
+    updateChainProgressUI();
     if (!chainQueue.length) {
-      chainQueue = [];
       chainTotal = 0;
+      chainAuto = false;
       aiAcceptNextBtn.hidden = true;
-      aiTitle.textContent = 'Chain fill — complete';
+      aiSkipBtn.hidden = true;
+      updateChainAutoToggleUI();
       aiFinished.value = finishedPrompt();
       showAiPane('complete');
       aiStatus.textContent = 'Every variable is filled. Review the finished prompt below.';
@@ -16837,16 +17141,36 @@ export function createPromptStarter(container, { embed = false } = {}) {
     showAiPane('request');
     aiGenerate(aiGenerateBtn);
   }
-  function aiHold() {
-    const text = aiResponseText.value.trim();
-    if (!text) { aiShowError(new Error('There is no response text to hold.')); return; }
+  function aiSkip() {
     const target = aiTargetSelect.value;
-    aiResults.unshift({ variable: target, prePrompt: lastAiPrompt, text, time: Date.now() });
-    if (aiResults.length > 50) aiResults.length = 50;
-    persistAiResults();
-    renderAiResults();
-    aiDialog.close();
-    status.textContent = `Held the LLM response for ${target} in AI results.`;
+    chainQueue = chainQueue.filter(name => name !== target);
+    updateChainProgressUI();
+    if (!chainQueue.length) {
+      chainTotal = 0;
+      chainAuto = false;
+      aiAcceptNextBtn.hidden = true;
+      aiSkipBtn.hidden = true;
+      updateChainAutoToggleUI();
+      aiFinished.value = finishedPrompt();
+      showAiPane('complete');
+      aiStatus.textContent = 'Chain finished. Some variables were skipped and remain unfilled.';
+      status.textContent = 'Chain fill finished — some variables were skipped.';
+      return;
+    }
+    chainStepSetup(chainQueue[0]);
+    showAiPane('request');
+    aiGenerate(aiGenerateBtn);
+  }
+  function toggleChainAuto() {
+    if (!chainQueue.length) return;
+    chainAuto = !chainAuto;
+    updateChainAutoToggleUI();
+    if (!chainAuto) return;
+    if (!aiResponsePane.hidden && aiResponseText.value.trim()) {
+      aiAcceptNext();
+    } else if (!aiRequestPane.hidden) {
+      aiGenerate(aiGenerateBtn);
+    }
   }
   async function aiSaveDescription(button) {
     const name = aiTargetSelect.value;
@@ -16894,11 +17218,11 @@ export function createPromptStarter(container, { embed = false } = {}) {
   }
   let currentVariable = '';
   function renderFields() {
+    renderIdentityPanel();
     const variables = starterVariables(editorText())
       .filter(name => !isCatalogVariable(name));
-    const parameterDescriptions = Object.assign({}, ...toolInstructionEntries.map(entry => entry.parameterDescriptions));
     if (!variables.includes(currentVariable)) currentVariable = variables[0] || '';
-    const key = variables.map(name => `${name}:${parameterDescriptions[name] || ''}`).join('\n') + `\n@${currentVariable}`;
+    const key = variables.join('\n') + `\n@${currentVariable}`;
     if (variablesKey === key) return;
     variablesKey = key;
     if (!variables.length) {
@@ -16907,7 +17231,6 @@ export function createPromptStarter(container, { embed = false } = {}) {
     }
     const name = currentVariable;
     const index = variables.indexOf(name);
-    const description = parameterDescriptions[name];
     fields.innerHTML = `<div class="sd-starter-field-nav">
         <button type="button" class="btn btn-sm" data-starter="field-prev" title="Previous variable"${index === 0 ? ' disabled' : ''}>‹</button>
         <select class="form-select" data-starter="field-jump" aria-label="Choose variable">
@@ -16918,7 +17241,6 @@ export function createPromptStarter(container, { embed = false } = {}) {
         <button type="button" class="btn btn-sm" data-starter="field-next" title="Next variable"${index === variables.length - 1 ? ' disabled' : ''}>›</button>
       </div>
       <div class="sd-starter-field" data-variable="${esc(name)}">
-        ${description ? `<p class="sd-starter-field-description">${esc(description)}</p>` : ''}
         ${(choices[name] || []).length ? `<div class="sd-starter-choice-list" aria-label="Saved choices for ${esc(name)}">
           ${(choices[name] || []).map(value => `<div class="sd-starter-choice-row">
             <button type="button" class="sd-starter-choice" data-starter="use-choice" title="${esc(value)}">${esc(truncateOption(value))}</button>
@@ -17251,7 +17573,17 @@ export function createPromptStarter(container, { embed = false } = {}) {
     renderAiContext();
     populateAiPreprompts();
   });
-  renderAiResults();
+  aiAddition.addEventListener('input', updateAiAdditionPreview);
+  identityNameInput.addEventListener('input', applyIdentityName);
+  identityIdInput.addEventListener('input', applyIdentityId);
+  identityDescriptionInput.addEventListener('input', applyIdentityDescription);
+  identityRemindCheckbox.addEventListener('change', () => {
+    identityReminderInput.disabled = !identityRemindCheckbox.checked;
+    if (identityRemindCheckbox.checked) identityReminderInput.focus();
+    else applyIdentityReminder();
+  });
+  identityReminderInput.addEventListener('change', applyIdentityReminder);
+  renderIdentityPanel();
   toolPicker.addEventListener('cancel', event => {
     event.preventDefault();
     closeToolPicker();
@@ -17262,6 +17594,10 @@ export function createPromptStarter(container, { embed = false } = {}) {
       event.preventDefault();
       restorePendingSubagent();
       hideCreateForm();
+    } else if (!isUntouched() && !confirm(
+      'Close Prompt Starter? This discards the current unfinished prompt (saved choices are kept).'
+    )) {
+      event.preventDefault();
     }
   });
   fields.addEventListener('input', event => {
@@ -17305,6 +17641,9 @@ export function createPromptStarter(container, { embed = false } = {}) {
     status.textContent = '';
     if (action === 'close') {
       if (popoutWindow) { doPopin(); return; }
+      if (!isUntouched() && !confirm(
+        'Close Prompt Starter? This discards the current unfinished prompt (saved choices are kept).'
+      )) return;
       if (pendingSubagentCreation) restorePendingSubagent();
       if (toolPicker.open) closeToolPicker();
       picker.hidden = true;
@@ -17350,6 +17689,14 @@ export function createPromptStarter(container, { embed = false } = {}) {
       addToolVariable();
       return;
     }
+    if (action === 'setup-cancel') { closeSetupDialog('cancelled'); return; }
+    if (action === 'setup-add-tools') { openToolPicker(button); return; }
+    if (action === 'setup-remove-tool') {
+      toolPickerSelection.delete(button.dataset.tool);
+      renderSetupToolChips();
+      return;
+    }
+    if (action === 'setup-start') { handleSetupStart(button); return; }
     if (action === 'use-choice') {
       const field = button.closest('[data-variable]');
       if (!field) return;
@@ -17382,8 +17729,14 @@ export function createPromptStarter(container, { embed = false } = {}) {
       return;
     }
     if (action === 'ai-fill-toolbar') { openAiDialog(); return; }
-    if (action === 'ai-chain-fill') { startChainFill(); return; }
+    if (action === 'ai-fill-all') {
+      startChainFill();
+      if (chainQueue.length) { chainAuto = true; updateChainAutoToggleUI(); aiGenerate(aiGenerateBtn); }
+      return;
+    }
     if (action === 'ai-accept-next') { aiAcceptNext(); return; }
+    if (action === 'ai-skip') { aiSkip(); return; }
+    if (action === 'ai-auto-toggle' || action === 'ai-auto-toggle-response') { toggleChainAuto(); return; }
     if (action === 'ai-copy-finished') {
       try { await navigator.clipboard.writeText(aiFinished.value); aiStatus.textContent = 'Finished prompt copied.'; }
       catch (err) { aiShowError(new Error(`Could not copy the prompt: ${err.message}.`)); }
@@ -17415,7 +17768,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
     if (action === 'ai-clear-restart') {
       if (!confirm('Clear the generated variables and run the chain again? The seed (agent name, ID, description) is kept.')) return;
       starterVariables(editorText())
-        .filter(name => !isCatalogVariable(name) && !isToolParameterVariable(name) && !CHAIN_SEED_VARIABLES.includes(name))
+        .filter(name => !isCatalogVariable(name) && !CHAIN_SEED_VARIABLES.includes(name))
         .forEach(name => { delete values[name]; updateTokens(name); });
       variablesKey = '';
       renderFields();
@@ -17428,10 +17781,10 @@ export function createPromptStarter(container, { embed = false } = {}) {
     }
     if (action === 'ai-cancel') { aiDialog.close(); return; }
     if (action === 'ai-generate') { aiGenerate(button); return; }
+    if (action === 'ai-regenerate') { aiGenerate(button); return; }
     if (action === 'ai-back') { showAiPane('request'); return; }
     if (action === 'ai-markdown') { aiFormatMarkdown(button); return; }
     if (action === 'ai-save') { aiSave(); return; }
-    if (action === 'ai-hold') { aiHold(); return; }
     if (action === 'ai-save-preprompt') { aiSavePreprompt(button); return; }
     if (action === 'ai-use-preprompt') { aiPreprompt.value = button.title; return; }
     if (action === 'ai-delete-preprompt') {
@@ -17449,22 +17802,17 @@ export function createPromptStarter(container, { embed = false } = {}) {
       return;
     }
     if (action === 'ai-save-description') { aiSaveDescription(button); return; }
-    if (action.startsWith('ai-result-')) {
-      const entry = aiResults[Number(button.dataset.index)];
-      if (!entry) return;
-      if (action === 'ai-result-use') {
-        aiApplyToVariable(entry.variable, entry.text);
-        status.textContent = `Copied the held response into ${entry.variable}.`;
-      } else if (action === 'ai-result-copy') {
-        try { await navigator.clipboard.writeText(entry.text); status.textContent = 'Response copied to the clipboard.'; }
-        catch (err) { showError(new Error(`Could not copy the response: ${err.message}.`)); }
-      } else if (action === 'ai-result-reuse') {
-        openAiDialog(entry.variable, entry.prePrompt || '');
-      } else if (action === 'ai-result-delete') {
-        aiResults.splice(Number(button.dataset.index), 1);
-        persistAiResults();
-        renderAiResults();
-      }
+    if (action === 'identity-add-tools') { openToolPicker(button); return; }
+    if (action === 'identity-start') { startChainFill(); return; }
+    if (action === 'identity-remove-tool') {
+      try {
+        const remaining = currentToolNames(editorText()).filter(name => name !== button.dataset.tool);
+        renderEditor(replaceToolVariables(editorText(), remaining));
+        renderFields();
+        renderSetupToolChips();
+        renderIdentityToolChips();
+        refreshToolInstructions();
+      } catch (err) { showError(err); }
       return;
     }
     if (action === 'add-variable') {
@@ -17486,7 +17834,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
     }
     if (action === 'save-all-choices') {
       const toSave = Object.entries(values)
-        .filter(([name, val]) => val?.trim() && !isCatalogVariable(name) && !isToolParameterVariable(name));
+        .filter(([name, val]) => val?.trim() && !isCatalogVariable(name));
       if (!toSave.length) { showError(new Error('No variable values to save.')); return; }
       button.disabled = true;
       status.textContent = 'Saving…';
@@ -17572,6 +17920,20 @@ export function createPromptStarter(container, { embed = false } = {}) {
       finally { button.disabled = false; }
       return;
     }
+    if (action === 'new-agent-wizard') {
+      if (!catalogReady) {
+        showError(new Error('The tool catalog is not available yet. Wait for Prompt Starter to finish loading and try again.'));
+        return;
+      }
+      if (!isUntouched() && !confirm(
+        'Start a new agent? This discards the current unfinished prompt (saved choices are kept).'
+      )) return;
+      tplSelect.value = 'agent';
+      tplDeleteBtn.disabled = true;
+      applyTemplate('agent');
+      await openSetupDialog();
+      return;
+    }
 
     // --- Choice saving ---
     if (action === 'save-choice' || action === 'picker-save') {
@@ -17634,15 +17996,22 @@ export function createPromptStarter(container, { embed = false } = {}) {
         let promptToSave = promptText;
         let agentTools = null;
         let agentToolMode = null;
+        let remindEveryTurn = false;
+        let toolReminder = '';
         if (promptText.startsWith('---')) {
           const definition = await Api.parseStarterAgentDefinition(promptText);
           promptToSave = definition.prompt;
           agentTools = definition.tools;
           agentToolMode = definition.mode;
+          remindEveryTurn = Boolean(definition.remind_every_turn);
+          toolReminder = definition.tool_reminder || '';
         }
         await Api.setAgentPrompt(applyTarget.agentId, promptToSave);
         if (agentTools !== null && agentTools.length) {
           await Api.setAgentTools('prompt', applyTarget.agentId, agentTools, agentToolMode);
+        }
+        if (remindEveryTurn && toolReminder) {
+          await Api.setAgentReminder('prompt', applyTarget.agentId, remindEveryTurn, toolReminder);
         }
         status.textContent = '';
         closeHost();
@@ -17771,6 +18140,8 @@ export function createPromptStarter(container, { embed = false } = {}) {
         let description = '';
         let agentTools = null;
         let agentToolMode = null;
+        let remindEveryTurn = false;
+        let toolReminder = '';
         if (kind === 'agent' && promptText.startsWith('---')) {
           createStatus.textContent = 'Validating agent definition…';
           const definition = await Api.parseStarterAgentDefinition(promptText);
@@ -17781,6 +18152,8 @@ export function createPromptStarter(container, { embed = false } = {}) {
           description = definition.description || '';
           agentTools = definition.tools;
           agentToolMode = definition.mode;
+          remindEveryTurn = Boolean(definition.remind_every_turn);
+          toolReminder = definition.tool_reminder || '';
         }
         if (mode === 'squad') {
           createStatus.textContent = 'Creating squad…';
@@ -17791,6 +18164,10 @@ export function createPromptStarter(container, { embed = false } = {}) {
         if (agentTools !== null) {
           createStatus.textContent = 'Saving selected tools…';
           await Api.setAgentTools('prompt', agentId, agentTools, agentToolMode);
+        }
+        if (remindEveryTurn && toolReminder) {
+          createStatus.textContent = 'Saving reminder…';
+          await Api.setAgentReminder('prompt', agentId, remindEveryTurn, toolReminder);
         }
         createStatus.textContent = 'Setting prompt…';
         await Api.setAgentPrompt(agentId, promptToSave);
@@ -17827,6 +18204,16 @@ export function createPromptStarter(container, { embed = false } = {}) {
     }
   });
 
+  // Whether the current session is still exactly the untouched default template for
+  // its kind — the signal used both by hasChanges() and by the Setup Dialog gating
+  // below, since reopening an already-edited session must never re-show it.
+  function isUntouched() {
+    const kind = tplSelect.value === 'subagent' ? 'subagent' : 'agent';
+    const defaultPrompt = starterDefaults?.[kind]?.prompt || '';
+    return editorText().replace(/\r\n/g, '\n') === defaultPrompt
+      && !Object.values(values).some(value => value.trim());
+  }
+
   return {
     async open(options = {}) {
       error.textContent = '';
@@ -17849,12 +18236,14 @@ export function createPromptStarter(container, { embed = false } = {}) {
         createSquadButton.hidden = false;
         applyToEditorButton.hidden = true;
       }
+      let isFreshSession = false;
       if (!starterDefaults) {
         try {
           starterDefaults = await Api.getStarterDefaults();
           if (disposed) return;
           tplSelect.value = 'agent';
           applyTemplate('agent');
+          isFreshSession = true;
         } catch (err) {
           if (!disposed) {
             showError(err);
@@ -17862,8 +18251,46 @@ export function createPromptStarter(container, { embed = false } = {}) {
           }
           return;
         }
+      } else if (isUntouched()) {
+        isFreshSession = true;
+      } else if (applyTarget) {
+        // A brand-new blank file was just created elsewhere (e.g. editor.js's "New
+        // Prompt" form) — always treat this as a fresh wizard session for it.
+        tplSelect.value = 'agent';
+        tplDeleteBtn.disabled = true;
+        applyTemplate('agent');
+        isFreshSession = true;
+      } else if (!pendingSubagentCreation && confirm(
+        'Start a new agent? This discards the current unfinished prompt (saved choices are kept).'
+      )) {
+        tplSelect.value = 'agent';
+        tplDeleteBtn.disabled = true;
+        applyTemplate('agent');
+        isFreshSession = true;
       }
-      if (applyTarget) {
+      // Show the host dialog first — a nested <dialog> (the Setup Dialog, like the
+      // Tool Picker/AI dialog) only renders once its ancestor <dialog> is itself open.
+      showHost();
+      // Fetch the tool/sub-agent catalog before the Setup Dialog (rather than after
+      // showHost() as before), so its "Add Required Tools" button has data to show.
+      let catalogLoadError = null;
+      try {
+        const [catalog, agents, saved] = await Promise.all([
+          Api.getTools(), Api.getOrchestrationCatalog(), choiceRequest('GET'),
+        ]);
+        if (disposed) return;
+        tools = catalog.tools || [];
+        subagents = agents.subagents || [];
+        choices = saved;
+        catalogReady = true;
+      } catch (err) { catalogLoadError = err; }
+      if (disposed || (!embed && !dialog.open)) return;
+      let setupOutcome = 'skipped';
+      if (isFreshSession && !pendingSubagentCreation) {
+        setupOutcome = await openSetupDialog();
+        if (disposed) return;
+      }
+      if (setupOutcome !== 'started' && applyTarget) {
         values['AGENT NAME'] = applyTarget.agentName || '';
         values['AGENT ID'] = applyTarget.agentId || '';
         variablesKey = '';
@@ -17871,30 +18298,41 @@ export function createPromptStarter(container, { embed = false } = {}) {
         updateTokens('AGENT NAME');
         updateTokens('AGENT ID');
       }
-      showHost();
-      try {
-        const [catalog, agents, saved] = await Promise.all([
-          Api.getTools(), Api.getOrchestrationCatalog(), choiceRequest('GET'),
-        ]);
-        if (disposed || !isHostOpen()) return;
-        tools = catalog.tools || [];
-        subagents = agents.subagents || [];
-        choices = saved;
-        catalogReady = true;
+      if (catalogLoadError) {
+        if (!disposed) showError(catalogLoadError);
+      } else if (!disposed) {
         variablesKey = '';
         renderFields();
         dialog.querySelectorAll('.sd-starter-actions button').forEach(button => {
           if (button.hidden) return;
           button.disabled = false;
         });
-      } catch (err) { if (!disposed) showError(err); }
+      }
+      // A tool just promoted in the Tool Creation Wizard, handed off the same way
+      // testing.js hands code off to Code Builder.
+      if (!disposed && !catalogLoadError) {
+        let attachTool = null;
+        try { attachTool = localStorage.getItem('novous2.prompt-creation.attachTool'); } catch { /* storage unavailable */ }
+        if (attachTool) {
+          try { localStorage.removeItem('novous2.prompt-creation.attachTool'); } catch { /* storage unavailable */ }
+          try {
+            const existing = currentToolNames(editorText());
+            if (!existing.includes(attachTool)) {
+              renderEditor(replaceToolVariables(editorText(), [...existing, attachTool]));
+              variablesKey = '';
+              renderFields();
+              refreshToolInstructions();
+            }
+            status.textContent = `Attached ${attachTool} to this agent.`;
+          } catch {
+            status.textContent = `Promoted ${attachTool}, but it could not be attached automatically here.`;
+          }
+        }
+      }
       loadTemplates();
     },
     hasChanges() {
-      const kind = tplSelect.value === 'subagent' ? 'subagent' : 'agent';
-      const defaultPrompt = starterDefaults?.[kind]?.prompt || '';
-      return editorText().replace(/\r\n/g, '\n') !== defaultPrompt
-        || Object.values(values).some(value => value.trim());
+      return !isUntouched();
     },
     dispose() {
       disposed = true;
@@ -18004,7 +18442,8 @@ export function promptInstall(missing) {
       const input = document.createElement('input');
       input.className = 'form-input question-dialog-input';
       input.value = missing.map(item => item.package).join(' ');
-      input.setAttribute('aria-label', 'Packages to install (space separated)');
+      input.placeholder = 'package names only, e.g. requests pandas';
+      input.setAttribute('aria-label', 'Packages to install (space separated, no "pip install" prefix)');
       const log = document.createElement('pre');
       log.className = 'tool-workbench-output';
       log.hidden = true;
@@ -18024,7 +18463,9 @@ export function promptInstall(missing) {
 
       cancel.addEventListener('click', () => { close(); resolve(false); });
       install.addEventListener('click', async () => {
-        const packages = input.value.split(/\s+/).filter(Boolean);
+        // A natural typo: typing the shell command instead of just the package name(s).
+        const cleaned = input.value.replace(/^\s*(?:python\s*-m\s*)?pip\s+install\s+/i, '');
+        const packages = cleaned.split(/\s+/).filter(Boolean);
         if (!packages.length) return;
         install.disabled = cancel.disabled = input.disabled = true;
         install.textContent = 'Installing…';
@@ -21473,10 +21914,16 @@ function esc(value) {
 
 export function renderTestingView(container, payload = null) {
   container.replaceChildren();
-  renderToolWorkbench(container, payload?.type === 'tool' ? payload : null);
+  renderToolWorkbench(container, { toolPayload: payload?.type === 'tool' ? payload : null });
 }
 
-function renderToolWorkbench(container, toolPayload = null) {
+// `internalModules`/`expectedParameters` come from the Tool Creation Wizard's Step 3/Step 2
+// selections (empty for the standalone Workbench); `initialDescription`/`initialModel` let
+// the wizard pre-seed Stage 1 from its own structured fields instead of a blank textarea.
+export function renderToolWorkbench(container, {
+  toolPayload = null, initialDescription = '', initialModel = '', initialCode = '',
+  internalModules = [], expectedParameters = [],
+} = {}) {
   container.insertAdjacentHTML('beforeend', `
     <section class="card tool-workbench mt-3" aria-labelledby="tool-workbench-title">
       <div class="card-head">
@@ -22128,7 +22575,7 @@ function renderToolWorkbench(container, toolPayload = null) {
       status.className = 'text-muted small';
       try {
         const result = await Api.testToolWithLlm(model, codeField.value, promptField.value, timeoutSeconds(), {
-          execute: !dryRunBox.checked,
+          execute: !dryRunBox.checked, internalModules,
         });
         rows.push({ model, result });
       } catch (err) {
@@ -22301,7 +22748,7 @@ function renderToolWorkbench(container, toolPayload = null) {
         const firstPassing = llmRows.findIndex(row => row.result.status === 'SUCCESS' || row.result.status === 'CALL_VALID');
         result = applyLlmRow(firstPassing === -1 ? 0 : firstPassing);
       } else {
-        result = await Api.executeToolTest(codeField.value, functionInput, timeoutSeconds());
+        result = await Api.executeToolTest(codeField.value, functionInput, timeoutSeconds(), internalModules);
         showResult(result, reportContext);
       }
       const execution = result.tool_execution_result || result;
@@ -22350,12 +22797,19 @@ function renderToolWorkbench(container, toolPayload = null) {
     status.textContent = 'Generating Python function…';
     status.className = 'text-muted small';
     try {
-      const result = await Api.generateToolFunction(modelSelect.value, descriptionField.value);
+      const result = await Api.generateToolFunction(modelSelect.value, descriptionField.value, expectedParameters);
       if (result.status === 'SUCCESS') {
         setCode(result.code);
         lastPassed = null;
-        status.textContent = `Generated ${result.function_name}. Next: ask the LLM to use it.`;
-        status.className = 'text-success small';
+        const mismatch = result.parameter_mismatch;
+        const mismatchNote = mismatch
+          ? ` Parameters differ from Step 2: ${[
+              mismatch.missing.length ? `missing ${mismatch.missing.join(', ')}` : '',
+              mismatch.extra.length ? `unexpected ${mismatch.extra.join(', ')}` : '',
+            ].filter(Boolean).join('; ')}.`
+          : '';
+        status.textContent = `Generated ${result.function_name}. Next: ask the LLM to use it.${mismatchNote}`;
+        status.className = mismatch ? 'text-warning small' : 'text-success small';
       } else {
         status.textContent = `${result.error_code}: ${result.message}`;
         status.className = 'text-danger small';
@@ -22437,7 +22891,7 @@ function renderToolWorkbench(container, toolPayload = null) {
       llmButton.disabled = true;
       updatePromotion();
       status.textContent = 'Verifying test and adding tool…';
-      const result = await Api.promoteTestedTool(codeField.value, parseFunctionInput(), timeoutSeconds());
+      const result = await Api.promoteTestedTool(codeField.value, parseFunctionInput(), timeoutSeconds(), internalModules);
       output.textContent = JSON.stringify(result, null, 2);
       status.textContent = `Added ${result.promoted.name} to the tool library`;
       if (result.requirements_added?.length) {
@@ -22493,7 +22947,13 @@ function renderToolWorkbench(container, toolPayload = null) {
     updatePromotion();
   });
 
-  loadModels();
+  if (initialDescription) descriptionField.value = initialDescription;
+
+  loadModels().then(() => {
+    if (initialModel && [...modelSelect.options].some(option => option.value === initialModel)) {
+      modelSelect.value = initialModel;
+    }
+  });
   loadToolLibrary();
 
   if (toolPayload) {
@@ -22502,7 +22962,11 @@ function renderToolWorkbench(container, toolPayload = null) {
     promptField.value = toolPayload.prompt;
     status.textContent = `Loaded ${toolPayload.name} from ${toolPayload.path} for testing`;
     container.querySelector('.tool-workbench').scrollIntoView({ block: 'start' });
+  } else if (initialCode) {
+    setCode(initialCode);
   }
+
+  return { getCode: () => codeField.value };
 }
 
 ```
@@ -22553,6 +23017,439 @@ export function toolOptionGroups(tools) {
     `<optgroup label="${esc(label)}">${items.map(tool =>
       `<option value="${esc(tool.name)}" title="${esc(Array.isArray(tool.description) ? tool.description.join(' ') : tool.description || '')}">${esc(tool.name)} · ${esc(tool.provider || 'Other')}</option>`
     ).join('')}</optgroup>`).join('');
+}
+
+```
+
+### frontend/static/js/tool_wizard.js
+
+```javascript
+/**
+ * Tool Creation Wizard: Intent -> Parameters -> Logic & Packages -> Output Schema ->
+ * Synthesize & Test -> Promote. Works on a local draft, autosaved to the server so it
+ * survives navigating away, and embeds the existing Tool Workbench (testing.js) for the
+ * generate/multi-model-test/execute/promote engine instead of reimplementing it.
+ */
+import { Api } from './api.js';
+import { esc, navigate } from './shell.js';
+import { renderToolWorkbench } from './testing.js';
+import { Sandbox } from './sandbox_ui.js';
+
+const STEPS = ['Intent', 'Parameters', 'Logic & Packages', 'Output Schema', 'Synthesize & Test', 'Promote'];
+
+const PARAMETER_TYPES = ['string', 'integer', 'number', 'boolean', 'array', 'object'];
+
+const COMMON_PACKAGES = [
+  'requests', 'pandas', 'numpy', 'beautifulsoup4', 'pydantic', 'httpx',
+  'python-dateutil', 'pillow', 'pyyaml', 'lxml',
+];
+
+function uid() {
+  try { return crypto.randomUUID(); } catch { return `draft-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+}
+
+function emptyDraft() {
+  return {
+    step: 0, name: '', title: '', invocation_rules: '', parameters: [],
+    logic_text: '', packages: [], internal_modules: [], output_schema_text: '',
+    model: '', generated_code: '',
+  };
+}
+
+/**
+ * @param {HTMLElement} host
+ * @param {{draftId?: string|null, onPromoted?: Function, onCancel: Function}} options
+ */
+export function renderToolWizard(host, { draftId = null, onPromoted = () => {}, onCancel }) {
+  let id = draftId;
+  let draft = emptyDraft();
+  let step = 0;
+  let loading = Boolean(draftId);
+  let saveStatus = '';
+  let internalModuleOptions = [];
+  let models = [];
+  let autosaveTimer = null;
+  let promotedResult = null;
+  let workbenchHandle = null;
+
+  function captureWorkbenchCode() {
+    if (step === 4 && workbenchHandle) {
+      const code = workbenchHandle.getCode();
+      if (code !== draft.generated_code) { draft.generated_code = code; scheduleAutosave(); }
+    }
+  }
+
+  function payload() {
+    const { step: s, name, title, invocation_rules, parameters, logic_text, packages,
+      internal_modules, output_schema_text, model, generated_code } = draft;
+    return { step: s, name, title, invocation_rules, parameters, logic_text, packages,
+      internal_modules, output_schema_text, model, generated_code };
+  }
+
+  function scheduleAutosave() {
+    if (!id) return;
+    clearTimeout(autosaveTimer);
+    saveStatus = 'Saving…';
+    renderStatus();
+    autosaveTimer = setTimeout(async () => {
+      try {
+        await Api.saveToolDraft(id, payload());
+        saveStatus = `Draft saved ${new Date().toLocaleTimeString()}`;
+      } catch (err) {
+        saveStatus = `Could not save draft: ${err.message}`;
+      }
+      renderStatus();
+    }, 1200);
+  }
+
+  function renderStatus() {
+    const box = host.querySelector('[data-role="save-status"]');
+    if (box) box.textContent = saveStatus;
+  }
+
+  function canAdvance() {
+    if (step === 0) return draft.name.trim().length > 0;
+    return true;
+  }
+
+  function assembledDescription() {
+    const lines = [`Tool name: ${draft.name.trim()}`];
+    if (draft.title.trim()) lines.push(`Display title: ${draft.title.trim()}`);
+    if (draft.invocation_rules.trim()) lines.push(`When and why an agent calls it: ${draft.invocation_rules.trim()}`);
+    if (draft.parameters.length) {
+      lines.push('Parameters:');
+      for (const p of draft.parameters) {
+        if (!p.name.trim()) continue;
+        lines.push(`- ${p.name.trim()} (${p.type}${p.required ? ', required' : ', optional'}): ${p.description || ''}`);
+      }
+    }
+    if (draft.logic_text.trim()) lines.push(`Logic:\n${draft.logic_text.trim()}`);
+    if (draft.packages.length) lines.push(`Use these third-party packages: ${draft.packages.join(', ')}.`);
+    if (draft.internal_modules.length) {
+      lines.push(`Import these Novous internal modules directly by name: ${draft.internal_modules.join(', ')}.`);
+    }
+    if (draft.output_schema_text.trim()) lines.push(`Return shape:\n${draft.output_schema_text.trim()}`);
+    return lines.join('\n');
+  }
+
+  function render() {
+    if (loading) {
+      host.innerHTML = '<p class="text-muted small">Loading draft…</p>';
+      return;
+    }
+    host.innerHTML = `
+      <div class="sq-builder card">
+        <div class="card-head">
+          <div>
+            <h3>${draft.name ? `New tool · ${esc(draft.name)}` : 'New tool'}</h3>
+            <p class="text-muted small">Define a tool step by step, then generate, test and promote it. Autosaved as you go — safe to navigate away and resume later.</p>
+          </div>
+          <div>
+            <span class="text-muted small" data-role="save-status"></span>
+            <button type="button" class="btn btn-sm" data-act="cancel">Close</button>
+          </div>
+        </div>
+        <ol class="sq-stepper">
+          ${STEPS.map((label, i) => `
+            <li class="${i === step ? 'is-current' : i < step ? 'is-done' : ''}">
+              <button type="button" data-step="${i}" ${i > step && !canAdvance() ? 'disabled' : ''}>
+                <span class="sq-step-num">${i + 1}</span>${esc(label)}
+              </button>
+            </li>`).join('')}
+        </ol>
+        <div class="sq-step-body" data-role="step-body"></div>
+        <div class="sq-builder-nav">
+          <button type="button" class="btn" data-act="back" ${step === 0 ? 'disabled' : ''}>Back</button>
+          <span class="spacer"></span>
+          ${step < STEPS.length - 1
+            ? `<button type="button" class="btn btn-primary" data-act="next" ${canAdvance() ? '' : 'disabled'}>Next: ${esc(STEPS[step + 1])}</button>`
+            : ''}
+        </div>
+      </div>`;
+    renderStatus();
+    renderStepBody();
+  }
+
+  function renderStepBody() {
+    const body = host.querySelector('[data-role="step-body"]');
+    if (step === 0) {
+      body.innerHTML = `
+        <label class="sq-field"><span>Tool name (snake_case)</span>
+          <input class="form-input" data-field="name" maxlength="64" value="${esc(draft.name)}" placeholder="e.g. lookup_weather"></label>
+        <label class="sq-field"><span>Display title (optional)</span>
+          <input class="form-input" data-field="title" maxlength="200" value="${esc(draft.title)}" placeholder="e.g. Weather Lookup"></label>
+        <label class="sq-field"><span>When and why should an agent call it?</span>
+          <textarea class="form-input" rows="4" data-field="invocation_rules" placeholder="Describe the tool's purpose and the rules for using it.">${esc(draft.invocation_rules)}</textarea></label>
+        <div class="sq-field-inline sq-field">
+          <span>Model for AI assist</span>
+          <select class="form-select" data-field="model" aria-label="Model">${models.map(m =>
+            `<option value="${esc(m)}" ${m === draft.model ? 'selected' : ''}>${esc(m)}</option>`).join('') || '<option value="">Loading models…</option>'}</select>
+          <button type="button" class="btn btn-sm" data-act="refine-intent">AI Refine Intent</button>
+        </div>
+        <p class="small text-danger hidden" data-role="step-error" role="alert"></p>`;
+      return;
+    }
+    if (step === 1) {
+      body.innerHTML = `
+        <p class="text-muted small">Declare the parameters this tool takes. These are checked against what Step 5 generates.</p>
+        <div class="tw-param-table">
+          ${draft.parameters.map((p, i) => `
+            <div class="tw-param-row" data-index="${i}">
+              <input class="form-input" data-param="name" value="${esc(p.name)}" placeholder="parameter_name" maxlength="64">
+              <select class="form-select" data-param="type">${PARAMETER_TYPES.map(t =>
+                `<option value="${t}" ${t === p.type ? 'selected' : ''}>${t}</option>`).join('')}</select>
+              <label class="small"><input type="checkbox" data-param="required" ${p.required ? 'checked' : ''}> Required</label>
+              <input class="form-input" data-param="description" value="${esc(p.description)}" placeholder="What this parameter means">
+              <button type="button" class="btn btn-sm btn-ghost" data-act="remove-param" aria-label="Remove parameter">×</button>
+            </div>`).join('') || '<p class="text-muted small">No parameters yet.</p>'}
+        </div>
+        <div class="sq-field-inline sq-field mt-2">
+          <button type="button" class="btn btn-sm" data-act="add-param">+ Add parameter</button>
+          <button type="button" class="btn btn-sm" data-act="detect-params">AI Auto-Detect Parameters</button>
+        </div>
+        <p class="small text-danger hidden" data-role="step-error" role="alert"></p>`;
+      return;
+    }
+    if (step === 2) {
+      body.innerHTML = `
+        <label class="sq-field"><span>Logic / pseudocode</span>
+          <textarea class="form-input" rows="6" data-field="logic_text" placeholder="Describe the steps the function should take.">${esc(draft.logic_text)}</textarea></label>
+        <div class="sq-field">
+          <span>Third-party packages</span>
+          <div class="sq-chip-row">
+            ${COMMON_PACKAGES.map(pkg => `
+              <label class="small"><input type="checkbox" data-package="${esc(pkg)}" ${draft.packages.includes(pkg) ? 'checked' : ''}> ${esc(pkg)}</label>`).join('')}
+          </div>
+          <div class="sq-field-inline">
+            <input class="form-input" data-role="custom-package" placeholder="Other package name">
+            <button type="button" class="btn btn-sm" data-act="add-package">+ Add</button>
+          </div>
+          <div class="sq-chip-row">${draft.packages.filter(p => !COMMON_PACKAGES.includes(p)).map(p => `
+            <span class="sq-chip">${esc(p)}<button type="button" class="sq-chip-x" data-act="remove-package" data-package="${esc(p)}" aria-label="Remove ${esc(p)}">×</button></span>`).join('')}</div>
+        </div>
+        <div class="sq-field">
+          <span>Internal Novous modules</span>
+          <p class="text-muted small">Selecting any of these widens the sandbox test run so the import actually works; default tests stay fully isolated.</p>
+          <div class="sq-chip-row">
+            ${internalModuleOptions.map(mod => `
+              <label class="small"><input type="checkbox" data-internal-module="${esc(mod)}" ${draft.internal_modules.includes(mod) ? 'checked' : ''}> ${esc(mod)}</label>`).join('') || '<span class="text-muted small">Loading…</span>'}
+          </div>
+        </div>`;
+      return;
+    }
+    if (step === 3) {
+      body.innerHTML = `
+        <label class="sq-field"><span>Expected return shape</span>
+          <textarea class="form-input" rows="6" data-field="output_schema_text"
+            placeholder='e.g. {"status": "success", "value": 12.3}'>${esc(draft.output_schema_text)}</textarea></label>
+        <p class="text-muted small">Fed into the generation prompt's return-format instructions. Not enforced at runtime.</p>`;
+      return;
+    }
+    if (step === 4) {
+      body.innerHTML = '<div data-role="workbench-host"></div>';
+      const workbenchHost = body.querySelector('[data-role="workbench-host"]');
+      workbenchHandle = renderToolWorkbench(workbenchHost, {
+        initialDescription: assembledDescription(),
+        initialModel: draft.model,
+        initialCode: draft.generated_code,
+        internalModules: draft.internal_modules,
+        expectedParameters: draft.parameters.map(p => p.name.trim()).filter(Boolean),
+      });
+      workbenchHost.addEventListener('novous:tool-promoted', event => {
+        promotedResult = event.detail;
+        step = 5;
+        if (id) Api.deleteToolDraft(id).catch(() => {});
+        render();
+        onPromoted(promotedResult);
+      });
+      return;
+    }
+    body.innerHTML = promotedResult ? `
+      <div class="sq-msg sq-msg-ok">Promoted <strong>${esc(promotedResult.name)}</strong> to the tool library.</div>
+      <div class="sq-field-inline">
+        <button type="button" class="btn btn-primary" data-act="open-hub">Open Tool &amp; Library Hub</button>
+        <button type="button" class="btn" data-act="attach-tool">Attach to Agent Setup Wizard</button>
+      </div>` : '<p class="text-muted small">Go back to Step 5 and promote the tool to finish.</p>';
+  }
+
+  async function loadDraft() {
+    if (!id) { id = uid(); loading = false; render(); return; }
+    try {
+      const fetched = await Api.getToolDraft(id);
+      draft = { ...emptyDraft(), ...fetched };
+      step = draft.step || 0;
+    } catch {
+      // No existing draft under this id yet - start fresh with it.
+    }
+    loading = false;
+    render();
+  }
+
+  async function loadModels() {
+    try {
+      const data = await Api.getModels();
+      models = data.models || [];
+      if (!draft.model && models.length) draft.model = models.includes(data.default) ? data.default : models[0];
+      if (step === 0) renderStepBody();
+    } catch { /* AI-assist stays unavailable; manual entry still works */ }
+  }
+
+  async function loadInternalModules() {
+    try {
+      const data = await Api.listInternalModules();
+      internalModuleOptions = data.modules || [];
+      if (step === 2) renderStepBody();
+    } catch { /* leave empty; the checklist just stays blank */ }
+  }
+
+  function stepError(message) {
+    const box = host.querySelector('[data-role="step-error"]');
+    if (box) { box.textContent = message; box.classList.toggle('hidden', !message); }
+  }
+
+  host.addEventListener('input', event => {
+    const field = event.target.dataset.field;
+    if (field) { draft[field] = event.target.value; scheduleAutosave(); return; }
+    const param = event.target.dataset.param;
+    if (param) {
+      const row = event.target.closest('[data-index]');
+      const index = Number(row.dataset.index);
+      draft.parameters[index][param] = param === 'required' ? event.target.checked : event.target.value;
+      scheduleAutosave();
+    }
+  });
+
+  host.addEventListener('change', event => {
+    if (event.target.dataset.field === 'model') { draft.model = event.target.value; scheduleAutosave(); return; }
+    if (event.target.dataset.param === 'type') {
+      const row = event.target.closest('[data-index]');
+      draft.parameters[Number(row.dataset.index)].type = event.target.value;
+      scheduleAutosave();
+      return;
+    }
+    if (event.target.dataset.package !== undefined) {
+      const pkg = event.target.dataset.package;
+      draft.packages = event.target.checked
+        ? [...new Set([...draft.packages, pkg])]
+        : draft.packages.filter(p => p !== pkg);
+      scheduleAutosave();
+      return;
+    }
+    if (event.target.dataset.internalModule !== undefined) {
+      const mod = event.target.dataset.internalModule;
+      draft.internal_modules = event.target.checked
+        ? [...new Set([...draft.internal_modules, mod])]
+        : draft.internal_modules.filter(m => m !== mod);
+      scheduleAutosave();
+    }
+  });
+
+  host.addEventListener('click', async event => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    stepError('');
+    if (button.dataset.step !== undefined) {
+      const target = Number(button.dataset.step);
+      if (target <= step || canAdvance()) { captureWorkbenchCode(); step = target; render(); }
+      return;
+    }
+    const act = button.dataset.act;
+    if (act === 'cancel') { onCancel(); return; }
+    if (act === 'back') { captureWorkbenchCode(); step -= 1; render(); return; }
+    if (act === 'next' && canAdvance()) {
+      // Advancing past Step 2 proactively installs the selected third-party packages
+      // instead of waiting for a failed test run to discover them.
+      if (step === 2 && draft.packages.length) {
+        try { await Sandbox.install(draft.packages); } catch { /* surfaced again on test if it still fails */ }
+      }
+      captureWorkbenchCode();
+      step += 1;
+      render();
+      return;
+    }
+    if (act === 'add-param') {
+      draft.parameters.push({ name: '', type: 'string', required: false, description: '' });
+      renderStepBody();
+      scheduleAutosave();
+      return;
+    }
+    if (act === 'remove-param') {
+      const index = Number(button.closest('[data-index]').dataset.index);
+      draft.parameters.splice(index, 1);
+      renderStepBody();
+      scheduleAutosave();
+      return;
+    }
+    if (act === 'add-package') {
+      const input = host.querySelector('[data-role="custom-package"]');
+      const value = input.value.trim();
+      if (value) draft.packages = [...new Set([...draft.packages, value])];
+      input.value = '';
+      renderStepBody();
+      scheduleAutosave();
+      return;
+    }
+    if (act === 'remove-package') {
+      draft.packages = draft.packages.filter(p => p !== button.dataset.package);
+      renderStepBody();
+      scheduleAutosave();
+      return;
+    }
+    if (act === 'refine-intent') {
+      if (!draft.model) { stepError('Choose a model first.'); return; }
+      button.disabled = true;
+      try {
+        const prompt = `Rewrite this tool's purpose/invocation rules as 2-3 clear sentences describing when and why an agent should call it. Output only the rewritten text.\n\n${draft.invocation_rules || draft.name}`;
+        const { text } = await Api.generateStarterText(draft.model, prompt);
+        if (text?.trim()) { draft.invocation_rules = text.trim(); renderStepBody(); scheduleAutosave(); }
+      } catch (err) {
+        stepError(`Could not refine intent: ${err.message}`);
+      } finally {
+        button.disabled = false;
+      }
+      return;
+    }
+    if (act === 'detect-params') {
+      if (!draft.model) { stepError('Choose a model first on Step 1.'); return; }
+      button.disabled = true;
+      try {
+        const prompt = `Given this tool's intent, list the parameters it needs. Reply with ONLY a JSON array like `
+          + `[{"name":"param_name","type":"string","required":true,"description":"..."}]. Valid types: `
+          + `${PARAMETER_TYPES.join(', ')}.\n\nIntent: ${draft.invocation_rules || draft.name}`;
+        const { text } = await Api.generateStarterText(draft.model, prompt);
+        const match = (text || '').match(/\[[\s\S]*\]/);
+        const detected = JSON.parse(match ? match[0] : text);
+        const existing = new Set(draft.parameters.map(p => p.name));
+        for (const item of Array.isArray(detected) ? detected : []) {
+          const name = String(item?.name || '').trim();
+          if (!name || existing.has(name)) continue;
+          draft.parameters.push({
+            name, type: PARAMETER_TYPES.includes(item.type) ? item.type : 'string',
+            required: Boolean(item.required), description: String(item.description || ''),
+          });
+          existing.add(name);
+        }
+        renderStepBody();
+        scheduleAutosave();
+      } catch (err) {
+        stepError(`Could not auto-detect parameters: ${err.message}`);
+      } finally {
+        button.disabled = false;
+      }
+      return;
+    }
+    if (act === 'open-hub') { onCancel(); return; }
+    if (act === 'attach-tool') {
+      try { localStorage.setItem('novous2.prompt-creation.attachTool', promotedResult.name); } catch { /* storage unavailable */ }
+      onCancel();
+      navigate('prompt-creation');
+    }
+  });
+
+  render();
+  loadDraft();
+  loadModels();
+  loadInternalModules();
 }
 
 ```
@@ -27280,6 +28177,7 @@ export function renderSquadsView(container, payload = null) {
 import { Api } from '../api.js';
 import { esc } from '../shell.js';
 import { renderTestingView } from '../testing.js';
+import { renderToolWizard } from '../tool_wizard.js';
 import { groupTools, toolCategory } from '../tool_categories.js';
 
 export function renderToolsView(container, payload = null) {
@@ -27288,8 +28186,8 @@ export function renderToolsView(container, payload = null) {
     <div class="sq-page">
       <header class="sq-page-head">
         <div>
-          <h2>Tools</h2>
-          <p class="text-muted">Give agents the abilities they need. Build a new tool below, test it, promote it, then attach it.</p>
+          <h2>Tools &amp; Library Hub</h2>
+          <p class="text-muted">Give agents the abilities they need. Start the guided wizard to build a new tool, or work directly in the Workbench below.</p>
         </div>
       </header>
       <div class="sq-msg sq-msg-ok hidden" data-role="promoted" role="status"></div>
@@ -27301,12 +28199,23 @@ export function renderToolsView(container, payload = null) {
         <p class="small text-danger hidden" data-role="error" role="alert"></p>
         <div class="sq-tool-catalog" data-role="catalog"><p class="text-muted small">Loading tools…</p></div>
       </section>
+      <section class="card" data-role="drafts-card">
+        <div class="card-head">
+          <h3>Unpromoted drafts</h3>
+          <button type="button" class="btn btn-primary" data-act="new-tool">+ New Tool</button>
+        </div>
+        <div class="tw-drafts-list" data-role="drafts"><p class="text-muted small">Loading drafts…</p></div>
+      </section>
+      <div data-role="wizard-host"></div>
       <div data-role="workbench"></div>
     </div>`;
 
   const catalog = container.querySelector('[data-role="catalog"]');
   const errorBox = container.querySelector('[data-role="error"]');
   const promoted = container.querySelector('[data-role="promoted"]');
+  const draftsBox = container.querySelector('[data-role="drafts"]');
+  const wizardHost = container.querySelector('[data-role="wizard-host"]');
+  const sections = [...container.querySelectorAll('.sq-page > section'), container.querySelector('[data-role="workbench"]')];
   let overview = { agents: [], tools: [] };
   let filter = '';
 
@@ -27366,9 +28275,53 @@ export function renderToolsView(container, payload = null) {
     }
   }
 
+  async function loadDrafts() {
+    try {
+      const { drafts } = await Api.listToolDrafts();
+      draftsBox.innerHTML = drafts.length ? `
+        <div class="tw-drafts-list">${drafts.map(draft => `
+          <div class="tw-draft-item" data-draft="${esc(draft.draft_id)}">
+            <span><strong>${esc(draft.title || draft.name || 'Untitled tool')}</strong>
+              <span class="text-muted small">Step ${draft.step + 1} of 6 · updated ${esc(new Date(draft.updated_at).toLocaleString())}</span></span>
+            <span class="tw-draft-item-actions">
+              <button type="button" class="btn btn-sm" data-act="resume-draft">Resume</button>
+              <button type="button" class="btn btn-sm btn-ghost" data-act="discard-draft">Discard</button>
+            </span>
+          </div>`).join('')}</div>`
+        : '<p class="text-muted small">No drafts in progress.</p>';
+    } catch (err) {
+      draftsBox.innerHTML = `<p class="text-danger small">Could not load drafts: ${esc(err.message)}</p>`;
+    }
+  }
+
+  function setSectionsHidden(hidden) {
+    sections.forEach(section => section.hidden = hidden);
+  }
+
+  function openWizard(draftId = null) {
+    setSectionsHidden(true);
+    const host = document.createElement('div');
+    wizardHost.replaceChildren(host);
+    renderToolWizard(host, {
+      draftId,
+      onCancel: () => { wizardHost.replaceChildren(); setSectionsHidden(false); loadDrafts(); },
+      onPromoted: async () => { await load(); await loadDrafts(); },
+    });
+  }
+
   container.querySelector('.sq-search').addEventListener('input', event => {
     filter = event.target.value;
     render();
+  });
+  container.querySelector('[data-act="new-tool"]').addEventListener('click', () => openWizard());
+  draftsBox.addEventListener('click', async event => {
+    const row = event.target.closest('[data-draft]');
+    if (!row) return;
+    if (event.target.closest('[data-act="resume-draft"]')) { openWizard(row.dataset.draft); return; }
+    if (event.target.closest('[data-act="discard-draft"]') && confirm('Discard this draft? This cannot be undone.')) {
+      await Api.deleteToolDraft(row.dataset.draft);
+      await loadDrafts();
+    }
   });
   catalog.addEventListener('click', async event => {
     const button = event.target.closest('[data-attach]');
@@ -27399,6 +28352,7 @@ export function renderToolsView(container, payload = null) {
   load().catch(err => {
     catalog.innerHTML = `<p class="text-danger small">Could not load tools: ${esc(err.message)}</p>`;
   });
+  loadDrafts();
 }
 
 ```
@@ -28974,6 +29928,102 @@ Delegate work with call_subagent. Only call the sub-agents listed here, using th
 Must be invoked whenever the user asks for any factual information, documentation, or knowledge base lookup.
 ```
 
+### library/planner.md
+
+```markdown
+---
+id: planner
+name: planner
+mode: agent
+model: qwen2.5-coder:14b
+environment: workspace
+version: 1
+tools:
+  - read_chat_scratchpad
+  - write_chat_scratchpad
+  - call_subagent
+---
+# planner
+
+## Role
+The planner is an AI agent specialized in goal setting and time management. Its primary function is to break down a broad goal into smaller, manageable parts and delegate these parts to another agent for further breakdown into weekly and daily tasks. The planner then formats these tasks into a structured schedule. It operates as a high-level organizer, ensuring that goals are actionable and time-bound, typically within an 8-week timeframe for short-term goals or longer for more extensive objectives.
+
+## Purpose
+The specific goal this agent must accomplish is to break down a broad goal into smaller, manageable parts, delegate these parts to another agent for further breakdown into weekly and daily tasks, and then format these tasks into a structured schedule.
+
+## Responsibilities
+- Analyze and break down broad goals into smaller, actionable components.
+- Delegate the breakdown of these smaller components into weekly and daily tasks to another agent.
+- Format the resulting tasks into a structured and visually appealing schedule.
+- Ensure that all tasks are time-bound and actionable within an 8-week timeframe or as appropriate for long-term goals.
+- Monitor the progress of the tasks and adjust the schedule as necessary to meet the overall goal.
+- Communicate effectively with other agents to ensure seamless execution of the plan.
+
+## Execution Instructions
+1. **Receive Input:** The planner receives a broad goal or statement from the user or another agent.
+2. **Analyze Goal:** The planner analyzes the goal to understand its components and complexity.
+3. **Break Down Goal:** The planner breaks down the broad goal into smaller, manageable parts. These parts are typically functional and can be independently worked on.
+4. **Delegate Task Breakdown:** The reporter subagent use the `call_subagent` tool to delegate the breakdown of these smaller components into weekly and daily tasks to another agent. The `subagent_id` parameter specifies the agent responsible for this task, and the `task_prompt` parameter outlines the instructions for breaking down the tasks.
+5. **Verify Task Breakdown:** After delegating the task breakdown, the planner uses the `write_chat_scratchpad` tool to save the goal components and the delegated task breakdown. It then calls the `read_chat_scratchpad` tool with the same agent and title to verify that the content was saved correctly.
+6. **Format Schedule:** The planner reads the scratchpad notes of the reporter subagent and displays it to the user
+7. **Save Schedule:** The planner saves the formatted schedule to the chat scratchpad using the `write_chat_scratchpad` tool. It verifies the saved content by calling the `read_chat_scratchpad` tool with the same agent and title.
+8. **Communicate with User:** The planner communicates the structured schedule back to the user  providing a clear description of the goal, a summary of the goal in one or three sentences, and a time frame for the goal completion.
+
+
+## Boundaries
+- The planner must not generate, produce, edit, manipulate, or create any content that is harmful, unethical, or illegal.
+- The planner must not share any personal or sensitive information without explicit permission from the user.
+- The planner must not make decisions or take actions that could harm or disadvantage any individual or group.
+- The planner must not provide advice or guidance that promotes harmful behaviors or activities.
+- The planner must not engage in any activities that could be construed as spamming or unsolicited communication.
+- The planner must not access or use any external databases, APIs, or information sources beyond the tools and context provided within the chat environment.
+- The planner must not generate content that is biased, discriminatory, or promotes negative stereotypes.
+- The planner must not engage in any form of data mining or collection without the user's explicit consent.
+- The planner must not bypass any restrictions or limitations set within the system or chat environment.
+- The planner must not provide false or misleading information under any circumstances.
+
+## Communication
+- The planner reports its results by saving the structured schedule to the chat scratchpad using the `write_chat_scratchpad` tool.
+- After saving, it verifies the content by calling the `read_chat_scratchpad` tool with the same agent and title.
+- The planner then formats the results into a clear and visually appealing schedule.
+- The planner communicates the structured schedule back to the user, providing a description of the goal, a summary of the goal in one or three sentences, and a time frame for the goal completion.
+- The planner ensures that all communication is clear, concise, and actionable, facilitating seamless execution of the plan.
+
+## Available Tools
+
+### read_chat_scratchpad
+Read one entry from this chat's scratchpad by agent name and title. Paired with write_chat_scratchpad: call this immediately after writing, with the exact same agent and title, to verify the saved content before relying on it. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist.
+
+Parameters:
+- agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
+- title (required): The title the entry was saved under, for example result.
+- index: 0 for the newest matching entry, 1 for the one before it. Default 0.
+- offset: Character position to start reading at; use next_offset from the previous result. Default 0.
+
+Return format: See the tool documentation above. If it does not specify a format, inspect the actual result; do not assume JSON.
+
+### write_chat_scratchpad
+Save content to this chat's scratchpad under an agent name and a title. Paired with read_chat_scratchpad: after saving, you must call read_chat_scratchpad with the same agent and title to confirm the content was saved correctly before reporting success. Returns a JSON object with saved, store, agent, title, and id.
+
+Parameters:
+- agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
+- title (required): The title the entry was saved under, for example result.
+- content (required): The text to save.
+
+Return format: See the tool documentation above. If it does not specify a format, inspect the actual result; do not assume JSON.
+
+### call_subagent
+Dynamically invoke a background sub-agent from subAgentLibrary/ with a task prompt and parameters. In a chat, its output is saved to the chat scratchpad as agent=<subagent_id>, title=result.
+
+Parameters:
+- subagent_id (required): The canonical sub-agent ID.
+- task_prompt (required): read the scratchpad from planner agent note and write to the scratpad a broken down daily goal of the reporter.
+- parameters: JSON string of key-value pairs passed to the sub-agent. Default {}.
+
+Return format: See the tool documentation above. If it does not specify a format, inspect the actual result; do not assume JSON.
+
+```
+
 ### library/problem-orchestrator.md
 
 ```markdown
@@ -28994,7 +30044,7 @@ tools:
 
 ## Role
 You area thinker who deconstructs problems.
-Your responsibility isTo break down statements and questions into their constituent parts.
+Your responsibility is To break down statements and questions into their constituent parts.
 
 ## Purpose
 Complete this goal:Summarize the problem in one sentence. About 25 words that correctly define the nature of the statement or questions being asked
@@ -29175,6 +30225,8 @@ version: 1
 tools:
   - read_chat_scratchpad
   - write_chat_scratchpad
+remind_every_turn: true
+tool_reminder: "Before replying, call write_chat_scratchpad once (agent='Thinker', title='result', content=<your real analysis for this question, not placeholder text>), then read_chat_scratchpad once (agent='Thinker', title='result') to confirm it saved. Do this every turn, including this one, not just the first question in this chat."
 ---
 # Thinker
 
@@ -29201,7 +30253,9 @@ The specific goal is to serve as an analytical reasoning specialist by examining
 3. Identify complex relationships, patterns, and causal links between the identified concepts and data.
 4. Synthesize the analyzed information and reasoning to develop comprehensive, logical conclusions.
 5. Generate meaningful, actionable insights derived from the analysis to aid in informed decision-making.
-6. After completing the analysis, call write_chat_scratchpad (agent: "Thinker", title: "result") to save your conclusions, then verify with read_chat_scratchpad.
+6. Call write_chat_scratchpad exactly once, with all three arguments set every time: agent set to "Thinker", title set to "result", and content set to the actual conclusions you wrote in steps 1-5, in your own words. Never leave out title. Never copy these instructions into content — content must be your own analysis text, not a description of what to do.
+7. Call read_chat_scratchpad exactly once, with agent="Thinker", title="result", to confirm.
+8. Once that read succeeds, stop calling tools for this question — give your final answer as plain text to the user. Never call either scratchpad tool more than once for this question. For every new question the user asks, repeat steps 1-8 from the start and attempt write_chat_scratchpad and read_chat_scratchpad again — even if a tool call failed or a previous question's call already used up its one attempt. A past failure never excuses skipping the tools on a later question.
 
 
 ## Boundaries
@@ -29226,7 +30280,7 @@ The specific goal is to serve as an analytical reasoning specialist by examining
 Read one entry from this chat's scratchpad by agent name and title. Paired with write_chat_scratchpad: call this immediately after writing, with the same agent and title, to verify the saved content before relying on it. Index 0 is the newest match; use offset to read the rest of the content. If nothing matches, the result lists the agent and title pairs that exist.
 
 Parameters:
-- agent (required): Thinker - Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
+- agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
 - title (required): The title the entry was saved under, for example, result.
 - index: 0 - 0 for the newest matching entry, 1 for the one before it. Default 0.
 - offset: 0 - Character position to start reading at; use next_offset from the previous result. Default 0.
@@ -31034,14 +32088,31 @@ class SquadRegistry:
         return text
 
     def default_subagent_template(self) -> dict[str, str]:
-        """Return the generated YAML scaffold and its editable prompt body."""
+        """Return the generated YAML scaffold, plus an editable prompt body whose sections are
+        all [VARIABLE] placeholders — same pattern as the agent template — for the Prompt
+        Starter wizard's chain-fill to write. ``render_subagent_definition`` itself is
+        untouched, so sub-agents created outside the wizard still get fully-written text."""
         definition = self.render_subagent_definition(
             "novous-subagent", "[SUB-AGENT NAME]"
         )
-        prompt = yaml.safe_load(definition)["prompt"]
+        placeholder_prompt = "\n".join([
+            "# [SUB-AGENT NAME] Prompt",
+            "",
+            "## Role",
+            "[ROLE]",
+            "",
+            "## Purpose",
+            "[PURPOSE]",
+            "",
+            "## Boundaries",
+            "[BOUNDARIES]",
+            "",
+            "## Output Format",
+            "[OUTPUT FORMAT]",
+        ])
         return {
             "yaml": definition,
-            "prompt": prompt.replace('agent: "novous-subagent"', 'agent: "[SUB-AGENT ID]"'),
+            "prompt": placeholder_prompt,
         }
 
     def create_subagent(self, subagent_id: str, name: str, description: str = "") -> dict[str, Any]:
@@ -32845,6 +33916,14 @@ class CodeSquadRunContext:
     "average_duration_ms": 7991.12,
     "last_duration_ms": 8179,
     "last_status": "degraded"
+  },
+  "x": {
+    "total_runs": 4,
+    "successful_runs": 4,
+    "failed_runs": 0,
+    "average_duration_ms": 61459.5,
+    "last_duration_ms": 36014,
+    "last_status": "healthy"
   }
 }
 
@@ -32874,6 +33953,17 @@ class CodeSquadRunContext:
       "code-builder",
       "tester",
       "code-troubleshooter"
+    ],
+    "default_pattern": "sequential",
+    "max_parallel": 1
+  },
+  "x": {
+    "squad_id": "x",
+    "name": "x",
+    "description": "",
+    "primary_agent": "planner",
+    "subagents": [
+      "reporter"
     ],
     "default_pattern": "sequential",
     "max_parallel": 1
@@ -37242,6 +38332,11 @@ def parse_prompt_starter_agent(content: str) -> dict:
     if missing_tools:
         raise ValueError("Unregistered tools: " + ", ".join(missing_tools))
 
+    remind_every_turn = bool(metadata.get("remind_every_turn", False))
+    tool_reminder = metadata.get("tool_reminder", "") or ""
+    if not isinstance(tool_reminder, str):
+        raise ValueError("tool_reminder must be text.")
+
     prompt = "\n".join(lines[end_index + 1:]).strip("\n")
     if not prompt.strip():
         raise ValueError("The agent prompt body must not be empty.")
@@ -37251,6 +38346,8 @@ def parse_prompt_starter_agent(content: str) -> dict:
         "description": description.strip(),
         "mode": mode,
         "tools": tools,
+        "remind_every_turn": remind_every_turn,
+        "tool_reminder": tool_reminder.strip(),
         "prompt": prompt,
     }
 
@@ -38106,13 +39203,27 @@ def delete_template(name):
 
 ### squad_developement/prompt_starter_choices.yaml
 
-```yaml
+````yaml
 AGENT ID:
 - Thinker
 - Thinker-Starter-01
 - Enginner-01
 - SideKik-01
 - caller-01
+- '```markdown
+
+  # Goal Setter
+
+
+  - Analyzes questions/statement
+
+  - Describes goal
+
+  - Summarizes goal in 1-3 sentences
+
+  - Provides timeframe (up to 8 weeks)
+
+  ```'
 AGENT NAME:
 - You are a thinker who deconstructs problems
 - a thinker who deconstructs problems
@@ -38122,9 +39233,15 @@ AGENT NAME:
 - Enginer
 - Helper
 AI DESCRIPTION AGENT ID:
-- The agent's unique file id (lowercase, hyphenated).
+- Goal Setter and agent that will receive a question or statement, think through it
+  and perform an analysis, report back a description of the goal, summarize the goal
+  in one or three sentences, and provide a time frame for the goal no longer than
+  8 weeks or provide long-term goal setting as most appropriate.
 AI DESCRIPTION DESCRIPTION:
 - Description of the agents Job
+AI DESCRIPTION EXECUTION INSTRUCTIONS:
+- Step-by-step instructions the agent follows when performing its task. if tools and
+  subagent are in the context add those to the execution instructions
 AI DESCRIPTION ROLE:
 - '## Role Define who the agent is, its specialized identity, and the function it
   is expected to perform. Explain what kind of agent it is and the role it fulfills.'
@@ -38133,6 +39250,12 @@ AI PRE-PROMPT AGENT ID:
   \ per point \nDescribing the Variable\nFormat it in a Markdown file"
 AI PRE-PROMPT DESCRIPTION:
 - Write one sentence describing the agents Job 20 to 50 words with verbs
+AI PRE-PROMPT EXECUTION INSTRUCTIONS:
+- 'Write the Execution Instructions section: a short numbered list of steps the agent
+  follows when performing its task.'
+- 'Write the Execution Instructions section: a short numbered list of steps the agent
+  follows when performing its task. The steps should also include the language to
+  operate the tools and instructions for using the tools'
 AI PRE-PROMPT ROLE:
 - "Prompt for the agent \nDescribe the variable in detail \nList only five points,\
   \ no more than 10 words per point \nDescribing the Variable\nFormat it in a Markdown\
@@ -38219,8 +39342,21 @@ EXECUTION INSTRUCTIONS:
 
   5. Generate meaningful, actionable insights derived from the analysis to aid in
   informed decision-making.'
-- '6. After completing the analysis, call write_chat_scratchpad (agent: "Thinker",
-  title: "result") to save your conclusions, then verify with read_chat_scratchpad.'
+- '6. Call write_chat_scratchpad exactly once, with all three arguments set every
+  time: agent set to "Thinker", title set to "result", and content set to the actual
+  conclusions you wrote in steps 1-5, in your own words. Never leave out title. Never
+  copy these instructions into content — content must be your own analysis text, not
+  a description of what to do.
+
+  7. Call read_chat_scratchpad exactly once, with agent="Thinker", title="result",
+  to confirm.
+
+  8. Once that read succeeds, stop calling tools for this question — give your final
+  answer as plain text to the user. Never call either scratchpad tool more than once
+  for this question. For every new question the user asks, repeat steps 1-8 from the
+  start and attempt write_chat_scratchpad and read_chat_scratchpad again — even if
+  a tool call failed or a previous question''s call already used up its one attempt.
+  A past failure never excuses skipping the tools on a later question.'
 GOAL:
 - Summarize the problem in one sentence. About 25 words that correctly define the
   nature of the statement or questions being asked
@@ -38343,7 +39479,7 @@ TOOL 2 AGENT:
 TOOL 2 TITLE:
 - analytical reasoning specialist
 
-```
+````
 
 ### squad_developement/prompt_starter_templates.yaml
 
@@ -39209,6 +40345,42 @@ prompt: |
 
 ````
 
+### subAgentLibrary/details.yaml
+
+```yaml
+id: details
+name: "details"
+description: "devides the problem to daily goals"
+type: subagent
+mode: agent
+model: qwen2.5-coder:14b
+environment: workspace
+version: 1
+tools:
+  - read_squad_scratchpad
+  - write_squad_scratchpad
+prompt: |
+  # details Prompt
+
+  ## role
+  You are the details. devides the problem to daily goals
+
+  ## purpose
+  Carry out the task you are given with the tools listed above and post the result to the shared scratchpad.
+
+  ## boundaries
+  - Only use the tools listed above.
+  - Never claim to have read, written or changed anything unless a tool result confirms it.
+  - Output clean, structured results without conversational chitchat.
+
+  ## output format & scratchpad handoff
+  Always call `write_squad_scratchpad` with these three values:
+  agent: "details"
+  title: "result"
+  content: your result as text or JSON
+
+```
+
 ### subAgentLibrary/inquisitive.yaml
 
 ```yaml
@@ -39704,6 +40876,90 @@ prompt: |
 
 ```
 
+### subAgentLibrary/reporter.yaml
+
+````yaml
+id: reporter
+name: "reporter"
+description: ""
+type: subagent
+mode: agent
+model: qwen2.5-coder:14b
+environment: workspace
+version: 1
+tools:
+  - read_squad_scratchpad
+  - write_squad_scratchpad
+prompt: |
+  # reporter Prompt
+
+
+  ## Role
+  your job is to read the scratchpad and format the contents and write the results to write squad scratchpad 
+
+  ## Execution Steops
+  1) read_squad_scratchpad
+  2) Fomrat contents found in scratchpad
+  3) Write_Squad_scratchpad with formated content
+  3) if nothing was read in scratchapd save a message nothing found 
+
+  ## Boundaries
+  - Do not gather or disseminate any information that is confidential, sensitive, or personal without explicit permission.
+  - Do not access or modify any data that is not within the scope of the scratchpad.
+  - Do not generate any content that promotes hate speech, violence, or discrimination.
+  - Do not include any copyrighted material without proper attribution.
+  - Do not engage in any activities that violate laws or ethical standards.
+  - Do not interact with external systems or services beyond what is necessary to fulfill the purpose.
+  - Do not use any tools or resources that are not explicitly provided or approved for this task.
+
+  ## Output Format
+  ```
+  # Document Title
+
+  ## Section 1: Introduction
+  - **Purpose**: Provide an overview of the document and its objectives.
+  - **Content**: Briefly describe the main points or findings.
+
+  ## Section 2: Methodology
+  - **Description**: Explain the methods and tools used to gather and analyze the information.
+  - **Tools Used**: List any tools or software used in the process.
+
+  ## Section 3: Findings
+  - **Results**: Present the key findings from the analysis.
+  - **Data**: Include any relevant data or statistics.
+
+  ## Section 4: Conclusion
+  - **Summary**: Summarize the main findings and their implications.
+  - **Recommendations**: Offer any recommendations or next steps based on the findings.
+
+  ## Section 5: References
+  - **Sources**: List any sources or references used in the document.
+
+  ## Section 6: Appendices
+  - **Additional Information**: Include any additional information or supplementary material.
+  ```
+
+  ## Available Tools
+
+  ### read_squad_scratchpad
+  Read one entry from the current squad run's scratchpad by agent name and title. Paired with write_squad_scratchpad: call this immediately after writing, with the exact same agent and title, to verify the saved content before relying on it. index 0 is the newest match; use offset to read the rest of long content. If nothing matches, the result lists the agent and title pairs that exist.
+
+  Parameters:
+  - agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
+  - title (required): The title the entry was saved under, for example result.
+  - index: 0 for the newest matching entry, 1 for the one before it. Default 0.
+  - offset: Character position to start reading at; use next_offset from the previous result. Default 0.
+
+  ### write_squad_scratchpad
+  Save content to the current squad run's scratchpad under an agent name and a title. Paired with read_squad_scratchpad: after saving, you must call read_squad_scratchpad with the same agent and title to confirm the content was saved correctly before reporting success. Returns a JSON object with saved, store, agent, title, and id.
+
+  Parameters:
+  - agent (required): Your agent's name or ID, used to file and retrieve scratchpad entries. Example: rag-retriever.
+  - title (required): The title the entry was saved under, for example result.
+  - content (required): The text to save.
+
+````
+
 ### subAgentLibrary/tester.yaml
 
 ````yaml
@@ -39757,11 +41013,13 @@ from test_environment.logic_test_environment import (
     tool_workbench,
 )
 from test_environment.logic_test_suites import test_suite_store
+from test_environment.logic_tool_drafts import tool_drafts
 from test_environment.schemas_test_environment import (
     SandboxCheckRequest,
     SandboxInstallRequest,
     SuiteRunRequest,
     SuiteSaveRequest,
+    ToolDraftPayload,
     ToolWorkbenchGenerateRequest,
     ToolWorkbenchLLMRequest,
     ToolWorkbenchRequest,
@@ -39773,7 +41031,10 @@ router = APIRouter()
 
 @router.post("/api/testing/tool-workbench/execute")
 def api_execute_tool_test(req: ToolWorkbenchRequest):
-    return tool_workbench.run_python_tool(req.tool_code, req.function_input, timeout=req.timeout_seconds)
+    return tool_workbench.run_python_tool(
+        req.tool_code, req.function_input, timeout=req.timeout_seconds,
+        allow_internal_imports=bool(req.internal_modules),
+    )
 
 
 @router.post("/api/testing/tool-workbench/test-harness")
@@ -39790,6 +41051,7 @@ def api_test_tool_with_llm(req: ToolWorkbenchLLMRequest):
         return tool_workbench.test_with_llm(
             req.tool_code, req.model, req.user_prompt, req.timeout_seconds,
             execute=req.execute, description=req.description,
+            allow_internal_imports=bool(req.internal_modules),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -39800,7 +41062,9 @@ def api_test_tool_with_llm(req: ToolWorkbenchLLMRequest):
 @router.post("/api/testing/tool-workbench/generate-function")
 def api_generate_tool_function(req: ToolWorkbenchGenerateRequest):
     try:
-        generated = tool_workbench.generate_python_function(req.description, req.model)
+        generated = tool_workbench.generate_python_function(
+            req.description, req.model, expected_parameters=req.expected_parameters,
+        )
     except ValueError as exc:
         return {"status": "ERROR", "error_code": "ERR_INVALID_GENERATED_FUNCTION",
                 "message": str(exc), "code": None, "function_name": None}
@@ -39812,7 +41076,10 @@ def api_generate_tool_function(req: ToolWorkbenchGenerateRequest):
 @router.post("/api/testing/tool-workbench/promote")
 def api_promote_tool(req: ToolWorkbenchRequest):
     try:
-        return tool_workbench.promote(req.tool_code, req.function_input, req.timeout_seconds)
+        return tool_workbench.promote(
+            req.tool_code, req.function_input, req.timeout_seconds,
+            allow_internal_imports=bool(req.internal_modules),
+        )
     except PromotionTestFailed as exc:
         raise HTTPException(
             status_code=400,
@@ -39827,6 +41094,11 @@ def api_promote_tool(req: ToolWorkbenchRequest):
 @router.get("/api/sandbox/packages")
 def api_sandbox_packages():
     return {"exists": sandbox_env.exists(), "packages": sandbox_env.list_packages()}
+
+
+@router.get("/api/testing/tool-workbench/internal-modules")
+def api_list_internal_modules():
+    return {"modules": sandbox_env.list_internal_modules()}
 
 
 @router.post("/api/sandbox/check")
@@ -39867,6 +41139,34 @@ def api_delete_workbench_tool(tool_name: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Could not delete tool: {exc}") from exc
+
+
+# --- Tool Creation Wizard drafts --------------------------------------------------
+
+@router.get("/api/testing/tool-workbench/drafts")
+def api_list_tool_drafts():
+    return {"drafts": tool_drafts.list_drafts()}
+
+
+@router.get("/api/testing/tool-workbench/drafts/{draft_id}")
+def api_get_tool_draft(draft_id: str):
+    try:
+        return tool_drafts.get_draft(draft_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put("/api/testing/tool-workbench/drafts/{draft_id}")
+def api_save_tool_draft(draft_id: str, req: ToolDraftPayload):
+    try:
+        return tool_drafts.save_draft(draft_id, req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/api/testing/tool-workbench/drafts/{draft_id}")
+def api_delete_tool_draft(draft_id: str):
+    return tool_drafts.delete_draft(draft_id)
 
 
 # --- Saved test suites -----------------------------------------------------------
@@ -40127,6 +41427,27 @@ class SandboxEnvManager:
 
     def _is_local_module(self, name: str) -> bool:
         return (self.PROJECT_ROOT / name).is_dir() or (self.PROJECT_ROOT / f"{name}.py").is_file()
+
+    # Top-level folders that exist at the project root but are not importable Novous
+    # packages (static assets, docs, data folders, etc.) - excluded from the internal
+    # module list the Tool Creation Wizard's Step 3 offers.
+    INTERNAL_MODULE_EXCLUDE = {
+        "frontend", "tests", "docs", "library", "subAgentLibrary", "workspace",
+        "node_modules", "__pycache__", "venv", ".venv", "scripts", "about",
+    }
+
+    def list_internal_modules(self) -> list[str]:
+        """Top-level Novous packages the sandbox can import once its path is explicitly
+        widened (see ToolWorkbench's ``allow_internal_imports``)."""
+        names = []
+        for entry in sorted(self.PROJECT_ROOT.iterdir()):
+            if not entry.is_dir() or entry.name.startswith((".", "_")):
+                continue
+            if entry.name in self.INTERNAL_MODULE_EXCLUDE or not self._MODULE_NAME.fullmatch(entry.name):
+                continue
+            if (entry / "__init__.py").is_file() or any(entry.glob("*.py")):
+                names.append(entry.name)
+        return names
 
     def third_party_modules(self, source: str) -> list[str]:
         return [
@@ -40400,8 +41721,11 @@ class ToolWorkbench:
         match = self._CODE_BLOCK.search(text or "")
         return (match.group(1) if match else (text or "")).strip()
 
-    def generate_python_function(self, description: str, model: str, chat=None) -> dict:
-        """Ask the LLM for a tool function and validate it; retry once on invalid output."""
+    def generate_python_function(self, description: str, model: str, chat=None,
+                                  expected_parameters: list[str] | None = None) -> dict:
+        """Ask the LLM for a tool function and validate it; retry once on invalid output.
+        ``expected_parameters``, when given, is compared against the generated function's
+        real parameters and reported as a non-fatal ``parameter_mismatch`` warning."""
         if chat is None:
             import ollama
             chat = ollama.chat
@@ -40416,7 +41740,14 @@ class ToolWorkbench:
             code = self.extract_code(text)
             try:
                 function = self.get_function_definition(code)
-                return {"code": code, "function_name": function.name}
+                result = {"code": code, "function_name": function.name}
+                if expected_parameters:
+                    actual = {a.arg for a in function.args.args} | {a.arg for a in function.args.kwonlyargs}
+                    expected = set(expected_parameters)
+                    missing, extra = sorted(expected - actual), sorted(actual - expected)
+                    if missing or extra:
+                        result["parameter_mismatch"] = {"missing": missing, "extra": extra}
+                return result
             except ValueError as exc:
                 last_error = str(exc)
                 messages += [
@@ -40471,9 +41802,16 @@ class ToolWorkbench:
         return "\n".join(lines) + "\n"
 
     def _run_locally(self, source: str, arguments: dict, function_name: str, script_mode: bool = False,
-                     timeout: float | None = None) -> dict:
+                     timeout: float | None = None, allow_internal_imports: bool = False) -> dict:
         timeout = min(timeout or self.LOCAL_RUN_TIMEOUT_SECONDS, self.MAX_RUN_TIMEOUT_SECONDS)
         marker = f"__NOVOUS2_RESULT_{secrets.token_hex(16)}__"
+        # Opt-in only: widens the sandboxed subprocess's import path to the project root so an
+        # explicitly-selected internal Novous module can be imported, without touching the
+        # default -I isolation for every other run.
+        preamble = (
+            f"import sys as __novous2_sys\n__novous2_sys.path.insert(0, {str(self.env.PROJECT_ROOT)!r})\n\n"
+            if allow_internal_imports else ""
+        )
         wrapper = "" if script_mode else (
             "\n\nif __name__ == '__main__':\n"
             "    import json as __novous2_json\n"
@@ -40486,7 +41824,7 @@ class ToolWorkbench:
         try:
             with tempfile.TemporaryDirectory(prefix="novous2-tool-test-") as temp_dir:
                 script_path = Path(temp_dir) / "tool_test.py"
-                script_path.write_text(source + wrapper, encoding="utf-8")
+                script_path.write_text(preamble + source + wrapper, encoding="utf-8")
                 with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
                     process = subprocess.Popen(
                         [self.env.interpreter(), "-I", str(script_path)],
@@ -40558,7 +41896,8 @@ class ToolWorkbench:
                 "message": f"Could not start local Python: {exc}",
             }
 
-    def run_python_tool(self, source: str, arguments: dict, timeout: float | None = None) -> dict:
+    def run_python_tool(self, source: str, arguments: dict, timeout: float | None = None,
+                        allow_internal_imports: bool = False) -> dict:
         if self.has_test_harness(source):
             # The edit-mode test call is the input: run the code exactly as written.
             try:
@@ -40566,7 +41905,8 @@ class ToolWorkbench:
             except ValueError as exc:
                 return {"status": "ERROR", "status_code": 400,
                         "error_code": "ERR_INVALID_TOOL", "message": str(exc)}
-            return self._run_locally(source, arguments, function.name, script_mode=True, timeout=timeout)
+            return self._run_locally(source, arguments, function.name, script_mode=True, timeout=timeout,
+                                     allow_internal_imports=allow_internal_imports)
         try:
             function = self.get_function_definition(source)
         except ValueError as exc:
@@ -40577,7 +41917,8 @@ class ToolWorkbench:
                 "message": str(exc),
             }
 
-        return self._run_locally(source, arguments, function.name, timeout=timeout)
+        return self._run_locally(source, arguments, function.name, timeout=timeout,
+                                 allow_internal_imports=allow_internal_imports)
 
     def promote_python_tool(self, source: str, expected_name: str) -> dict:
         function = self.get_function_definition(source)
@@ -40650,7 +41991,8 @@ class ToolWorkbench:
         return calls
 
     def test_with_llm(self, tool_code: str, model: str, user_prompt: str, timeout: float,
-                      execute: bool = True, description: str | None = None) -> dict:
+                      execute: bool = True, description: str | None = None,
+                      allow_internal_imports: bool = False) -> dict:
         """Let a model call the tool through the agent's schema, then run it with those arguments.
         ``execute=False`` (dry run) stops after checking the call, so the tool never runs."""
         try:
@@ -40740,7 +42082,8 @@ class ToolWorkbench:
                 "tool_execution_result": None,
             }
 
-        execution = self.run_python_tool(self.strip_test_harness(tool_code), arguments, timeout=timeout)
+        execution = self.run_python_tool(self.strip_test_harness(tool_code), arguments, timeout=timeout,
+                                         allow_internal_imports=allow_internal_imports)
         return {
             "status": execution["status"],
             "error_code": execution["error_code"],
@@ -40751,13 +42094,15 @@ class ToolWorkbench:
             "tool_execution_result": execution,
         }
 
-    def promote(self, tool_code: str, function_input: dict, timeout: float) -> dict:
+    def promote(self, tool_code: str, function_input: dict, timeout: float,
+               allow_internal_imports: bool = False) -> dict:
         """Re-test the tool, then append it to the promoted tools and the requirements."""
         try:
             function = self.get_function_definition(self.strip_test_harness(tool_code))
         except ValueError:
             raise
-        execution = self.run_python_tool(self.strip_test_harness(tool_code), function_input, timeout=timeout)
+        execution = self.run_python_tool(self.strip_test_harness(tool_code), function_input, timeout=timeout,
+                                         allow_internal_imports=allow_internal_imports)
         if execution["status"] != "SUCCESS":
             raise PromotionTestFailed("The tool must pass its test before promotion.", execution)
 
@@ -40918,6 +42263,85 @@ test_suite_store = TestSuiteStore()
 
 ```
 
+### test_environment/logic_tool_drafts.py
+
+```python
+"""Persistence for in-progress, unpromoted tools authored in the Tool Creation Wizard.
+
+A draft survives navigating away from the wizard and can be resumed later. It is
+deleted once its tool is promoted, or when the user explicitly discards it.
+"""
+
+import json
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+class ToolDraftStore:
+    """Atomic JSON-backed CRUD for Tool Creation Wizard drafts, keyed by draft id."""
+
+    PATH = Path(__file__).resolve().parent.parent / "tools" / "data" / "tool_drafts.json"
+    _lock = threading.Lock()
+
+    def _read_all(self) -> dict[str, dict]:
+        try:
+            data = json.loads(self.PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_all(self, drafts: dict[str, dict]) -> None:
+        self.PATH.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.PATH.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(drafts, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        temp_path.replace(self.PATH)
+
+    def list_drafts(self) -> list[dict]:
+        """Summaries (id, name, title, step, updated_at), newest first."""
+        drafts = self._read_all()
+        summaries = [
+            {
+                "draft_id": draft_id,
+                "name": draft.get("name", ""),
+                "title": draft.get("title", ""),
+                "step": draft.get("step", 0),
+                "updated_at": draft.get("updated_at", ""),
+            }
+            for draft_id, draft in drafts.items()
+        ]
+        summaries.sort(key=lambda entry: entry["updated_at"], reverse=True)
+        return summaries
+
+    def get_draft(self, draft_id: str) -> dict:
+        draft = self._read_all().get(draft_id)
+        if draft is None:
+            raise FileNotFoundError(f"Draft '{draft_id}' was not found.")
+        return {"draft_id": draft_id, **draft}
+
+    def save_draft(self, draft_id: str, data: dict) -> dict:
+        """Create or overwrite a draft's full state (autosave)."""
+        if not draft_id or not isinstance(draft_id, str):
+            raise ValueError("A draft id is required.")
+        with self._lock:
+            drafts = self._read_all()
+            drafts[draft_id] = {**data, "updated_at": datetime.now(timezone.utc).isoformat()}
+            self._write_all(drafts)
+        return {"draft_id": draft_id, **drafts[draft_id]}
+
+    def delete_draft(self, draft_id: str) -> dict:
+        with self._lock:
+            drafts = self._read_all()
+            existed = drafts.pop(draft_id, None) is not None
+            if existed:
+                self._write_all(drafts)
+        return {"draft_id": draft_id, "deleted": existed}
+
+
+tool_drafts = ToolDraftStore()
+
+```
+
 ### test_environment/schemas_test_environment.py
 
 ```python
@@ -40932,6 +42356,9 @@ class ToolWorkbenchRequest(BaseModel):
     tool_code: str = Field(..., min_length=1, max_length=50000)
     function_input: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: float = Field(5, ge=1, le=600)
+    # Names from the Tool Creation Wizard's Step 3 internal-module checklist. Any non-empty
+    # list opts this run into the sandbox's explicit path-widening (see ToolWorkbench).
+    internal_modules: list[str] = Field(default_factory=list, max_length=20)
 
 
 class ToolWorkbenchLLMRequest(ToolWorkbenchRequest):
@@ -40944,6 +42371,31 @@ class ToolWorkbenchLLMRequest(ToolWorkbenchRequest):
 class ToolWorkbenchGenerateRequest(BaseModel):
     model: str = Field(..., min_length=1, max_length=120)
     description: str = Field(..., min_length=1, max_length=5000)
+    # Parameter names declared in Step 2, checked against the generated function and
+    # reported back as a non-fatal mismatch warning.
+    expected_parameters: list[str] = Field(default_factory=list, max_length=50)
+
+
+class ToolDraftParameter(BaseModel):
+    name: str = Field("", max_length=64)
+    type: Literal["string", "integer", "number", "boolean", "array", "object"] = "string"
+    required: bool = False
+    description: str = Field("", max_length=500)
+
+
+class ToolDraftPayload(BaseModel):
+    """Full Tool Creation Wizard state for one in-progress, unpromoted tool."""
+    step: int = Field(0, ge=0, le=5)
+    name: str = Field("", max_length=64)
+    title: str = Field("", max_length=200)
+    invocation_rules: str = Field("", max_length=2000)
+    parameters: list[ToolDraftParameter] = Field(default_factory=list, max_length=30)
+    logic_text: str = Field("", max_length=5000)
+    packages: list[str] = Field(default_factory=list, max_length=20)
+    internal_modules: list[str] = Field(default_factory=list, max_length=20)
+    output_schema_text: str = Field("", max_length=5000)
+    model: str = Field("", max_length=120)
+    generated_code: str = Field("", max_length=50000)
 
 
 class SandboxInstallRequest(BaseModel):
@@ -41042,6 +42494,44 @@ class SuiteRunRequest(BaseModel):
   ],
   "created": "2026-11-06T20:10:59+00:00",
   "updated": "2026-11-06T20:22:31+00:00"
+}
+
+```
+
+### test_environment/data/saved_suites/prompts/tool-test-questions.json
+
+```json
+{
+  "id": "tool-test-questions",
+  "name": "tool test questions",
+  "category": "prompts",
+  "description": "",
+  "agent_id": "thinke01",
+  "model": "qwen2.5-coder:14b",
+  "steps": [
+    {
+      "text": "how many planets in the solar system?",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "what are the states in the usa?",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "why is there laws for building manfucaturing?",
+      "enabled": true,
+      "expect": null
+    },
+    {
+      "text": "who are the presidents of the usa?",
+      "enabled": true,
+      "expect": null
+    }
+  ],
+  "created": "2026-11-18T10:01:57+00:00",
+  "updated": "2026-11-18T10:01:57+00:00"
 }
 
 ```
@@ -41435,11 +42925,1597 @@ class SuiteRunRequest(BaseModel):
 
 ````
 
-### test_environment/data/saved_suites/results/squads/how-can-i-live-a-healthy-life-name-three-things.json
+### test_environment/data/saved_suites/results/prompts/tool-test-questions.json
 
-````json
+```json
 {
   "runs": [
+    {
+      "run_at": "2026-11-18T10:37:12.329Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 83636,
+      "passed": 0,
+      "failed": 0,
+      "steps": [
+        {
+          "text": "how many planets in the solar system?",
+          "status": "completed",
+          "reply": "The solar system consists of eight planets: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune. These planets orbit the Sun in the same general plane, known as the ecliptic plane.",
+          "duration_ms": 11826,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "The solar system consists of eight planets: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune. These planets orbit the Sun in the same general plane, known as the ecliptic plane."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"f8188a048f27\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": true,\n  \"store\": \"chat\",\n  \"agent\": \"Thinker\",\n  \"title\": \"result\",\n  \"index\": 0,\n  \"total_matches\": 1,\n  \"created_at\": \"2026-11-18T10:35:54.942632+00:00\",\n  \"offset\": 0,\n  \"total_chars\": 194,\n  \"content\": \"The solar system consists of eight planets: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune. These planets orbit the Sun in the same general plane, known as the ecliptic plane.\"\n}"
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "what are the states in the usa?",
+          "status": "completed",
+          "reply": "As of the latest update, there are 50 states in the United States of America. They are Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, and Wyoming.",
+          "duration_ms": 23808,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "As of the latest update, there are 50 states in the United States of America. They are Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, and Wyoming."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"7398fe3d27ad\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": true,\n  \"store\": \"chat\",\n  \"agent\": \"Thinker\",\n  \"title\": \"result\",\n  \"index\": 0,\n  \"total_matches\": 2,\n  \"created_at\": \"2026-11-18T10:36:12.404550+00:00\",\n  \"offset\": 0,\n  \"total_chars\": 612,\n  \"content\": \"As of the latest update, there are 50 states in the United States of America. They are Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, and Wyoming.\"\n}"
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "why is there laws for building manfucaturing?",
+          "status": "completed",
+          "reply": "Laws governing building manufacturing exist to ensure safety, health, and welfare of the public. These laws typically address various aspects such as building codes, zoning regulations, environmental standards, and labor laws. Building codes ensure structural integrity, fire safety, and accessibility. Zoning laws control land use and the location of different types of buildings. Environmental laws protect air and water quality, and labor laws safeguard workers' rights and working conditions. These regulations promote sustainable development, minimize risks, and ensure that manufacturing facilities operate responsibly within communities.",
+          "duration_ms": 20716,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "Laws governing building manufacturing exist to ensure safety, health, and welfare of the public. These laws typically address various aspects such as building codes, zoning regulations, environmental standards, and labor laws. Building codes ensure structural integrity, fire safety, and accessibility. Zoning laws control land use and the location of different types of buildings. Environmental laws protect air and water quality, and labor laws safeguard workers' rights and working conditions. These regulations promote sustainable development, minimize risks, and ensure that manufacturing facilities operate responsibly within communities."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"9d404e135e86\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": true,\n  \"store\": \"chat\",\n  \"agent\": \"Thinker\",\n  \"title\": \"result\",\n  \"index\": 0,\n  \"total_matches\": 3,\n  \"created_at\": \"2026-11-18T10:36:34.619070+00:00\",\n  \"offset\": 0,\n  \"total_chars\": 644,\n  \"content\": \"Laws governing building manufacturing exist to ensure safety, health, and welfare of the public. These laws typically address various aspects such as building codes, zoning regulations, environmental standards, and labor laws. Building codes ensure structural integrity, fire safety, and accessibility. Zoning laws control land use and the location of different types of buildings. Environmental laws protect air and water quality, and labor laws safeguard workers' rights and working conditions. These regulations promote sustainable development, minimize risks, and ensure that manufacturing facilities operate responsibly within communities.\"\n}"
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "who are the presidents of the usa?",
+          "status": "completed",
+          "reply": "As of the latest update, the current president of the United States is Joe Biden. He took office on January 20, 2021. The 46th president succeeded Donald Trump, who was the 45th president and held office from January 20, 2017, to January 20, 2021. Prior to Biden, Barack Obama served as the 44th president from January 20, 2009, to January 20, 2017. A complete list of all U.S. presidents from George Washington to Joe Biden can be found in the official history of the United States presidency.",
+          "duration_ms": 27284,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "As of the latest update, the current president of the United States is Joe Biden. He took office on January 20, 2021. The 46th president succeeded Donald Trump, who was the 45th president and held office from January 20, 2017, to January 20, 2021. Prior to Biden, Barack Obama served as the 44th president from January 20, 2009, to January 20, 2017. A complete list of all U.S. presidents from George Washington to Joe Biden can be found in the official history of the United States presidency."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"b1fcfdf97b2b\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": true,\n  \"store\": \"chat\",\n  \"agent\": \"Thinker\",\n  \"title\": \"result\",\n  \"index\": 0,\n  \"total_matches\": 4,\n  \"created_at\": \"2026-11-18T10:36:58.771090+00:00\",\n  \"offset\": 0,\n  \"total_chars\": 494,\n  \"content\": \"As of the latest update, the current president of the United States is Joe Biden. He took office on January 20, 2021. The 46th president succeeded Donald Trump, who was the 45th president and held office from January 20, 2017, to January 20, 2021. Prior to Biden, Barack Obama served as the 44th president from January 20, 2009, to January 20, 2017. A complete list of all U.S. presidents from George Washington to Joe Biden can be found in the official history of the United States presidency.\"\n}"
+            }
+          ],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T10:29:30.042Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 158292,
+      "passed": 0,
+      "failed": 1,
+      "steps": [
+        {
+          "text": "how many planets in the solar system?",
+          "status": "completed",
+          "reply": "There are 8 planets in the solar system: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune.",
+          "duration_ms": 9247,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "There are 8 planets in the solar system: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"032f7684ada7\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": true,\n  \"store\": \"chat\",\n  \"agent\": \"Thinker\",\n  \"title\": \"result\",\n  \"index\": 0,\n  \"total_matches\": 1,\n  \"created_at\": \"2026-11-18T10:26:59.062557+00:00\",\n  \"offset\": 0,\n  \"total_chars\": 107,\n  \"content\": \"There are 8 planets in the solar system: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune.\"\n}"
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "what are the states in the usa?",
+          "status": "completed",
+          "reply": "There are 50 states in the United States of America: Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, and Wyoming.",
+          "duration_ms": 22027,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "There are 50 states in the United States of America: Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, and Wyoming."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"98aeb13b6f1a\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": true,\n  \"store\": \"chat\",\n  \"agent\": \"Thinker\",\n  \"title\": \"result\",\n  \"index\": 0,\n  \"total_matches\": 2,\n  \"created_at\": \"2026-11-18T10:27:14.365592+00:00\",\n  \"offset\": 0,\n  \"total_chars\": 578,\n  \"content\": \"There are 50 states in the United States of America: Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, and Wyoming.\"\n}"
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "why is there laws for building manfucaturing?",
+          "status": "completed",
+          "reply": "Laws for building manufacturing are implemented to ensure safety, protect public health, promote fair labor practices, regulate pollution, and manage land use. These laws address various aspects including workplace safety standards, environmental protection, building codes, zoning regulations, and worker rights. They are designed to balance economic development with the need to safeguard the environment and the well-being of workers and the community.",
+          "duration_ms": 15770,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "Laws for building manufacturing are implemented to ensure safety, protect public health, promote fair labor practices, regulate pollution, and manage land use. These laws address various aspects including workplace safety standards, environmental protection, building codes, zoning regulations, and worker rights. They are designed to balance economic development with the need to safeguard the environment and the well-being of workers and the community."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"ceab2b5b92bd\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": true,\n  \"store\": \"chat\",\n  \"agent\": \"Thinker\",\n  \"title\": \"result\",\n  \"index\": 0,\n  \"total_matches\": 3,\n  \"created_at\": \"2026-11-18T10:27:33.369341+00:00\",\n  \"offset\": 0,\n  \"total_chars\": 455,\n  \"content\": \"Laws for building manufacturing are implemented to ensure safety, protect public health, promote fair labor practices, regulate pollution, and manage land use. These laws address various aspects including workplace safety standards, environmental protection, building codes, zoning regulations, and worker rights. They are designed to balance economic development with the need to safeguard the environment and the well-being of workers and the community.\"\n}"
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "who are the presidents of the usa?",
+          "status": "request_failed",
+          "reply": "",
+          "duration_ms": 111245,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "The presidents of the United States of America are listed below in chronological order:\n\n1. George Washington (1789-1797)\n2. John Adams (1797-1801)\n3. Thomas Jefferson (1801-1809)\n4. James Madison (1809-1817)\n5. James Monroe (1817-1825)\n6. John Quincy Adams (1825-1829)\n7. Andrew Jackson (1829-1837)\n8. Martin Van Buren (1837-1841)\n9. William Henry Harrison (1841-1841)\n10. John Tyler (1841-1845)\n11. James K. Polk (1845-1849)\n12. Zachary Taylor (1849-1850)\n13. Millard Fillmore (1850-1853)\n14. Franklin Pierce (1853-1857)\n15. James Buchanan (1857-1861)\n16. Abraham Lincoln (1861-1865)\n17. Andrew Johnson (1865-1869)\n18. Ulysses S. Grant (1869-1877)\n19. Rutherford B. Hayes (1877-1881)\n20. James A. Garfield (1881-1881)\n21. Chester A. Arthur (1881-1885)\n22. Grover Cleveland (1885-1889, 1893-1897)\n23. Benjamin Harrison (1889-1893)\n24. William McKinley (1897-1901)\n25. Theodore Roosevelt (1901-1909)\n26. William Howard Taft (1909-1913)\n27. Woodrow Wilson (1913-1921)\n28. Warren G. Harding (1921-1923)\n29. Calvin Coolidge (1923-1929)\n30. Herbert Hoover (1929-1933)\n31. Franklin D. Roosevelt (1933-1945)\n32. Harry S. Truman (1945-1953)\n33. Dwight D. Eisenhower (1953-1961)\n34. John F. Kennedy (1961-1963)\n35. Lyndon B. Johnson (1963-1969)\n36. Richard Nixon (1969-1974)\n37. Gerald Ford (1974-1977)\n38. Jimmy Carter (1977-1981)\n39. Ronald Reagan (1981-1989)\n40. George H. W. Bush (1989-1993)\n41. Bill Clinton (1993-2001)\n42. George W. Bush (2001-2009)\n43. Barack Obama (2009-2017)\n44. Donald Trump (2017-2021)\n45. Joe Biden (2021-present)"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"c36c293a0740\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": true,\n  \"store\": \"chat\",\n  \"agent\": \"Thinker\",\n  \"title\": \"result\",\n  \"index\": 0,\n  \"total_matches\": 4,\n  \"created_at\": \"2026-11-18T10:28:45.694757+00:00\",\n  \"offset\": 0,\n  \"total_chars\": 1534,\n  \"content\": \"The presidents of the United States of America are listed below in chronological order:\\n\\n1. George Washington (1789-1797)\\n2. John Adams (1797-1801)\\n3. Thomas Jefferson (1801-1809)\\n4. James Madison (1809-1817)\\n5. James Monroe (1817-1825)\\n6. John Quincy Adams (1825-1829)\\n7. Andrew Jackson (1829-1837)\\n8. Martin Van Buren (1837-1841)\\n9. William Henry Harrison (1841-1841)\\n10. John Tyler (1841-1845)\\n11. James K. Polk (1845-1849)\\n12. Zachary Taylor (1849-1850)\\n13. Millard Fillmore (1850-1853)\\n14. Franklin Pierce (1853-1857)\\n15. James Buchanan (1857-1861)\\n16. Abraham Lincoln (1861-1865)\\n17. Andrew Johnson (1865-1869)\\n18. Ulysses S. Grant (1869-1877)\\n19. Rutherford B. Hayes (1877-1881)\\n20. James A. Garfield (1881-1881)\\n21. Chester A. Arthur (1881-1885)\\n22. Grover Cleveland (1885-1889, 1893-1897)\\n23. Benjamin Harrison (1889-1893)\\n24. William McKinley (1897-1901)\\n25. Theodore Roosevelt (1901-1909)\\n26. William Howard Taft (1909-1913)\\n27. Woodrow Wilson (1913-1921)\\n28. Warren G. Harding (1921-1923)\\n29. Calvin Coolidge (1923-1929)\\n30. Herbert Hoover (1929-1933)\\n31. Franklin D. Roosevelt (1933-1945)\\n32. Harry S. Truman (1945-1953)\\n33. Dwight D. Eisenhower (1953-1961)\\n34. John F. Kennedy (1961-1963)\\n35. Lyndon B. Johnson (1963-1969)\\n36. Richard Nixon (1969-1974)\\n37. Gerald Ford (1974-1977)\\n38. Jimmy Carter (1977-1981)\\n39. Ronald Reagan (1981-1989)\\n40. George H. W. Bush (1989-1993)\\n41. Bill Clinton (1993-2001)\\n42. George W. Bush (2001-2009)\\n43. Barack Obama (2009-2017)\\n44. Donald Trump (2017-2021)\\n45. Joe Biden (2021-present)\"\n}"
+            }
+          ],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T10:12:34.210Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 48364,
+      "passed": 0,
+      "failed": 4,
+      "steps": [
+        {
+          "text": "how many planets in the solar system?",
+          "status": "request_failed",
+          "reply": "The solar system consists of eight planets: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune.",
+          "duration_ms": 14000,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "The solar system consists of eight planets: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"d60bdf59106b\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "The solar system consists of eight planets: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune."
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "what are the states in the usa?",
+          "status": "request_failed",
+          "reply": "The United States of America consists of 50 states.",
+          "duration_ms": 7262,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "The United States of America consists of 50 states."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"d71959f39609\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "why is there laws for building manfucaturing?",
+          "status": "request_failed",
+          "reply": "Laws for building and manufacturing exist to ensure safety, protect public health, promote environmental sustainability, and regulate the use of resources. These laws address various aspects such as building codes, worker safety, emissions control, and product standards.",
+          "duration_ms": 11809,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "Laws for building and manufacturing exist to ensure safety, protect public health, promote environmental sustainability, and regulate the use of resources. These laws address various aspects such as building codes, worker safety, emissions control, and product standards."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"a924cf971de1\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "who are the presidents of the usa?",
+          "status": "request_failed",
+          "reply": "As of my last update, the current president of the United States is Joe Biden. He took office on January 20, 2021. Prior to that, the president was Donald Trump, who served from January 20, 2017, to January 20, 2021.",
+          "duration_ms": 15289,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "As of my last update, the current president of the United States is Joe Biden. He took office on January 20, 2021. Prior to that, the president was Donald Trump, who served from January 20, 2017, to January 20, 2021."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"dee87d31d2a5\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T10:08:03.806Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 248607,
+      "passed": 0,
+      "failed": 4,
+      "steps": [
+        {
+          "text": "how many planets in the solar system?",
+          "status": "request_failed",
+          "reply": "The solar system currently consists of 8 planets: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune. These planets orbit the Sun in a hierarchical structure, with each planet following its unique path and characteristics.",
+          "duration_ms": 19957,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "The solar system currently consists of 8 planets: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune. These planets orbit the Sun in a hierarchical structure, with each planet following its unique path and characteristics."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"b4cc23e7c49b\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "The solar system currently consists of 8 planets: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune. These planets orbit the Sun in a hierarchical structure, with each planet following its unique path and characteristics."
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "what are the states in the usa?",
+          "status": "request_failed",
+          "reply": "The United States of America currently consists of 50 states. These states are: Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, and Wyoming.",
+          "duration_ms": 36038,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "The United States of America currently consists of 50 states. These states are: Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, and Wyoming."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"6554ae514f9b\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "The United States of America currently consists of 50 states. These states are: Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, and Wyoming."
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "why is there laws for building manfucaturing?",
+          "status": "request_failed",
+          "reply": "Laws governing building and manufacturing serve multiple purposes, including ensuring public safety, protecting the environment, regulating worker safety and health, managing land use, and promoting economic efficiency. These laws establish standards for building design, construction, maintenance, and demolition, ensuring that structures are safe and meet certain quality and durability criteria. Additionally, manufacturing laws address workplace safety, environmental protection, product safety, and labor rights, helping to create a balanced and sustainable industrial sector.",
+          "duration_ms": 29715,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "Laws governing building and manufacturing serve multiple purposes, including ensuring public safety, protecting the environment, regulating worker safety and health, managing land use, and promoting economic efficiency. These laws establish standards for building design, construction, maintenance, and demolition, ensuring that structures are safe and meet certain quality and durability criteria. Additionally, manufacturing laws address workplace safety, environmental protection, product safety, and labor rights, helping to create a balanced and sustainable industrial sector."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"6cee438bc98c\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "Laws governing building and manufacturing serve multiple purposes, including ensuring public safety, protecting the environment, regulating worker safety and health, managing land use, and promoting economic efficiency. These laws establish standards for building design, construction, maintenance, and demolition, ensuring that structures are safe and meet certain quality and durability criteria. Additionally, manufacturing laws address workplace safety, environmental protection, product safety, and labor rights, helping to create a balanced and sustainable industrial sector."
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "who are the presidents of the usa?",
+          "status": "request_failed",
+          "reply": "",
+          "duration_ms": 162894,
+          "tool_events": [
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": true,\n  \"store\": \"chat\",\n  \"agent\": \"Thinker\",\n  \"title\": \"result\",\n  \"index\": 0,\n  \"total_matches\": 3,\n  \"created_at\": \"2026-11-18T10:05:02.763058+00:00\",\n  \"offset\": 0,\n  \"total_chars\": 581,\n  \"content\": \"Laws governing building and manufacturing serve multiple purposes, including ensuring public safety, protecting the environment, regulating worker safety and health, managing land use, and promoting economic efficiency. These laws establish standards for building design, construction, maintenance, and demolition, ensuring that structures are safe and meet certain quality and durability criteria. Additionally, manufacturing laws address workplace safety, environmental protection, product safety, and labor rights, helping to create a balanced and sustainable industrial sector.\"\n}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T10:03:33.694Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 89687,
+      "passed": 0,
+      "failed": 4,
+      "steps": [
+        {
+          "text": "how many planets in the solar system?",
+          "status": "request_failed",
+          "reply": "It appears there was an error in attempting to read from the scratchpad. Let's proceed with the analysis and provide the answer directly.\n\nThe solar system consists of eight planets: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune.",
+          "duration_ms": 15623,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "The solar system consists of eight planets: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"e9788d9536f3\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "what are the states in the usa? ",
+          "status": "request_failed",
+          "reply": "It appears there was an error in attempting to read from the scratchpad. Let's proceed with the analysis and provide the answer directly.\n\nThe United States of America consists of 50 states: Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, and Wyoming.",
+          "duration_ms": 23543,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "The United States of America consists of 50 states: Alabama, Alaska, Arizona, Arkansas, California, Colorado, Connecticut, Delaware, Florida, Georgia, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky, Louisiana, Maine, Maryland, Massachusetts, Michigan, Minnesota, Mississippi, Missouri, Montana, Nebraska, Nevada, New Hampshire, New Jersey, New Mexico, New York, North Carolina, North Dakota, Ohio, Oklahoma, Oregon, Pennsylvania, Rhode Island, South Carolina, South Dakota, Tennessee, Texas, Utah, Vermont, Virginia, Washington, West Virginia, Wisconsin, and Wyoming."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"f45f7f7e32bb\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "why is there laws for building manfucaturing?",
+          "status": "request_failed",
+          "reply": "It appears there was an error in attempting to read from the scratchpad. Let's proceed with the analysis and provide the answer directly.\n\nLaws for building and manufacturing exist to ensure safety, protect public health, and promote environmental sustainability. These laws address various aspects such as building codes, fire safety, worker safety, and environmental regulations. They are essential for maintaining order, protecting citizens, and ensuring that construction and manufacturing processes meet acceptable standards.",
+          "duration_ms": 15291,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "Laws for building and manufacturing exist to ensure safety, protect public health, and promote environmental sustainability. These laws address various aspects such as building codes, fire safety, worker safety, and environmental regulations. They are essential for maintaining order, protecting citizens, and ensuring that construction and manufacturing processes meet acceptable standards."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"ff93ad7eb2b3\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "who are the presidents of the usa?",
+          "status": "request_failed",
+          "reply": "It appears there was an error in attempting to read from the scratchpad. Let's proceed with the analysis and provide the answer directly.\n\nThe presidents of the United States of America, in chronological order, are: George Washington, John Adams, Thomas Jefferson, James Madison, James Monroe, John Quincy Adams, Andrew Jackson, Martin Van Buren, William Henry Harrison, John Tyler, James K. Polk, Zachary Taylor, Millard Fillmore, Franklin Pierce, James Buchanan, Abraham Lincoln, Andrew Johnson, Ulysses S. Grant, Rutherford B. Hayes, James A. Garfield, Chester A. Arthur, Grover Cleveland, Benjamin Harrison, Grover Cleveland, William McKinley, Theodore Roosevelt, William Howard Taft, Woodrow Wilson, Warren G. Harding, Calvin Coolidge, Herbert Hoover, Franklin D. Roosevelt, Harry S. Truman, Dwight D. Eisenhower, John F. Kennedy, Lyndon B. Johnson, Richard Nixon, Gerald Ford, Jimmy Carter, Ronald Reagan, George H. W. Bush, Bill Clinton, George W. Bush, Barack Obama, Donald Trump, Joe Biden.",
+          "duration_ms": 35227,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "The presidents of the United States of America, in chronological order, are: George Washington, John Adams, Thomas Jefferson, James Madison, James Monroe, John Quincy Adams, Andrew Jackson, Martin Van Buren, William Henry Harrison, John Tyler, James K. Polk, Zachary Taylor, Millard Fillmore, Franklin Pierce, James Buchanan, Abraham Lincoln, Andrew Johnson, Ulysses S. Grant, Rutherford B. Hayes, James A. Garfield, Chester A. Arthur, Grover Cleveland, Benjamin Harrison, Grover Cleveland, William McKinley, Theodore Roosevelt, William Howard Taft, Woodrow Wilson, Warren G. Harding, Calvin Coolidge, Herbert Hoover, Franklin D. Roosevelt, Harry S. Truman, Dwight D. Eisenhower, John F. Kennedy, Lyndon B. Johnson, Richard Nixon, Gerald Ford, Jimmy Carter, Ronald Reagan, George H. W. Bush, Bill Clinton, George W. Bush, Barack Obama, Donald Trump, Joe Biden."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"4915b7f0aa8a\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        }
+      ]
+    }
+  ]
+}
+
+```
+
+### test_environment/data/saved_suites/results/squads/how-can-i-live-a-healthy-life-name-three-things.json
+
+```json
+{
+  "runs": [
+    {
+      "run_at": "2026-11-18T10:33:31.901Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 72576,
+      "passed": 0,
+      "failed": 0,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "completed",
+          "reply": "I'm sorry, I am unable to fulfill this request at this time.",
+          "duration_ms": 72573,
+          "tool_events": [
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": false,\n  \"store\": \"chat\",\n  \"message\": \"No chat entry from 'Thinker' titled 'result'.\",\n  \"available\": []\n}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": false,\n  \"store\": \"chat\",\n  \"message\": \"No chat entry from 'Thinker' titled 'result'.\",\n  \"available\": []\n}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": false,\n  \"store\": \"chat\",\n  \"message\": \"No chat entry from 'Thinker' titled 'result'.\",\n  \"available\": []\n}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": false,\n  \"store\": \"chat\",\n  \"message\": \"No chat entry from 'Thinker' titled 'result'.\",\n  \"available\": []\n}"
+            }
+          ],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T10:31:04.355Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 54693,
+      "passed": 0,
+      "failed": 0,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "completed",
+          "reply": "To live a healthy life, three key things you can focus on are:\n\n1. **Maintaining a balanced diet**: Ensure that your eating habits include a variety of nutrients essential for the body's functioning. This involves consuming a mix of fruits, vegetables, proteins, carbohydrates, and healthy fats.\n\n2. **Engaging in regular physical activity**: Incorporate exercise into your routine to improve cardiovascular health, strength, flexibility, and overall fitness. Activities such as walking, running, yoga, and strength training are beneficial.\n\n3. **Getting adequate rest**: Prioritize sufficient sleep and relaxation to allow your body and mind to recover and function optimally. Aim for 7-9 hours of quality sleep per night and manage stress through techniques like meditation or deep breathing exercises.\n\nThese factors are interconnected and collectively contribute to overall well-being.",
+          "duration_ms": 19469,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "To live a healthy life, three key things you can focus on are: maintaining a balanced diet, engaging in regular physical activity, and getting adequate rest. These factors are interconnected and collectively contribute to overall well-being."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"2a7ab69a03dc\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": true,\n  \"store\": \"chat\",\n  \"agent\": \"Thinker\",\n  \"title\": \"result\",\n  \"index\": 0,\n  \"total_matches\": 1,\n  \"created_at\": \"2026-11-18T10:30:17.999327+00:00\",\n  \"offset\": 0,\n  \"total_chars\": 241,\n  \"content\": \"To live a healthy life, three key things you can focus on are: maintaining a balanced diet, engaging in regular physical activity, and getting adequate rest. These factors are interconnected and collectively contribute to overall well-being.\"\n}"
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "completed",
+          "reply": "To lose weight, you need to create a calorie deficit, meaning you burn more calories than you consume. If you burn an extra 500 calories a month, it is not sufficient to result in a noticeable weight loss. A common recommendation is a 500-calorie deficit per day, which translates to approximately 3,500 calories per week. This can lead to a loss of about one pound per week. Therefore, burning an extra 500 calories a month would not result in significant weight loss.",
+          "duration_ms": 19974,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "To lose weight, you need to create a calorie deficit, meaning you burn more calories than you consume. If you burn an extra 500 calories a month, it is not sufficient to result in a noticeable weight loss. A common recommendation is a 500-calorie deficit per day, which translates to approximately 3,500 calories per week. This can lead to a loss of about one pound per week. Therefore, burning an extra 500 calories a month would not result in significant weight loss."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"58b134005c79\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": true,\n  \"store\": \"chat\",\n  \"agent\": \"Thinker\",\n  \"title\": \"result\",\n  \"index\": 0,\n  \"total_matches\": 2,\n  \"created_at\": \"2026-11-18T10:30:41.638533+00:00\",\n  \"offset\": 0,\n  \"total_chars\": 469,\n  \"content\": \"To lose weight, you need to create a calorie deficit, meaning you burn more calories than you consume. If you burn an extra 500 calories a month, it is not sufficient to result in a noticeable weight loss. A common recommendation is a 500-calorie deficit per day, which translates to approximately 3,500 calories per week. This can lead to a loss of about one pound per week. Therefore, burning an extra 500 calories a month would not result in significant weight loss.\"\n}"
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "completed",
+          "reply": "To improve flexibility, it is generally recommended to engage in stretching exercises for at least 10 to 15 minutes per day. Regular stretching can help increase the range of motion in your joints and muscles, reduce stiffness, and improve overall flexibility. However, the effectiveness of stretching can also depend on the consistency and quality of the stretches performed.",
+          "duration_ms": 15247,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "To improve flexibility, it is generally recommended to engage in stretching exercises for at least 10 to 15 minutes per day. Regular stretching can help increase the range of motion in your joints and muscles, reduce stiffness, and improve overall flexibility. However, the effectiveness of stretching can also depend on the consistency and quality of the stretches performed."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"e750d849e048\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\n  \"found\": true,\n  \"store\": \"chat\",\n  \"agent\": \"Thinker\",\n  \"title\": \"result\",\n  \"index\": 0,\n  \"total_matches\": 3,\n  \"created_at\": \"2026-11-18T10:30:59.282661+00:00\",\n  \"offset\": 0,\n  \"total_chars\": 376,\n  \"content\": \"To improve flexibility, it is generally recommended to engage in stretching exercises for at least 10 to 15 minutes per day. Regular stretching can help increase the range of motion in your joints and muscles, reduce stiffness, and improve overall flexibility. However, the effectiveness of stretching can also depend on the consistency and quality of the stretches performed.\"\n}"
+            }
+          ],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T09:56:22.898Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 65804,
+      "passed": 0,
+      "failed": 3,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "request_failed",
+          "reply": "To live a healthy life, consider the following three key aspects:\n\n1. **Balanced Diet**: Consuming a variety of nutrient-rich foods such as fruits, vegetables, lean proteins, and whole grains can provide the necessary vitamins, minerals, and fiber for optimal health. Reducing the intake of processed foods, sugars, and saturated fats is also crucial.\n\n2. **Regular Physical Activity**: Engaging in at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity each week can improve cardiovascular health, strengthen muscles and bones, and enhance mental well-being. Regular physical activity can also help manage weight and reduce the risk of chronic diseases.\n\n3. **Effective Stress Management**: Chronic stress can have significant negative impacts on both physical and mental health. Implementing stress management techniques such as mindfulness, meditation, deep breathing exercises, or time management can help maintain a healthy balance and improve overall well-being.\n\nThese three aspects are interconnected and contribute to a holistic approach to maintaining a healthy lifestyle.",
+          "duration_ms": 30157,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "To live a healthy life, it is important to maintain a balanced diet, engage in regular physical activity, and manage stress effectively."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"728dbb16c1cc\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "request_failed",
+          "reply": "If you burn an extra 500 calories a month, you will lose approximately 0.176 pounds in a month. This is because a pound of body fat contains about 3,500 calories. Therefore, burning 500 calories more than you consume each month would lead to a weight loss of 500/3,500 = 0.1429 pounds per month.",
+          "duration_ms": 25544,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "If you burn an extra 500 calories a month, you will lose approximately 0.176 pounds in a month. This is because a pound of body fat contains about 3,500 calories. Therefore, burning 500 calories more than you consume each month would lead to a weight loss of 500/3,500 = 0.1429 pounds per month."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"847627b8d4a1\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "request_failed",
+          "reply": "To improve flexibility, it's generally recommended to stretch for at least 10 to 15 minutes per day. This can be done in a single session or broken up into shorter sessions throughout the day. Consistency is key, as regular stretching can help maintain and enhance your range of motion over time. It's important to perform each stretch slowly and hold the position for about 15 to 30 seconds to effectively improve flexibility.",
+          "duration_ms": 10098,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T09:54:57.972Z",
+      "agent_id": "sidekik-01",
+      "model": "mistral-nemo:latest",
+      "duration_ms": 20,
+      "passed": 0,
+      "failed": 3,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "request_failed",
+          "reply": "",
+          "duration_ms": 6,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "request_failed",
+          "reply": "",
+          "duration_ms": 5,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "request_failed",
+          "reply": "",
+          "duration_ms": 4,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T09:36:15.970Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 55403,
+      "passed": 0,
+      "failed": 3,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "request_failed",
+          "reply": "To live a healthy life, there are several key practices you can adopt. Here are three important aspects to consider:\n\n1. **Balanced Diet**: Consuming a variety of nutritious foods is crucial for maintaining good health. Focus on including a range of fruits, vegetables, lean proteins, whole grains, and healthy fats in your diet. Limit the intake of processed foods, sugars, and saturated fats.\n\n2. **Regular Exercise**: Engaging in physical activity regularly can improve your physical health and overall well-being. Aim for at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity each week, along with muscle-strengthening exercises.\n\n3. **Adequate Sleep**: Getting enough quality sleep is essential for your physical and mental health. Adults should aim for 7-9 hours of sleep per night. Establishing a consistent sleep schedule and creating a restful sleep environment can help improve your sleep quality.\n\nThese three practices, when combined, can significantly contribute to a healthier lifestyle.",
+          "duration_ms": 13619,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "request_failed",
+          "reply": "To determine how many pounds you can lose by burning an extra 500 calories a month, we need to consider the relationship between calorie deficit and weight loss.\n\n1. **Calorie Deficit for Weight Loss**: Losing one pound typically requires a calorie deficit of about 3,500 calories. This means you need to consume 3,500 fewer calories than your body burns to lose one pound.\n\n2. **Monthly Calorie Deficit**: If you burn an extra 500 calories per month, this results in a total monthly calorie deficit of 500 calories.\n\n3. **Calculating Weight Loss**: To find out how many pounds you can lose with a 500-calorie deficit per month, divide the total monthly deficit by the calorie deficit required for one pound of weight loss:\n\n   \\[\n   \\text{Weight loss (pounds)} = \\frac{\\text{Monthly calorie deficit}}{\\text{Calories per pound of weight loss}} = \\frac{500 \\text{ calories}}{3,500 \\text{ calories/pound}} \\approx 0.14 \\text{ pounds}\n   \\]\n\nTherefore, by burning an extra 500 calories a month, you can expect to lose approximately 0.14 pounds (or about 0.6 ounces) of weight.",
+          "duration_ms": 20257,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "request_failed",
+          "reply": "To improve flexibility and maintain a healthy range of motion, regular stretching is recommended. The duration and frequency of your stretching routine can vary depending on your individual needs and goals. Here are some general guidelines:\n\n1. **Frequency**: Aim to stretch at least 2-3 times per week. Consistency is key to seeing improvements in flexibility.\n\n2. **Duration**: Each stretching session should last at least 10-15 minutes. However, to see significant improvements, you might want to aim for 20-30 minutes per session.\n\n3. **Types of Stretches**: Include a variety of stretches that target different muscle groups. Static stretches, where you hold a stretch in a single position, are effective for improving flexibility. Dynamic stretches, which involve movement, can help prepare your muscles for activity and maintain flexibility.\n\n4. **Quality Over Quantity**: The quality of each stretch is more important than the duration. Ensure that you are stretching correctly, holding each stretch for a sufficient amount of time, and not bouncing or pushing into pain.\n\n5. **Consistency and Patience**: Improving flexibility takes time. Be patient with your progress and continue to stretch regularly to see lasting benefits.\n\nIn summary, aim for at least 20-30 minutes of stretching per day, 2-3 times a week, to effectively improve your flexibility.",
+          "duration_ms": 21524,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T09:27:51.736Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 13081,
+      "passed": 0,
+      "failed": 1,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "request_failed",
+          "reply": "To live a healthy life, here are three key components to focus on:\n\n1. **Balanced Nutrition**: Ensure your diet is rich in fruits, vegetables, lean proteins, and whole grains. Limit the intake of processed foods, sugars, and excessive salts. Proper nutrition provides the essential nutrients needed for optimal physical and mental health.\n\n2. **Regular Exercise**: Incorporate at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity each week, along with muscle-strengthening exercises on two or more days. Exercise improves cardiovascular health, enhances muscle strength, and boosts mood and mental health.\n\n3. **Adequate Sleep**: Aim for 7-9 hours of quality sleep per night. Good sleep is crucial for physical health, emotional well-being, and cognitive function. Establish a consistent sleep schedule and create a relaxing bedtime routine to improve sleep quality.\n\nThese elements are foundational for maintaining overall health and can significantly impact your quality of life.",
+          "duration_ms": 13078,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T09:25:51.601Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 51658,
+      "passed": 0,
+      "failed": 3,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "request_failed",
+          "reply": "To live a healthy life, consider the following three things:\n\n1. **Balanced Diet**: Incorporating a variety of nutrients from fruits, vegetables, lean proteins, whole grains, and healthy fats is crucial for maintaining overall health.\n\n2. **Regular Exercise**: Engaging in physical activity on a regular basis helps improve cardiovascular health, strength, flexibility, and mental well-being.\n\n3. **Adequate Sleep**: Ensuring sufficient and quality sleep is essential for physical recovery, cognitive function, and emotional health.",
+          "duration_ms": 19268,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "To live a healthy life, consider the following three things:\n\n1. **Balanced Diet**: Incorporating a variety of nutrients from fruits, vegetables, lean proteins, whole grains, and healthy fats is crucial for maintaining overall health.\n\n2. **Regular Exercise**: Engaging in physical activity on a regular basis helps improve cardiovascular health, strength, flexibility, and mental well-being.\n\n3. **Adequate Sleep**: Ensuring sufficient and quality sleep is essential for physical recovery, cognitive function, and emotional health."
+              },
+              "status": "success",
+              "error": null,
+              "result": "{\"saved\": true, \"store\": \"chat\", \"agent\": \"Thinker\", \"title\": \"result\", \"id\": \"f4781ac1f615\"}"
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "request_failed",
+          "reply": "To determine how many pounds you can lose by burning an extra 500 calories a month, let's break down the calculation:\n\n1. **Calories in a Pound**: Typically, it is assumed that burning or consuming 3,500 calories results in a loss of about 1 pound of body weight.\n\n2. **Monthly Calorie Deficit**: If you burn an extra 500 calories each month, the total monthly calorie deficit would be 500 calories.\n\n3. **Pounds Lost per Month**: To find out how many pounds you can lose in a month, divide the monthly calorie deficit by the number of calories in a pound:\n   \\[\n   \\text{Pounds Lost per Month} = \\frac{500 \\text{ calories}}{3,500 \\text{ calories per pound}} \\approx 0.1429 \\text{ pounds}\n   \\]\n\nTherefore, by burning an extra 500 calories a month, you can expect to lose approximately 0.1429 pounds, or about 0.14 pounds.",
+          "duration_ms": 15206,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "request_failed",
+          "reply": "To gain some flexibility through stretching, it's important to focus on both the duration and the consistency of your stretching routine. Here are some guidelines to consider:\n\n1. **Total Stretching Time**: Generally, a total stretching time of 10 to 20 minutes per day is recommended for most individuals. This allows you to effectively target different muscle groups and promote flexibility.\n\n2. **Frequency**: Consistency is key. Aim to stretch at least 3 to 4 times a week to see noticeable improvements in flexibility.\n\n3. **Quality Over Quantity**: The quality of your stretches is more important than the number of minutes. Ensure that you are performing each stretch correctly and holding them for the recommended duration (typically 15 to 30 seconds for each stretch).\n\n4. **Focus Areas**: Include stretches that target major muscle groups, such as the hamstrings, quadriceps, chest, back, and shoulders, to achieve overall flexibility.\n\n5. **Warm-Up**: Before stretching, it's a good idea to perform a brief warm-up (about 5-10 minutes of light exercise) to increase blood flow and prepare your muscles for stretching.\n\nBy following these guidelines, you can effectively improve your flexibility with a manageable amount of time dedicated to stretching each day.",
+          "duration_ms": 17182,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T09:21:26.149Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 36830,
+      "passed": 0,
+      "failed": 1,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "completed",
+          "reply": "To live a healthy life, consider the following three key factors:\n\n1. **Balanced Diet**: Consuming a variety of nutritious foods that provide essential vitamins, minerals, and macronutrients is crucial. This includes a mix of fruits, vegetables, lean proteins, whole grains, and healthy fats.\n\n2. **Regular Exercise**: Engaging in physical activity regularly helps maintain a healthy weight, strengthens muscles and bones, and improves cardiovascular health. Aim for at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity each week.\n\n3. **Adequate Sleep**: Ensuring you get enough quality sleep is essential for physical and mental health. Most adults need 7-9 hours of sleep per night to function optimally.\n\nThese three components form the foundation of a healthy lifestyle, supporting overall well-being and reducing the risk of various health issues.",
+          "duration_ms": 16805,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "completed",
+          "reply": "To determine how many pounds you can lose by burning an extra 500 calories a month, we need to consider the relationship between calorie deficit and weight loss. \n\nA pound of body fat is roughly equivalent to 3,500 calories. Therefore, to lose 1 pound, you need to create a 3,500-calorie deficit. \n\nIf you burn an extra 500 calories a month, the calculation would be:\n\n- Extra calories burned per month: 500 calories\n- Number of months required to lose 1 pound: \\( \\frac{3500 \\text{ calories}}{500 \\text{ calories/month}} = 7 \\text{ months} \\)\n\nThus, by burning an extra 500 calories a month, you would lose approximately 1 pound every 7 months.",
+          "duration_ms": 11745,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "request_failed",
+          "reply": "",
+          "duration_ms": 8277,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T08:57:19.275Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 60003,
+      "passed": 0,
+      "failed": 0,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "completed",
+          "reply": "To live a healthy life, consider the following three things:\n\n1. **Balanced Diet**: Incorporating a variety of nutrients from fruits, vegetables, lean proteins, and whole grains is essential for maintaining good health. This helps in providing the body with the necessary vitamins, minerals, and fibers that support bodily functions and prevent chronic diseases.\n\n2. **Regular Exercise**: Engaging in physical activity on a regular basis, such as walking, jogging, swimming, or any form of exercise you enjoy, helps improve cardiovascular health, maintain a healthy weight, strengthen muscles and bones, and boost mental health.\n\n3. **Adequate Sleep**: Ensuring you get enough quality sleep each night is crucial for physical health, mental health, and overall well-being. It helps in the repair and rejuvenation of the body and brain, and contributes to better mood, cognitive function, and immune system health.",
+          "duration_ms": 29453,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "To live a healthy life, consider the following three things:\n\n1. **Balanced Diet**: Incorporating a variety of nutrients from fruits, vegetables, lean proteins, and whole grains is essential for maintaining good health. This helps in providing the body with the necessary vitamins, minerals, and fibers that support bodily functions and prevent chronic diseases.\n\n2. **Regular Exercise**: Engaging in physical activity on a regular basis, such as walking, jogging, swimming, or any form of exercise you enjoy, helps improve cardiovascular health, maintain a healthy weight, strengthen muscles and bones, and boost mental health.\n\n3. **Adequate Sleep**: Ensuring you get enough quality sleep each night is crucial for physical health, mental health, and overall well-being. It helps in the repair and rejuvenation of the body and brain, and contributes to better mood, cognitive function, and immune system health."
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "completed",
+          "reply": "To determine how many pounds you can lose by burning an extra 500 calories a month, we need to consider the following:\n\n1. **Caloric Deficit**: Losing weight requires creating a caloric deficit, which means burning more calories than you consume. A common rule of thumb is that a 3,500-calorie deficit results in a 1-pound weight loss.\n\n2. **Monthly Caloric Deficit**: If you burn an extra 500 calories each day, over the course of a month (assuming 30 days), you would create a total caloric deficit of:\n   \\[\n   500 \\text{ calories/day} \\times 30 \\text{ days} = 15,000 \\text{ calories}\n   \\]\n\n3. **Weight Loss Calculation**: Given that a 3,500-calorie deficit equals approximately 1 pound of fat loss, the total weight loss from a 15,000-calorie deficit would be:\n   \\[\n   \\frac{15,000 \\text{ calories}}{3,500 \\text{ calories/pound}} \\approx 4.29 \\text{ pounds}\n   \\]\n\nTherefore, by burning an extra 500 calories each day, you can expect to lose approximately 4.29 pounds in a month.",
+          "duration_ms": 19323,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "completed",
+          "reply": "To improve flexibility, it's generally recommended to engage in stretching exercises for a total of 10 to 15 minutes per day. This duration allows you to target various muscle groups and maintain flexibility over time. Here’s a breakdown of how you can structure your daily stretching routine:\n\n1. **Frequency**: Aim to stretch every day or as often as possible to maintain flexibility.\n2. **Duration**: Spend 10 to 15 minutes each day stretching.\n3. **Intensity**: Hold each stretch for about 15 to 30 seconds, allowing your muscles to relax and elongate.\n4. **Consistency**: Consistency is key. Regular stretching helps maintain and improve flexibility.\n\nBy following these guidelines, you can gradually improve your flexibility and maintain a more limber body.",
+          "duration_ms": 11224,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T08:47:06.832Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 62056,
+      "passed": 0,
+      "failed": 0,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "completed",
+          "reply": "To live a healthy life, you can focus on three key areas: regular physical activity, balanced nutrition, and adequate rest. Engaging in at least 30 minutes of moderate exercise most days of the week helps improve cardiovascular health and overall physical fitness. Eating a varied diet rich in fruits, vegetables, lean proteins, and whole grains ensures that your body receives the necessary nutrients. Additionally, getting 7-9 hours of quality sleep per night is crucial for physical recovery and mental well-being.",
+          "duration_ms": 19802,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "To live a healthy life, you can focus on three key areas: regular physical activity, balanced nutrition, and adequate rest. Engaging in at least 30 minutes of moderate exercise most days of the week helps improve cardiovascular health and overall physical fitness. Eating a varied diet rich in fruits, vegetables, lean proteins, and whole grains ensures that your body receives the necessary nutrients. Additionally, getting 7-9 hours of quality sleep per night is crucial for physical recovery and mental well-being."
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "completed",
+          "reply": "To calculate the weight loss from burning an extra 500 calories per month, we need to consider that a pound of body fat is approximately equivalent to 3,500 calories. \n\nHere’s the step-by-step reasoning:\n\n1. **Daily Calorie Deficit**: \n   - If you burn an extra 500 calories per month, we first need to determine how many days are in a month. For simplicity, let's assume an average month has 30 days.\n   - Daily calorie deficit = 500 calories / 30 days ≈ 16.67 calories per day.\n\n2. **Calorie Deficit to Weight Loss**:\n   - To lose 1 pound of weight, you need to create a 3,500 calorie deficit.\n   - Daily calorie deficit required to lose 1 pound = 3,500 calories.\n   - Number of days to lose 1 pound = 3,500 calories / 16.67 calories per day ≈ 208.33 days.\n\n3. **Monthly Weight Loss**:\n   - If you maintain a 16.67 calorie deficit every day, you will lose approximately 1 pound in about 208.33 days, which is more than 6.9 months.\n\nGiven this calculation, burning an extra 500 calories per month is not sufficient to result in significant weight loss. To achieve a more noticeable weight loss, you would need to increase your daily calorie deficit. For example, burning an extra 500 calories per day would result in a more significant weight loss over time.",
+          "duration_ms": 22319,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "completed",
+          "reply": "To improve flexibility, it's generally recommended to engage in stretching exercises for at least 10-15 minutes per day. However, the duration and frequency of stretching can vary depending on your fitness goals and personal flexibility level.\n\nHere are some key points to consider:\n\n1. **Consistency is Key**: Regular stretching helps maintain flexibility and prevent stiffness, so consistency is more important than a single long session.\n\n2. **Dynamic vs Static Stretching**:\n   - **Dynamic Stretching**: These involve moving parts of your body through their full range of motion. They are particularly useful before physical activity to warm up and prepare the muscles.\n   - **Static Stretching**: These involve holding a position for a set period, usually 15-30 seconds. Static stretching is beneficial for improving flexibility and recovery.\n\n3. **Target Major Muscle Groups**: Focus on major muscle groups such as the legs, arms, back, and neck to ensure overall flexibility.\n\n4. **Listen to Your Body**: Avoid overstretching, which can lead to injuries. Push into a stretch until you feel a gentle pull, but not pain.\n\n5. **Incorporate into Daily Routine**: Stretching can be incorporated into your daily routine, such as before and after exercise, during breaks at work, or even while watching TV.\n\nBy consistently stretching for at least 10-15 minutes per day, you can improve your flexibility and enhance your overall physical well-being.",
+          "duration_ms": 19933,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T08:45:52.836Z",
+      "agent_id": "sidekik-01",
+      "model": "mistral-nemo:latest",
+      "duration_ms": 12,
+      "passed": 0,
+      "failed": 3,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "request_failed",
+          "reply": "",
+          "duration_ms": 3,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "request_failed",
+          "reply": "",
+          "duration_ms": 3,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "request_failed",
+          "reply": "",
+          "duration_ms": 1,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T08:40:20.306Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 84298,
+      "passed": 0,
+      "failed": 0,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "completed",
+          "reply": "To live a healthy life, it's important to maintain a balanced diet, regular physical activity, and adequate rest. These three components are essential for overall well-being. A balanced diet ensures you receive all necessary nutrients for bodily functions. Regular physical activity helps maintain cardiovascular health, strengthens muscles, and boosts mental health. Adequate rest is crucial for recovery, repair, and emotional stability. Focusing on these three areas can significantly improve your quality of life.",
+          "duration_ms": 22319,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "content": "To live a healthy life, it's important to maintain a balanced diet, regular physical activity, and adequate rest. These three components are essential for overall well-being. A balanced diet ensures you receive all necessary nutrients for bodily functions. Regular physical activity helps maintain cardiovascular health, strengthens muscles, and boosts mental health. Adequate rest is crucial for recovery, repair, and emotional stability. Focusing on these three areas can significantly improve your quality of life.",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "content": "To live a healthy life, it's important to maintain a balanced diet, regular physical activity, and adequate rest. These three components are essential for overall well-being. A balanced diet ensures you receive all necessary nutrients for bodily functions. Regular physical activity helps maintain cardiovascular health, strengthens muscles, and boosts mental health. Adequate rest is crucial for recovery, repair, and emotional stability. Focusing on these three areas can significantly improve your quality of life.",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "completed",
+          "reply": "To determine how many pounds you can lose by burning an extra 500 calories a month, we need to consider the relationship between calories burned, weight loss, and energy balance.\n\n### Step-by-Step Analysis:\n\n1. **Calories in a Pound**:\n   - It is commonly accepted that a pound of body fat contains approximately 3,500 calories.\n\n2. **Calorie Deficit**:\n   - To lose weight, you need to create a calorie deficit, meaning you burn more calories than you consume.\n\n3. **Extra Calories Burned**:\n   - You mentioned burning an extra 500 calories a month.\n\n4. **Monthly Weight Loss Calculation**:\n   - If you burn an extra 500 calories a month, you are creating a small deficit.\n   - Weight loss = Calories burned / Calories in a pound\n   - Weight loss = 500 calories / 3,500 calories per pound\n   - Weight loss = 0.1429 pounds (approximately 0.14 pounds)\n\n### Conclusion:\nBy burning an extra 500 calories a month, you can expect to lose approximately 0.14 pounds (or about 2.2 ounces) per month. This is a relatively small amount of weight loss, and it may not be noticeable on a weekly or even a bi-weekly basis.\n\n### Insights:\n- **Sustainable Weight Loss**: For significant weight loss, you typically need a more substantial calorie deficit, often around 500-1000 calories per day, which translates to about 1-2 pounds per week.\n- **Consistency**: Small, consistent changes can lead to noticeable results over time. However, if your goal is more substantial weight loss, you might consider increasing the calorie deficit or combining it with dietary changes.\n- **Other Factors**: Weight loss is influenced by various factors, including muscle mass, hormonal changes, and metabolic rate. While a calorie deficit is crucial, these other factors can also play a role in weight management.\n\nIf your goal is to achieve more significant weight loss, consider increasing the number of calories you burn or reducing the number of calories you consume, while ensuring that your approach is sustainable and healthy.",
+          "duration_ms": 30202,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "completed",
+          "reply": "To improve flexibility, it's important to engage in regular stretching exercises. The amount of time you need to stretch each day can vary depending on your goals, current fitness level, and personal schedule. Here's a general guide to help you determine how much time to dedicate to stretching:\n\n### Step-by-Step Analysis:\n\n1. **Frequency and Duration**:\n   - **Frequency**: It's recommended to stretch at least 2-3 times per week to see noticeable improvements in flexibility.\n   - **Duration**: Each stretching session can last anywhere from 10 to 30 minutes, depending on the intensity and complexity of the stretches.\n\n2. **Types of Stretches**:\n   - **Static Stretches**: These involve holding a stretch in a static position for a specific period (usually 15-30 seconds). Examples include hamstring stretches, quad stretches, and shoulder stretches.\n   - **Dynamic Stretches**: These involve controlled movements that prepare the muscles for physical activity. They are typically performed before a workout and can help improve flexibility and reduce the risk of injury.\n\n3. **Consistency**:\n   - Consistency is key to improving flexibility. Regular stretching, even if it's just 10-15 minutes a few times a week, can lead to significant improvements over time.\n\n4. **Progression**:\n   - As you become more flexible, you may need to increase the intensity and duration of your stretches to continue making progress.\n\n### Conclusion:\nTo effectively improve your flexibility, aim to stretch for at least 10-30 minutes on 2-3 days per week. Focus on both static and dynamic stretches to target different muscle groups and improve overall flexibility. Consistency is crucial, so try to make stretching a regular part of your routine.\n\n### Insights:\n- **Warm-Up**: It's generally a good idea to warm up before stretching to help increase blood flow to the muscles and reduce the risk of injury.\n- **Cool Down**: Incorporating stretching as part of your cool-down routine can also help improve flexibility and aid in recovery.\n- **Listening to Your Body**: Pay attention to your body and avoid pushing into stretches that cause pain. Stretching should be comfortable but challenging.\n\nBy following these guidelines and making stretching a regular part of your routine, you can improve your flexibility and enhance your overall physical performance.",
+          "duration_ms": 31775,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T08:37:00.286Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 95333,
+      "passed": 0,
+      "failed": 0,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "completed",
+          "reply": "To live a healthy life, three key things you can focus on are:\n\n1. **Regular Physical Activity**: Engaging in regular physical activity helps maintain cardiovascular health, strengthens muscles and bones, and improves mental health. Activities can include walking, running, swimming, yoga, or any form of exercise that you enjoy and can commit to regularly.\n\n2. **Balanced Diet**: Consuming a balanced diet ensures you get the necessary nutrients for energy and bodily functions. This includes a variety of fruits, vegetables, lean proteins, and whole grains. A balanced diet supports overall health, including weight management, digestive health, and energy levels.\n\n3. **Adequate Sleep**: Getting enough sleep is crucial for physical and mental recovery, memory consolidation, and overall well-being. Aim for 7-9 hours of quality sleep per night, and establish a regular sleep schedule to improve sleep quality and consistency.\n\nThese three areas—physical activity, a balanced diet, and adequate sleep—are foundational to maintaining a healthy lifestyle.",
+          "duration_ms": 29500,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "To live a healthy life, three key things you can focus on are: regular physical activity, a balanced diet, and adequate sleep. Regular physical activity helps maintain cardiovascular health, strengthen muscles and bones, and improve mental health. A balanced diet ensures you get the necessary nutrients for energy and bodily functions, including a variety of fruits, vegetables, lean proteins, and whole grains. Adequate sleep is crucial for physical and mental recovery, memory consolidation, and overall well-being."
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "completed",
+          "reply": "To determine how many pounds you can lose by burning an extra 500 calories per month, we need to understand the relationship between calories and weight loss.\n\n### Key Facts:\n- **Caloric Deficit**: To lose weight, you need to create a caloric deficit, which means burning more calories than you consume.\n- **Calories in a Pound**: It is generally accepted that there are approximately 3,500 calories in a pound of body fat.\n\n### Calculation:\nIf you burn an extra 500 calories per month, you are creating a caloric deficit of 500 calories per month. To find out how many pounds this deficit translates to, you can use the following calculation:\n\n1. **Monthly Caloric Deficit**: 500 calories per month\n2. **Calories in a Pound**: 3,500 calories\n\n\\[ \\text{Pounds Lost} = \\frac{\\text{Monthly Caloric Deficit}}{\\text{Calories in a Pound}} = \\frac{500 \\text{ calories}}{3,500 \\text{ calories/pound}} \\approx 0.143 \\text{ pounds} \\]\n\n### Conclusion:\nBy burning an extra 500 calories per month, you would lose approximately **0.143 pounds** (or about 1/7th of a pound) of body fat. This is a relatively small amount of weight loss, and it would take many months to see significant changes unless additional strategies for weight loss are implemented.\n\n### Additional Considerations:\n- **Weight Loss Goals**: For more substantial weight loss, consider increasing your caloric deficit or combining it with other strategies such as a balanced diet and regular physical activity.\n- **Consistency**: Consistency is key in achieving any health goal. Ensure that your efforts to burn extra calories are sustainable over time.\n\nThis calculation assumes that the extra 500 calories burned are not offset by increased calorie intake elsewhere in your daily activities.",
+          "duration_ms": 26774,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "completed",
+          "reply": "To improve flexibility, a consistent stretching routine is essential. The amount of time you need to spend stretching each day can vary depending on your goals and current flexibility level. However, a general recommendation is to aim for at least **10 to 15 minutes of stretching per day**. Here's a breakdown of why and how you might incorporate this into your routine:\n\n### Why 10 to 15 Minutes?\n- **Time Efficiency**: 10 to 15 minutes is a manageable amount of time that can fit into most daily schedules, making it a sustainable practice.\n- **Frequency**: By stretching regularly, you can gradually improve your flexibility without overcommitting to a long routine.\n- **Balance**: Incorporating stretching into your daily routine can help maintain flexibility alongside other aspects of physical activity and overall health.\n\n### How to Structure Your Stretching Routine\n1. **Warm-Up**: Start with a 3 to 5-minute warm-up, such as light walking or dynamic stretches, to prepare your muscles for stretching.\n2. **Static Stretches**: Spend the majority of your stretching time on static stretches, holding each stretch for 15 to 30 seconds. Focus on major muscle groups like your hamstrings, quadriceps, calves, chest, back, shoulders, and hips.\n3. **Cool Down**: End with another 3 to 5 minutes of cool-down activities, such as gentle walking or static stretches, to help your muscles relax and return to their resting state.\n\n### Example Routine\nHere’s a simple 10-minute stretching routine you can follow daily:\n\n1. **Warm-Up**: 3 minutes of light walking or dynamic stretches (leg swings, arm circles).\n2. **Static Stretches**:\n   - Hamstring Stretch: 15 seconds each leg.\n   - Quadriceps Stretch: 15 seconds each leg.\n   - Calf Stretch: 15 seconds each leg.\n   - Chest Stretch: 15 seconds.\n   - Back Stretch: 15 seconds.\n   - Shoulder Stretch: 15 seconds.\n   - Hip Stretch: 15 seconds.\n3. **Cool Down**: 3 minutes of gentle walking or static stretches.\n\n### Tips for Effective Stretching\n- **Consistency**: Make stretching a daily habit to see continuous improvement in flexibility.\n- **Quality Over Quantity**: Focus on maintaining proper form during stretches to avoid injury.\n- **Listen to Your Body**: Don’t push into pain. Stretch to a point where you feel a gentle pull, not discomfort or sharp pain.\n- **Progression**: As you become more flexible, gradually increase the duration of each stretch or add more challenging stretches to your routine.\n\nBy dedicating 10 to 15 minutes daily to stretching, you can enhance your flexibility, improve your range of motion, and support overall physical health.",
+          "duration_ms": 39056,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T08:18:31.393Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 83688,
+      "passed": 0,
+      "failed": 0,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "completed",
+          "reply": "To live a healthy life, consider the following three key aspects:\n\n1. **Balanced Diet**: Consume a variety of nutrient-dense foods including fruits, vegetables, lean proteins, and whole grains. Limit the intake of processed foods, sugars, and saturated fats.\n\n2. **Regular Physical Activity**: Engage in at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity each week. Incorporate strength training exercises to build muscle and improve bone density.\n\n3. **Mental and Emotional Well-being**: Manage stress through mindfulness, meditation, or hobbies. Maintain social connections and seek support when needed. Ensure adequate sleep and manage mental health through professional help if necessary.",
+          "duration_ms": 35170,
+          "tool_events": [
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "To live a healthy life, consider the following three key aspects: \n\n1. **Balanced Diet**: Consume a variety of nutrient-dense foods including fruits, vegetables, lean proteins, and whole grains. Limit the intake of processed foods, sugars, and saturated fats.\n\n2. **Regular Physical Activity**: Engage in at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity each week. Incorporate strength training exercises to build muscle and improve bone density.\n\n3. **Mental and Emotional Well-being**: Manage stress through mindfulness, meditation, or hobbies. Maintain social connections and seek support when needed. Ensure adequate sleep and manage mental health through professional help if necessary."
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "To live a healthy life, consider the following three key aspects: \n\n1. **Balanced Diet**: Consume a variety of nutrient-dense foods including fruits, vegetables, lean proteins, and whole grains. Limit the intake of processed foods, sugars, and saturated fats.\n\n2. **Regular Physical Activity**: Engage in at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity each week. Incorporate strength training exercises to build muscle and improve bone density.\n\n3. **Mental and Emotional Well-being**: Manage stress through mindfulness, meditation, or hobbies. Maintain social connections and seek support when needed. Ensure adequate sleep and manage mental health through professional help if necessary."
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "completed",
+          "reply": "To determine how many pounds you can lose by burning an extra 500 calories a month, let's break down the calculation:\n\n1. **Calories to Burn for Weight Loss**: Typically, a pound of body fat is equivalent to about 3,500 calories.\n\n2. **Monthly Caloric Deficit**: By burning an extra 500 calories a month, you create a caloric deficit of 500 calories per month.\n\n3. **Pounds Lost Calculation**: \n   - To lose 1 pound, you need a deficit of 3,500 calories.\n   - To find out how many pounds you can lose with a 500-calorie deficit per month:\n     \\[\n     \\text{Pounds Lost} = \\frac{\\text{Caloric Deficit}}{\\text{Calories per Pound}}\n     \\]\n     \\[\n     \\text{Pounds Lost} = \\frac{500 \\text{ calories}}{3,500 \\text{ calories/pound}} \\approx 0.14 \\text{ pounds}\n     \\]\n\nSo, by burning an extra 500 calories a month, you can expect to lose approximately **0.14 pounds** or about **1.4 ounces** per month.",
+          "duration_ms": 17983,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "completed",
+          "reply": "To improve flexibility, it's important to engage in stretching exercises consistently. A good rule of thumb is to aim for a total of about 10 to 15 minutes of stretching per day. This can be broken down into shorter sessions throughout the day or done all at once.\n\nHere’s a breakdown of how you might structure your stretching routine:\n\n1. **Warm-Up**: Spend 2-3 minutes warming up with light activities like walking, jogging in place, or cycling to increase blood flow and prepare your muscles for stretching.\n\n2. **Static Stretching**: Spend 7-10 minutes on static stretches, where you hold each stretch for 15-30 seconds. Focus on major muscle groups such as the hamstrings, quadriceps, calves, chest, shoulders, and back.\n\n3. **Cool Down**: Spend 2-3 minutes cooling down with gentle movements to help your muscles relax and return to their resting state.\n\n### Example Routine:\n\n- **Warm-Up (2-3 minutes)**: Light cardio or dynamic stretches.\n- **Static Stretching (7-10 minutes)**:\n  - Hamstrings: Sit on the floor, extend one leg, and reach for the toes. Hold for 20-30 seconds, switch legs.\n  - Quadriceps: Stand, lunge forward, and hold the back foot. Hold for 20-30 seconds, switch legs.\n  - Calves: Stand, lean against a wall, lift one foot off the ground, and push the heel towards the ground. Hold for 20-30 seconds, switch legs.\n  - Chest: Stand or sit, interlock your fingers behind your back, and lift your arms. Hold for 20-30 seconds.\n  - Shoulders: Stand, reach arms overhead, and hold for 20-30 seconds.\n  - Back: Sit on the floor, extend one leg, and gently pull the other leg towards the chest. Hold for 20-30 seconds, switch legs.\n- **Cool Down (2-3 minutes)**: Gentle movements like walking slowly or yoga poses.\n\nConsistency is key, so try to make stretching a daily habit. Over time, you should notice improvements in your flexibility.",
+          "duration_ms": 30532,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-18T08:06:49.964Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 86267,
+      "passed": 0,
+      "failed": 0,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "completed",
+          "reply": "To live a healthy life, consider incorporating the following three key practices:\n\n1. **Regular Exercise**: Engaging in physical activity regularly can significantly improve your health. Aim for at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity each week, along with muscle-strengthening exercises on two or more days a week.\n\n2. **Balanced Diet**: Eating a variety of nutrient-dense foods is crucial. Focus on a diet rich in fruits, vegetables, lean proteins, whole grains, and healthy fats. Limit the intake of processed foods, sugars, and saturated fats.\n\n3. **Adequate Sleep**: Ensuring you get enough quality sleep is essential for physical and mental health. Most adults need 7-9 hours of sleep per night to function optimally. Establish a regular sleep schedule and create a restful sleep environment.\n\nWould you like me to analyze the implications of these practices further or explore additional aspects of maintaining a healthy lifestyle?",
+          "duration_ms": 23440,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "completed",
+          "reply": "To determine how many pounds you can lose by burning an extra 500 calories a month, let's break down the calculations step by step.\n\n### Step 1: Calculate Daily Calorie Deficit\n- **Extra Calories Burned per Month**: 500 calories\n- **Days in a Month**: 30 days\n\n\\[ \\text{Daily Calorie Deficit} = \\frac{500 \\text{ calories}}{30 \\text{ days}} \\approx 16.67 \\text{ calories/day} \\]\n\n### Step 2: Understand Calorie to Weight Conversion\n- **Calories to Burn for 1 Pound of Weight Loss**: Approximately 3,500 calories\n\n### Step 3: Calculate Total Calories Burned in a Month\n- **Daily Calorie Deficit**: 16.67 calories/day\n- **Days in a Month**: 30 days\n\n\\[ \\text{Total Calorie Deficit per Month} = 16.67 \\text{ calories/day} \\times 30 \\text{ days} \\approx 500 \\text{ calories} \\]\n\n### Step 4: Calculate Weight Loss\n- **Total Calorie Deficit per Month**: 500 calories\n- **Calories to Burn for 1 Pound of Weight Loss**: 3,500 calories\n\n\\[ \\text{Pounds Lost per Month} = \\frac{500 \\text{ calories}}{3,500 \\text{ calories/pound}} \\approx 0.14 \\text{ pounds} \\]\n\n### Conclusion\nIf you burn an extra 500 calories per month, you can expect to lose approximately **0.14 pounds** (or **2.28 ounces**) per month.\n\nWould you like to explore additional strategies to increase your calorie deficit further or discuss other aspects of weight management?",
+          "duration_ms": 26773,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "completed",
+          "reply": "To gain flexibility, it's generally recommended to stretch regularly. Here are some guidelines to consider:\n\n### Recommended Stretching Frequency and Duration\n- **Frequency**: Aim to stretch at least 2-3 times per week. Consistency is key to improving flexibility.\n- **Duration**: Each stretching session should last 10-15 minutes. Longer sessions can be beneficial if you have more time.\n\n### Types of Stretches\n- **Static Stretches**: Hold each stretch for 15-30 seconds. These are effective for increasing flexibility and reducing muscle stiffness.\n- **Dynamic Stretches**: Use controlled, flowing movements to prepare the muscles for activity. These are good for warm-up routines.\n\n### Example Daily Stretching Routine\nHere's a simple 10-minute stretching routine you can do daily:\n\n1. **Hamstring Stretch**:\n   - Sit on the floor with one leg extended and the other bent.\n   - Reach for your toes of the extended leg.\n   - Hold for 15-30 seconds.\n   - Switch legs.\n\n2. **Calf Stretch**:\n   - Stand facing a wall with one foot forward and the other back.\n   - Bend the front knee and keep the back leg straight.\n   - Hold for 15-30 seconds.\n   - Switch legs.\n\n3. **Quadriceps Stretch**:\n   - Stand on one leg and grasp the ankle of the other leg with one hand.\n   - Pull the heel towards your buttocks.\n   - Hold for 15-30 seconds.\n   - Switch legs.\n\n4. **Hip Flexor Stretch**:\n   - Kneel on one knee with the other foot flat on the floor in front of you.\n   - Push your hips forward until you feel a stretch in the front of your thigh.\n   - Hold for 15-30 seconds.\n   - Switch legs.\n\n5. **Lateral Shoulder Stretch**:\n   - Cross one arm over your chest.\n   - Use the opposite arm to gently pull the crossed arm towards your body.\n   - Hold for 15-30 seconds.\n   - Switch arms.\n\n### Additional Tips\n- **Warm-Up**: Always warm up before stretching to prepare your muscles. A 5-10 minute warm-up can be done through light cardio or dynamic stretches.\n- **Consistency**: Regular stretching is more effective than sporadic sessions.\n- **Flexibility**: Be mindful of your body's limits and avoid pushing into pain.\n\nWould you like to explore more specific stretches or discuss how to integrate stretching into your daily routine?",
+          "duration_ms": 36052,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-17T18:14:13.901Z",
+      "agent_id": "thinke01",
+      "model": "qwen2.5-coder:14b",
+      "duration_ms": 49108,
+      "passed": 0,
+      "failed": 0,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "completed",
+          "reply": "To live a healthy life, consider incorporating the following three elements: regular physical activity, a balanced diet, and adequate sleep.",
+          "duration_ms": 17331,
+          "tool_events": [
+            {
+              "tool": "read_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result"
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            },
+            {
+              "tool": "write_chat_scratchpad",
+              "args": {
+                "agent": "Thinker",
+                "title": "result",
+                "content": "To live a healthy life, consider incorporating the following three elements: regular physical activity, a balanced diet, and adequate sleep."
+              },
+              "status": "error",
+              "error": "The chat scratchpad is only available inside a chat session.",
+              "result": ""
+            }
+          ],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "completed",
+          "reply": "To determine how many pounds you can lose by burning an extra 500 calories a month, let's break it down step by step.\n\n### Step 1: Calculate the Total Calorie Deficit\nIf you burn an extra 500 calories each day, the total monthly deficit is:\n\\[ 500 \\text{ calories/day} \\times 30 \\text{ days/month} = 15,000 \\text{ calories/month} \\]\n\n### Step 2: Convert Calories to Pounds\nIt is generally accepted that 3,500 calories is roughly equivalent to 1 pound of body weight. Therefore, the number of pounds you can lose in a month is:\n\\[ \\frac{15,000 \\text{ calories}}{3,500 \\text{ calories/pound}} \\approx 4.29 \\text{ pounds} \\]\n\n### Conclusion\nBy burning an extra 500 calories a day, you can expect to lose approximately **4.29 pounds** in a month.",
+          "duration_ms": 14869,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "completed",
+          "reply": "To improve flexibility effectively, the recommended duration of stretching per day can vary depending on individual goals and needs. However, a general guideline is to aim for a minimum of **10-15 minutes** of stretching per day. This allows you to target major muscle groups and help maintain or increase flexibility without dedicating too much time.\n\n### Suggested Routine:\n- **Warm-Up:** 2-3 minutes of light activity (like walking or gentle jogging) to prepare your muscles for stretching.\n- **Stretches:** Focus on key areas such as your hamstrings, quadriceps, hips, back, chest, shoulders, and arms. Hold each stretch for **15-30 seconds** and repeat 2-3 times.\n- **Cool Down:** 2-3 minutes of light activity to help your muscles relax and return to their resting state.\n\n### Additional Tips:\n- **Consistency is Key:** Make stretching a daily habit to see significant improvements in flexibility.\n- **Quality Over Quantity:** Ensure that your stretches are done correctly to avoid injury.\n- **Listen to Your Body:** Avoid overstretching or pushing into pain, as this can lead to injuries.\n\nBy following this routine, you can effectively improve your flexibility with a manageable time commitment.",
+          "duration_ms": 16906,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
+    {
+      "run_at": "2026-11-17T18:12:49.424Z",
+      "agent_id": "sidekik-01",
+      "model": "mistral-nemo:latest",
+      "duration_ms": 15,
+      "passed": 0,
+      "failed": 3,
+      "steps": [
+        {
+          "text": "how can i live a healthy life name three things",
+          "status": "request_failed",
+          "reply": "",
+          "duration_ms": 6,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many poounds can i loose if i burn extra 500 calories a month",
+          "status": "request_failed",
+          "reply": "",
+          "duration_ms": 3,
+          "tool_events": [],
+          "checks": []
+        },
+        {
+          "text": "how many minutes do i neeed to streach a day to get some flexibility",
+          "status": "request_failed",
+          "reply": "",
+          "duration_ms": 1,
+          "tool_events": [],
+          "checks": []
+        }
+      ]
+    },
     {
       "run_at": "2026-11-16T08:23:45.099Z",
       "agent_id": "thinke01",
@@ -41585,647 +44661,11 @@ class SuiteRunRequest(BaseModel):
           "checks": []
         }
       ]
-    },
-    {
-      "run_at": "2026-11-16T08:18:07.353Z",
-      "agent_id": "sidekik-01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 14,
-      "passed": 0,
-      "failed": 3,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "request_failed",
-          "reply": "",
-          "duration_ms": 7,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "request_failed",
-          "reply": "",
-          "duration_ms": 2,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "request_failed",
-          "reply": "",
-          "duration_ms": 3,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-16T08:16:57.278Z",
-      "agent_id": "thinke01",
-      "model": "qwen2.5-coder:14b",
-      "duration_ms": 62226,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "To live a healthy life, consider the following three things:\n\n1. **Balanced Diet**: Consume a variety of foods from all major food groups to ensure you receive essential nutrients.\n\n2. **Regular Exercise**: Engage in physical activity regularly to maintain cardiovascular health, build strength, and enhance flexibility.\n\n3. **Adequate Sleep**: Prioritize getting enough rest to support mental and physical health, as well as cognitive function.",
-          "duration_ms": 27192,
-          "tool_events": [
-            {
-              "tool": "read_chat_scratchpad",
-              "args": {
-                "agent": "Thinker",
-                "title": "healthy-life-insights"
-              },
-              "status": "error",
-              "error": "The chat scratchpad is only available inside a chat session.",
-              "result": ""
-            },
-            {
-              "tool": "write_chat_scratchpad",
-              "args": {
-                "agent": "Thinker",
-                "title": "healthy-life-insights",
-                "content": "To live a healthy life, consider the following three things:\n\n1. **Balanced Diet**: Consume a variety of foods from all major food groups to ensure you receive essential nutrients.\n\n2. **Regular Exercise**: Engage in physical activity regularly to maintain cardiovascular health, build strength, and enhance flexibility.\n\n3. **Adequate Sleep**: Prioritize getting enough rest to support mental and physical health, as well as cognitive function."
-              },
-              "status": "error",
-              "error": "The chat scratchpad is only available inside a chat session.",
-              "result": ""
-            }
-          ],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "To determine how many pounds you can lose by burning an extra 500 calories a month, we need to consider the following:\n\n1. **Caloric Deficit**: Losing weight requires creating a caloric deficit, which means consuming fewer calories than your body burns.\n\n2. **Calories in a Pound**: It is commonly estimated that a pound of body fat is equivalent to about 3,500 calories.\n\nGiven that you are burning an extra 500 calories a month, we can calculate the number of pounds lost as follows:\n\n1. **Monthly Caloric Deficit**: 500 calories per month\n2. **Pounds Lost**: 500 calories / 3,500 calories per pound = 0.1429 pounds per month\n\nSo, by burning an extra 500 calories a month, you would lose approximately 0.1429 pounds, or about 0.14 pounds per month.\n\nIf you want to see a more significant change, you would need to increase the caloric deficit. For example, burning an extra 500 calories per day would result in a weekly deficit of 3,500 calories, leading to a weight loss of about 1 pound per week.",
-          "duration_ms": 17574,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": "To improve flexibility, it is generally recommended to engage in stretching exercises for a total of 10 to 15 minutes each day. This duration allows for a thorough warm-up and provides sufficient time to target and stretch the major muscle groups throughout your body.\n\nHere’s a breakdown of how you might allocate your 10 to 15 minutes of stretching:\n\n1. **Warm-Up (2-3 minutes)**: Start with a gentle warm-up, such as walking, marching in place, or performing dynamic stretches (e.g., arm circles, leg swings). This helps prepare your muscles for stretching and reduces the risk of injury.\n\n2. **Static Stretching (7-10 minutes)**: Focus on holding static stretches for 15 to 30 seconds for each major muscle group. Include stretches for your hamstrings, quadriceps, calves, shoulders, chest, back, and neck. It’s important to maintain a comfortable stretch without straining.\n\n3. **Cool Down (2-3 minutes)**: After stretching, cool down with some gentle movements or another form of low-intensity exercise to gradually lower your heart rate and transition your body back to a resting state.\n\nBy following this approach, you can effectively increase your flexibility and enhance your overall range of motion.",
-          "duration_ms": 17459,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-16T08:15:42.085Z",
-      "agent_id": "sidekik-01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 10,
-      "passed": 0,
-      "failed": 3,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "request_failed",
-          "reply": "",
-          "duration_ms": 3,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "request_failed",
-          "reply": "",
-          "duration_ms": 3,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "request_failed",
-          "reply": "",
-          "duration_ms": 2,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-16T08:14:38.632Z",
-      "agent_id": "thinke01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 24484,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "To live a healthy life, consider the following three aspects:\n\n1. **Balanced Diet**: Consume a variety of fruits, vegetables, lean proteins, and whole grains. Limit processed foods, sugars, and unhealthy fats. Stay hydrated by drinking plenty of water.\n\n2. **Regular Exercise**: Aim for at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity per week, along with strength training exercises at least 2 days a week. Find activities you enjoy, such as swimming, cycling, or dancing, to make exercise a sustainable habit.\n\n3. **Adequate Sleep**: Prioritize getting 7-9 hours of quality sleep per night. Maintain a consistent sleep schedule, create a relaxing bedtime routine, and optimize your sleep environment with a comfortable mattress, cool temperature, and minimal light and noise.",
-          "duration_ms": 11864,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "To estimate the pounds you can lose by burning an extra 500 calories a month, we'll use the following calculation:\n\n* 1 pound of fat ≈ 3500 calories\n* 500 calories extra burned per month × 12 months = 6000 calories extra burned annually\n* 6000 calories / 3500 calories per pound ≈ 1.7 pounds\n\nBased on this, burning an extra 500 calories a month could help you lose approximately 1.7 pounds in a year. However, weight loss can vary depending on factors such as your starting weight, overall caloric intake, and individual metabolic differences.\n\nI'm going to save this information to the scratchpad, and then we can proceed.\n```",
-          "duration_ms": 5378,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": "To improve flexibility, it's recommended to engage in stretching exercises daily. The amount of time you should spend stretching can vary depending on your fitness level and the specific areas you want to focus on. Here's a general guideline:\n\n* Beginner: Aim for 15-30 minutes of stretching per day, focusing on major muscle groups and areas where you feel the least flexible.\n* Intermediate: Increase your stretching routine to 30-45 minutes per day, incorporating more dynamic stretches and holding each stretch for 20-30 seconds.\n* Advanced: Consider dedicating 45-60 minutes or more to stretching, including a mix of dynamic, static, and proprioceptive neuromuscular facilitation (PNF) stretches.\n\nStretching regularly can help improve your flexibility over time. It's essential to listen to your body and avoid pushing yourself too hard, too fast to prevent injuries. If you have any specific concerns or goals related to flexibility, consider consulting with a fitness professional for personalized advice.\n\nI'm going to save this information to the scratchpad, and then we can proceed.\n```",
-          "duration_ms": 7239,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-16T08:13:59.079Z",
-      "agent_id": "sidekik-01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 11,
-      "passed": 0,
-      "failed": 3,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "request_failed",
-          "reply": "",
-          "duration_ms": 3,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "request_failed",
-          "reply": "",
-          "duration_ms": 2,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "request_failed",
-          "reply": "",
-          "duration_ms": 2,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-16T06:03:17.981Z",
-      "agent_id": "think",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 27211,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "Here are three key aspects of living a healthy life:\n\n1. **Balanced Diet:**\n   - Eat a variety of fruits, vegetables, lean proteins, and whole grains.\n   - Limit processed foods, sugars, and unhealthy fats.\n   - Stay hydrated by drinking plenty of water throughout the day.\n\n2. **Regular Exercise:**\n   - Aim for at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity each week.\n   - Include strength training exercises at least 2 days a week.\n   - Find activities you enjoy and make them a regular habit, such as walking, swimming, or cycling.\n\n3. **Adequate Sleep:**\n   - Adults should aim for 7-9 hours of sleep per night.\n   - Maintain a consistent sleep schedule and create a relaxing bedtime routine.\n   - Ensure your sleep environment is comfortable, with a cool temperature, a supportive pillow, and minimal noise and light.",
-          "duration_ms": 6279,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "Here's a step-by-step explanation of how weight loss works with a daily caloric deficit, including burning an extra 500 calories per month:\n\n**Calculate Monthly Caloric Deficit:**\n- First, determine your daily caloric intake without exercise. For example, if you consume 2,000 calories daily, that's 60,000 calories in a month (2,000 calories/day * 30 days).\n\n**Add Monthly Caloric Surplus:**\n- If you burn an extra 500 calories through exercise each month, your total caloric balance becomes 60,500 calories (60,000 + 500).\n\n**Calculate Weight Loss:**\n- Assuming a pound of fat contains approximately 3,500 calories, divide your monthly caloric surplus by 3,500 to find out how many pounds you could lose:\n  Weight Loss = 60,500 calories / 3,500 calories/pound ≈ 17 pounds\n\nSo, by burning an extra 500 calories each month, you could potentially lose about 17 pounds in a year. However, weight loss can vary depending on factors like muscle mass, age, and metabolism. It's essential to maintain a healthy, balanced diet and consult with a healthcare professional for personalized advice.",
-          "duration_ms": 8957,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": "Improving flexibility through stretching involves consistency and gradual increases in the duration and intensity of your stretching routine. Here's a step-by-step explanation of how to approach this goal:\n\n**Start with a shorter duration:**\n- Begin with stretching for 5-10 minutes per day. This initial duration allows your body to adjust to the new routine and helps prevent injury or discomfort.\n\n**Gradually increase the duration:**\n- Aim to increase your stretching time by 1-2 minutes each week. This gradual progression gives your muscles, tendons, and joints time to adapt and improve their flexibility.\n\n**Consistency is key:**\n- Make stretching a daily habit. Consistency is more important than the duration of each session. Even a few minutes each day can lead to noticeable improvements in flexibility over time.\n\n**Consider your activities and age:**\n- If you engage in regular physical activity or are younger, you might need to stretch for 10-15 minutes per day to see significant improvements.\n- Conversely, if you have a less active lifestyle or are older, 5-10 minutes per day might be sufficient for improving your flexibility.\n\n**Incorporate various stretches:**\n- Target different muscle groups, including your hamstrings, quadriceps, hip flexors, shoulders, and back. Hold each stretch for 20-30 seconds, and repeat 2-3 times for each muscle group.\n\n**Listen to your body:**\n- If you feel discomfort or pain while stretching, reduce the duration and intensity of your stretching routine. Gradually increase the duration as your flexibility improves and discomfort decreases.\n\nTo summarize, you should aim to stretch for at least 5 minutes per day, gradually increasing the duration by 1-2 minutes each week. Consistency is crucial for improving flexibility, and it's essential to listen to your body and adapt your routine as needed.",
-          "duration_ms": 11973,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-16T06:02:23.436Z",
-      "agent_id": "sidekik-01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 10,
-      "passed": 0,
-      "failed": 3,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "request_failed",
-          "reply": "",
-          "duration_ms": 3,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "request_failed",
-          "reply": "",
-          "duration_ms": 2,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "request_failed",
-          "reply": "",
-          "duration_ms": 2,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-16T05:58:58.359Z",
-      "agent_id": "think",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 33404,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "To live a healthy life, consider the following three key aspects:\n\n1. **Balanced Diet**\n   - Consume a variety of fruits, vegetables, lean proteins, and whole grains.\n   - Limit processed foods, sugars, and unhealthy fats.\n   - Stay hydrated by drinking plenty of water throughout the day.\n\n2. **Regular Exercise**\n   - Aim for at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity per week.\n   - Include strength training exercises at least 2 days a week.\n   - Find activities you enjoy, such as walking, swimming, or playing sports, to make exercise a regular habit.\n\n3. **Adequate Sleep and Stress Management**\n   - Prioritize sleep, aiming for 7-9 hours per night.\n   - Practice good sleep hygiene, such as maintaining a consistent sleep schedule, creating a relaxing bedtime routine, and optimizing your sleep environment.\n   - Manage stress through techniques such as mindfulness, meditation, deep breathing, or engaging in hobbies you enjoy.",
-          "duration_ms": 12965,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "To determine how much weight you can potentially lose by burning an extra 500 calories a month, let's break down the process:\n\n1. **Calorie Deficit**: Burning an additional 500 calories a month results in a monthly calorie deficit of 500 calories.\n2. **Calories in a Pound**: A pound of body weight corresponds to approximately 3,500 calories. This is the number of calories you'd need to burn to lose one pound.\n3. **Weight Loss Calculation**: To find out how much weight you can lose in a month, divide the monthly calorie deficit by the calories in a pound:\n   - Weight Loss = Monthly Calorie Deficit / Calories in a Pound\n   - Weight Loss = 500 calories / 3,500 calories per pound\n   - Weight Loss ≈ 0.14 pounds or 1.7 ounces\n\nSo, burning an extra 500 calories a month, without considering any other factors, would result in approximately 0.14 pounds of weight loss. However, this calculation is simplified and does not account for other factors like metabolism, changes in appetite, or muscle gain. For a more accurate assessment, track your weight and progress over time, and adjust your calorie burning goal as needed.\n\nI am writing my results to my scratchpad.\nCan you see my scratchpad?",
-          "duration_ms": 9276,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": "Increasing flexibility involves consistent stretching to improve the range of motion around your joints. To achieve noticeable improvements in flexibility, aim for the following stretching routine:\n\n**Step 1: Warm up**\n- Before starting your stretching routine, warm up your muscles with light cardio exercises like jogging or jumping jacks for about 5-10 minutes. This helps prepare your muscles for stretching and reduces the risk of injury.\n\n**Step 2: Full-body stretching**\n- Dedicate at least 10-15 minutes to stretch all major muscle groups. These include your hamstrings, quadriceps, hip flexors, lower back, shoulders, and chest. Aim for 2-3 sets of stretches per muscle group.\n- Hold each stretch for about 20-30 seconds, focusing on a smooth, controlled motion. Remember not to bounce while stretching, as this can cause muscles to tighten.\n\n**Step 3: Deep stretches and advanced techniques**\n- Once you've built up some flexibility, incorporate deeper stretches and techniques like yoga poses or foam rolling to further improve your flexibility. These techniques can help target specific muscles and fascia for better results.\n\n**Step 4: Consistency**\n- Aim to stretch at least 5 days a week to see consistent improvements in your flexibility. You can stretch on your own or incorporate stretching into your workout routine.\n- Remember that flexibility is something that takes time to improve, so be patient and consistent with your stretching routine.\n\nIn summary, allocate approximately 15-25 minutes per day for your stretching routine, focusing on major muscle groups and incorporating a variety of techniques to maximize your flexibility gains.\n\nI am writing my results to my scratchpad.\nCan you see my scratchpad?",
-          "duration_ms": 11158,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-15T23:01:22.595Z",
-      "agent_id": "sidekik-01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 16572,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "Here are three key aspects of living a healthy life:\n\n1. **Balanced Diet**: Consume a variety of fruits, vegetables, lean proteins, whole grains, and healthy fats. Limit processed foods, sugars, and unhealthy fats.\n2. **Regular Exercise**: Aim for at least 150 minutes of moderate-intensity or 75 minutes of vigorous-intensity aerobic activity per week, along with strength training exercises at least 2 days a week.\n3. **Adequate Sleep**: Adults should aim for 7-9 hours of sleep per night. Maintain a consistent sleep schedule, create a relaxing bedtime routine, and optimize your sleep environment.",
-          "duration_ms": 4557,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "To determine how much weight you can lose by burning an additional 500 calories a month, we'll use the basic fact that 1 pound of fat represents approximately 3,500 calories. Here's the calculation:\n\n1. First, convert the monthly calories to daily calories:\n   500 calories/month ÷ 30 days/month ≈ 16.67 calories/day\n2. Next, calculate how many pounds that translates to in weight loss:\n   16.67 calories/day ÷ 3500 calories/pound ≈ 0.00477 pounds/day\n3. Finally, find out the monthly weight loss:\n   0.00477 pounds/day × 30 days/month ≈ 0.143 pounds/month\n\nSo, by burning an extra 500 calories a month, you can lose approximately **0.14 pounds** (or about 2 ounces).",
-          "duration_ms": 6745,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": "Incorporating regular stretching into your routine can help improve flexibility. For significant improvement, aim for at least 20-30 minutes of stretching per day. Here's a simple breakdown:\n\n* **Beginner**: Start with 10-15 minutes of stretching per day, focusing on major muscle groups like your hamstrings, quadriceps, hip flexors, and shoulders.\n* **Intermediate**: Aim for 20-30 minutes of stretching per day, including both static and dynamic stretches. Incorporate full-body stretches and hold each stretch for 20-30 seconds.\n* **Advanced**: For more significant improvements, dedicate 30-45 minutes per day to stretching, including advanced stretches and yoga poses.",
-          "duration_ms": 5268,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-15T23:00:24.467Z",
-      "agent_id": "sidekik-01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 27596,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "Here are three key aspects of a healthy life:\n\n1. **Balanced Diet:** Consume a variety of fruits, vegetables, lean proteins, and whole grains. Limit processed foods, sugars, and unhealthy fats. Stay hydrated by drinking plenty of water throughout the day.\n2. **Regular Exercise:** Aim for at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity each week, along with strength training exercises at least 2 days a week. Find activities you enjoy to make exercise a regular part of your routine.\n3. **Adequate Sleep:** Adults should aim for 7-9 hours of sleep per night. Maintain a consistent sleep schedule, create a relaxing bedtime routine, and optimize your sleep environment for better sleep quality. Prioritize sleep for improved overall health and well-being.",
-          "duration_ms": 11896,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "To estimate the weight you could lose by burning an extra 500 calories each month, we'll assume that this calorie deficit is achieved through exercise and that weight loss occurs at a rate of approximately 1 pound per week for every 3,500 calorie deficit through a combination of diet and exercise.\n\nFirst, let's find out how many calories you're burning monthly:\n\n500 calories/day * 30 days/month = 15,000 calories/month\n\nNow, let's calculate how much weight could potentially be lost with this calorie deficit:\n\n15,000 calories/month / 3,500 calories/pound = 4.29 pounds/month\n\nSo, if you burn an extra 500 calories each day through exercise, you could potentially lose approximately **4.29 pounds in a month**. Keep in mind that weight loss can vary based on factors such as age, sex, body composition, and overall diet. It's essential to maintain a balanced diet and consult with a healthcare professional before starting any weight loss program.",
-          "duration_ms": 7362,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": "Stretching regularly can help improve your flexibility. The time spent on stretching can vary depending on your current flexibility level, the areas you want to focus on, and the intensity of your stretching routine. Here's a general guideline:\n\n* **Beginner:** Start with 10-15 minutes of stretching per day, focusing on major muscle groups like your hamstrings, hips, and shoulders.\n* **Intermediate:** Aim for 15-20 minutes of stretching per day, targeting both major and minor muscle groups. Incorporate dynamic stretches before your workouts and static stretches afterward.\n* **Advanced:** If you're looking to improve your flexibility significantly or prepare for advanced activities, dedicate 20-30 minutes or more per day. Include full-body stretches, focused muscle groups, and advanced techniques like yoga poses or active stretching routines.\n\nIt's essential to listen to your body and avoid pushing yourself too hard too fast. Consistency is key in improving flexibility, so even short daily sessions can yield noticeable improvements over time. Always warm up before stretching to prevent injuries and enhance the effectiveness of your stretching routine.\n\nConsider incorporating flexibility exercises into your daily routine, such as during your lunch break or before bedtime, to make it a consistent habit.",
-          "duration_ms": 8335,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-15T22:22:54.566Z",
-      "agent_id": "sidekik-01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 16375,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "Here are three key aspects of living a healthy life:\n\n1. **Balanced Diet**: Consume a balanced diet rich in fruits, vegetables, lean proteins, and whole grains. Limit processed foods, sugars, and unhealthy fats.\n2. **Regular Exercise**: Aim for at least 150 minutes of moderate-intensity or 75 minutes of vigorous-intensity physical activity per week, along with strength training exercises at least 2 days a week.\n3. **Adequate Sleep**: Prioritize getting 7-9 hours of sleep per night to support both physical and mental well-being. Maintain a consistent sleep schedule and create a relaxing bedtime routine.",
-          "duration_ms": 4296,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "To estimate the weight loss from burning an extra 500 calories per month, we'll make a few assumptions:\n\n* A pound of fat contains approximately 3,500 calories.\n* Everyone's body reacts differently to diet and exercise, so results may vary.\n\nWith these points in mind:\n\n1. Calculate the total calories burned per month: 500 calories/month\n2. Calculate the pounds of weight that can be lost: 500 calories / 3,500 calories/pound ≈ 0.14 pounds/month\n\nSo, by burning an extra 500 calories each month, you could potentially lose about 0.14 pounds per month. To speed up weight loss, combine this with a balanced diet and regular exercise.",
-          "duration_ms": 5413,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": "Incorporating regular stretching into your routine can help improve flexibility. Here's a simple stretching routine you can do daily:\n\n* **Dynamic Stretching**: Warm up with dynamic stretches, such as leg swings, hip rotations, and arm circles, for about 5-10 minutes. Dynamic stretches prepare your muscles for exercise and improve your range of motion.\n* **Static Stretching**: Hold static stretches for about 15-30 seconds each. Focus on the major muscle groups like your hamstrings, quadriceps, hip flexors, back, and shoulders. Aim for 5-10 minutes of static stretching.\n\nSo, in total, you should dedicate around **15-20 minutes** a day to stretching to improve your flexibility. Always remember to breathe and relax during your stretches to maximize their benefits.\n\nTo make stretching a habit, consider doing it at the same time every day or pairing it with other daily activities, like watching TV or reading.",
-          "duration_ms": 6664,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-15T22:22:19.700Z",
-      "agent_id": "sidekik-01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 23212,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "Here are three key aspects of living a healthy life:\n\n1. **Balanced Diet**: Consume a variety of fruits, vegetables, lean proteins, whole grains, and healthy fats. Limit processed foods, sugars, and unhealthy fats.\n\n2. **Regular Exercise**: Aim for at least 150 minutes of moderate-intensity or 75 minutes of vigorous-intensity physical activity per week, along with strength training exercises at least 2 days a week.\n\n3. **Adequate Sleep**: Strive for 7-9 hours of sleep per night. Maintain a consistent sleep schedule and create a relaxing bedtime routine to improve sleep quality.",
-          "duration_ms": 8635,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "The number of pounds lost can vary based on factors like your initial weight, body composition, and diet. Here's a rough estimate:\n\n* 1 pound of fat equals approximately 3500 calories.\n* Burning an extra 500 calories a month equals 500 * 12 = 6000 calories a year.\n* If these calories come from body fat, you could potentially lose about 6000 / 3500 = 1.7 pounds a year by burning an extra 500 calories a month.\n\nHowever, it's important to note that:\n\n- This is a rough estimate and can vary based on individual factors.\n- Burning an extra 500 calories a month might not always result in a pound of weight loss if your body adjusts its metabolism.\n- To see weight loss, you might need to create a consistent calorie deficit through both exercise and diet.\n- Always consult with a healthcare professional before starting any weight loss program.\n\nDo you want to save this information?",
-          "duration_ms": 6967,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": "Incorporating regular stretching into your routine can help improve flexibility. Here's a simple stretching routine you can follow:\n\n* Full-body stretching: 20-30 minutes per session.\n* Targeted stretches for specific areas: 5-10 minutes per session.\n\nTo maintain or improve flexibility, aim for the following:\n\n* Stretch at least 2-3 times a week for 20-30 minutes each session for a full-body routine.\n* If focusing on specific areas, stretch 2-3 times a week for 5-10 minutes each session.\n\nHere's a sample full-body stretching routine that takes approximately 20-30 minutes:\n\n1. Neck stretches: 2 minutes\n2. Shoulder rolls and stretches: 3 minutes\n3. Chest stretch: 2 minutes\n4. Back stretches (cat-cow and twist): 2 minutes\n5. Hip stretches (butterfly and lunging stretches): 5 minutes\n6. Leg stretches (hamstrings, quadriceps, and hip flexors): 7 minutes\n7. Calf stretches: 2 minutes",
-          "duration_ms": 7608,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-15T22:14:39.029Z",
-      "agent_id": "sidekik-01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 19797,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "I'm sorry for the confusion, but I can't interact with my scratchpad outside of a chat session. However, I can still provide you with three steps to live a healthy life:\n\n1. **Balanced Diet**: Eat a variety of fruits, vegetables, lean proteins, and whole grains. Limit processed foods, sugars, and unhealthy fats.\n\n2. **Regular Exercise**: Aim for at least 150 minutes of moderate-intensity or 75 minutes of vigorous-intensity physical activity per week, along with strength training exercises at least 2 days a week.\n\n3. **Adequate Sleep**: Adults should aim for 7-9 hours of sleep per night. Good sleep is vital for both physical and mental health. Establish a consistent sleep schedule and create a relaxing bedtime routine.",
-          "duration_ms": 6401,
-          "tool_events": [
-            {
-              "tool": "write_chat_scratchpad",
-              "args": {
-                "agent": "sidekik-01",
-                "title": "healthy_life",
-                "content": "Live a healthy life"
-              },
-              "status": "error",
-              "error": "The chat scratchpad is only available inside a chat session.",
-              "result": ""
-            }
-          ],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "I apologize for the inconvenience. However, I can still help you estimate weight loss based on the information provided.\n\nOne pound of body weight is roughly equivalent to 3,500 calories. If you're burning an extra 500 calories per month, that would translate to approximately 0.14 pounds (500 calories / 3,500 calories per pound) of weight loss per month.\n\nHere's a simple breakdown:\n\n- Burning an extra 500 calories per month is equivalent to losing approximately 0.14 pounds per month.\n- To lose one pound per month, you would need to burn an extra 2,500 calories per month (3,500 calories / 1.4 ≈ 2,500 calories).",
-          "duration_ms": 6669,
-          "tool_events": [
-            {
-              "tool": "write_chat_scratchpad",
-              "args": {
-                "agent": "sidekik-01",
-                "title": "healthy_life_1",
-                "content": "Live a healthy life"
-              },
-              "status": "error",
-              "error": "The chat scratchpad is only available inside a chat session.",
-              "result": ""
-            }
-          ],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": " I'm sorry for the inconvenience earlier. Here's a general guideline for daily stretching to improve flexibility:\n\n- **Duration**: Aim for at least 10-15 minutes of stretching per day. This can be done all at once or broken up into smaller sessions throughout the day.\n- **Frequency**: Consistency is key. Make stretching a daily habit for optimal results.\n- **Intensity**: Stretch to the point of feeling tension, but not pain. Hold each stretch for 20-30 seconds, then release. Repeat 2-3 times per stretch.\n- **Target Areas**: Stretch all major muscle groups, including hamstrings, quadriceps, hip flexors, back, shoulders, and chest. Also, don't forget to stretch your calves, ankles, and feet.",
-          "duration_ms": 6723,
-          "tool_events": [
-            {
-              "tool": "write_chat_scratchpad",
-              "args": {
-                "agent": "sidekik-01",
-                "content": "Live a healthy life",
-                "title": "healthy_life_1"
-              },
-              "status": "error",
-              "error": "The chat scratchpad is only available inside a chat session.",
-              "result": ""
-            }
-          ],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-15T22:13:40.212Z",
-      "agent_id": "sidekik-01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 30612,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "Here are three key aspects of living a healthy life:\n\n1. **Balanced Diet**: Consume a balanced diet rich in fruits, vegetables, whole grains, lean proteins, and healthy fats. Limit processed foods, sugars, and unhealthy fats.\n2. **Regular Exercise**: Aim for at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity per week, along with strength training exercises at least 2 days a week.\n3. **Adequate Sleep**: Prioritize getting 7-9 hours of sleep per night for adults to support both physical and mental health. Maintain a consistent sleep schedule and create a relaxing bedtime routine.",
-          "duration_ms": 11199,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "To determine how much weight you can lose by burning an extra 500 calories per month, we'll make a simple calculation:\n\n1. **Convert monthly calorie burn to daily:** 500 calories/month ÷ 30 days/month ≈ 16.67 calories/day\n2. **Calculate weight loss:** Since 1 pound of fat ≈ 3500 calories, the weight loss can be estimated as:\n\n   16.67 calories/day ÷ 3500 calories/pound ≈ 0.00478 pounds/day\n\n3. **Calculate monthly weight loss:**\n\n   0.00478 pounds/day × 30 days ≈ 0.1434 pounds/month\n\nSo, you can lose approximately **0.14 pounds** by burning an extra 500 calories each month. Keep in mind that this is an estimate, and actual weight loss may vary based on factors like your diet, activity level, age, and overall health. For accurate weight loss tracking, consider monitoring your progress regularly and adjusting your diet and exercise accordingly.",
-          "duration_ms": 7606,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": "To improve flexibility, it's recommended to stretch daily. The amount of time you need to spend stretching can vary depending on your goals and current flexibility level. Here's a general guideline:\n\n* **Beginner or occasional stretching:**\n\t+ Aim for at least **5-10 minutes** per day, focusing on major muscle groups like hamstrings, hips, and shoulders. This can be done in one or two sessions throughout the day.\n* **Regular stretching or improvement:**\n\t+ Allocate about **10-15 minutes** per day, including warm-up and cool-down stretches before and after workouts, and additional sessions focused on targeted areas.\n* **Advanced flexibility training:**\n\t+ Dedicate **15-30 minutes** or more per day, incorporating a variety of stretches, dynamic movements, and possibly advanced techniques like yoga or partner stretching.\n\nRemember, stretching should be comfortable, not painful. Focus on gentle movements and avoid bouncing or pushing yourself too hard, especially when starting out. Consistency is key in improving flexibility, so aim for daily stretching sessions tailored to your needs and abilities.\n\nHere's a sample stretching routine to get you started:\n\n1. **Warm-up (1-2 minutes):** March in place or jog lightly to increase body temperature.\n2. **Stretching routine (8-15 minutes):** Perform the following stretches, holding each for 15-30 seconds:\n\t* Standing Forward Bend (hamstrings)\n\t* Seated Glute Stretch (glutes)\n\t* Kneeling Hip Flexor Stretch (hip flexors)\n\t* Chest Opener (pectorals)\n\t* Shoulder Rolls (shoulders)\n3. **Cool-down (optional, 1-2 minutes):** Relax and breathe deeply, focusing on your breath and the sensation of relaxation.",
-          "duration_ms": 11804,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-15T20:37:30.007Z",
-      "agent_id": "sidekik-01",
-      "model": "qwen2.5-coder:14b",
-      "duration_ms": 49045,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "To live a healthy life, consider incorporating the following three key practices:\n\n1. **Balanced Diet**: Focus on consuming a variety of nutrient-rich foods, including fruits, vegetables, lean proteins, and whole grains. Limit the intake of processed foods, sugars, and unhealthy fats.\n\n2. **Regular Exercise**: Engage in physical activity regularly, such as walking, jogging, swimming, or any form of exercise that you enjoy. Aim for at least 150 minutes of moderate aerobic activity or 75 minutes of vigorous activity per week.\n\n3. **Sufficient Sleep**: Ensure you get adequate rest each night, typically 7-9 hours for most adults. Maintain a consistent sleep schedule and create a bedtime routine that promotes relaxation and quality sleep.",
-          "duration_ms": 19344,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "To calculate weight loss from burning extra calories, we need to consider the basic principle that a calorie deficit of 3,500 calories results in approximately 1 pound of weight loss.\n\nIf you burn an extra 500 calories per day, over a month (assuming 30 days), you would burn:\n\n\\[ 500 \\, \\text{calories/day} \\times 30 \\, \\text{days} = 15,000 \\, \\text{calories} \\]\n\nSince 15,000 calories is equivalent to a 3.5-pound weight loss, burning an extra 500 calories per day for a month would result in:\n\n\\[ \\frac{15,000 \\, \\text{calories}}{3,500 \\, \\text{calories/pound}} \\approx 4.29 \\, \\text{pounds} \\]\n\nSo, burning an extra 500 calories per day for a month would help you lose approximately 4.29 pounds.",
-          "duration_ms": 14443,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": "To improve flexibility, it's generally recommended to spend about 10-15 minutes per day stretching. This can be done in a single session or split into shorter periods throughout the day. Here are some tips to maximize the effectiveness of your stretching routine:\n\n1. **Warm-Up First**: Always warm up before stretching to prepare your muscles and prevent injury. This can be done through light exercise or a warm bath.\n\n2. **Hold Stretches**: Hold each stretch for about 15-30 seconds. This allows your muscles to gradually lengthen and increase flexibility.\n\n3. **Target Major Muscle Groups**: Focus on major muscle groups such as the hamstrings, quadriceps, chest, back, shoulders, and hips.\n\n4. **Stretch Regularly**: Consistency is key in improving flexibility. Try to make stretching a regular part of your daily routine.\n\n5. **Listen to Your Body**: Avoid pushing yourself too far or holding stretches that cause pain. It's important to feel a gentle pull, not discomfort or sharp pain.\n\nBy dedicating 10-15 minutes daily to stretching, you can make significant improvements in your flexibility over time.",
-          "duration_ms": 15256,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-15T20:32:29.991Z",
-      "agent_id": "sidekik-01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 23732,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "Here are three key aspects of living a healthy life:\n\n1. **Balanced Diet and Regular Exercise:**\n   - Eat a balanced diet rich in fruits, vegetables, lean proteins, and whole grains.\n   - Engage in regular physical activity, aiming for at least 150 minutes of moderate exercise or 75 minutes of vigorous exercise per week, along with strength training exercises at least 2 days a week.\n\n2. **Adequate Sleep:**\n   - Prioritize getting 7-9 hours of sleep per night for adults. Good sleep hygiene, such as maintaining a consistent sleep schedule and creating a relaxing bedtime routine, can help improve sleep quality.\n\n3. **Stress Management and Mental Well-being:**\n   - Practice stress management techniques such as mindfulness, meditation, yoga, or other relaxation methods to help manage stress levels.\n   - Engage in activities you enjoy and make time for hobbies and social connections to maintain good mental health.",
-          "duration_ms": 13107,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "To estimate the weight loss from burning an extra 500 calories per month, we'll make a few assumptions:\n\n1. A pound of fat is equivalent to approximately 3500 calories.\n2. Burning an extra 500 calories per month results in a monthly calorie deficit of 500 calories.\n\nBased on these assumptions, burning an extra 500 calories per month would result in approximately 0.14 pounds (500 calories / 3500 calories per pound) of weight loss per month.\n\nSo, if you maintain this calorie deficit consistently each month, you could potentially lose about 1.68 pounds (0.14 pounds/month * 12 months) in a year.",
-          "duration_ms": 5295,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": "Incorporating regular stretching into your routine can help improve flexibility. Here's a general guideline:\n\n* Aim for at least 10-15 minutes of dedicated stretching per day.\n* For a well-rounded stretch routine, focus on different muscle groups throughout the week, such as:\n\t+ Neck and shoulders\n\t+ Chest and upper back\n\t+ Arms and hands\n\t+ Abdomen and lower back\n\t+ Hips and legs\n\t+ Feet and ankles\n* You can break up your stretching time into smaller sessions throughout the day, rather than trying to do it all at once. For example:\n\t+ 5 minutes in the morning\n\t+ 5 minutes in the afternoon\n\t+ 5 minutes in the evening",
-          "duration_ms": 5324,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
-    },
-    {
-      "run_at": "2026-11-15T07:17:16.145Z",
-      "agent_id": "sidekik-01",
-      "model": "mistral-nemo:latest",
-      "duration_ms": 16191,
-      "passed": 0,
-      "failed": 0,
-      "steps": [
-        {
-          "text": "how can i live a healthy life name three things",
-          "status": "completed",
-          "reply": "Here are three key aspects of living a healthy life:\n\n1. **Balanced Diet**: Consume a variety of fruits, vegetables, lean proteins, and whole grains. Limit processed foods, sugars, and unhealthy fats.\n2. **Regular Exercise**: Aim for at least 150 minutes of moderate-intensity or 75 minutes of vigorous-intensity physical activity per week, along with strength training exercises at least 2 days a week.\n3. **Adequate Sleep**: Prioritize getting 7-9 hours of sleep per night for adults. Maintain a consistent sleep schedule and create a relaxing bedtime routine.",
-          "duration_ms": 4135,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many poounds can i loose if i burn extra 500 calories a month",
-          "status": "completed",
-          "reply": "If you're looking to lose weight, burning an extra 500 calories per month could help, but it's important to note that weight loss is influenced by factors beyond just calorie burn. Here's a simple breakdown:\n\n*   1 pound of fat is equivalent to approximately 3,500 calories.\n*   Burning an extra 500 calories per month would result in a weight loss of about 0.14 pounds (500 calories / 3,500 calories/pound) over the course of a month.",
-          "duration_ms": 3844,
-          "tool_events": [],
-          "checks": []
-        },
-        {
-          "text": "how many minutes do i neeed to streach a day to get some flexibility",
-          "status": "completed",
-          "reply": "To improve flexibility, it's recommended to incorporate stretching into your daily routine. Here's a simple plan:\n\n*   Aim for at least 10-15 minutes of stretching per day.\n*   Focus on the major muscle groups: hamstrings, quadriceps, hip flexors, lower back, shoulders, and chest.\n*   Hold each stretch for about 20-30 seconds, without bouncing.\n*   Remember to breathe normally during each stretch.\n\nHere's an example of a daily stretching routine:\n\n1. **Hamstrings**: Sit on the edge of a chair, extend one leg, keeping the other foot on the ground. Lean forward slightly, reaching towards your extended foot. Hold for 30 seconds, then switch legs.\n2. **Quadriceps**: Stand on one leg and bend your knee, grasping your ankle with your hand. Keep your knees together and hold for 30 seconds, then switch legs.\n3. **Hip Flexors**: Kneel on one knee, keeping your back straight. Tilt your pelvis forward and hold for 30 seconds, then switch knees.\n4. **Lower Back**: Lie on your back and hug your knees to your chest. Gently rock side to side to massage your lower back.",
-          "duration_ms": 8209,
-          "tool_events": [],
-          "checks": []
-        }
-      ]
     }
   ]
 }
 
-````
+```
 
 ### test_environment/data/saved_suites/results/squads/test-problme-orchestrator.json
 
@@ -42798,8 +45238,8 @@ class SuiteRunRequest(BaseModel):
   "name": "how can i live a healthy life name three things",
   "category": "squads",
   "description": "",
-  "agent_id": "sidekik-01",
-  "model": "mistral-nemo:latest",
+  "agent_id": "thinke01",
+  "model": "qwen2.5-coder:14b",
   "steps": [
     {
       "text": "how can i live a healthy life name three things",
@@ -42818,7 +45258,7 @@ class SuiteRunRequest(BaseModel):
     }
   ],
   "created": "2026-11-15T07:06:54+00:00",
-  "updated": "2026-11-15T07:12:38+00:00"
+  "updated": "2026-11-18T10:31:44+00:00"
 }
 
 ```
@@ -45736,7 +48176,7 @@ from fastapi import HTTPException
 
 from core_engine.logic_core_engine import Agent, tool_catalog
 from test_environment.interface_test_environment import api_promote_tool, api_test_tool_with_llm
-from test_environment.logic_test_environment import tool_workbench
+from test_environment.logic_test_environment import sandbox_env, tool_workbench
 from test_environment.schemas_test_environment import ToolWorkbenchLLMRequest, ToolWorkbenchRequest
 from tools.logic_tools import tool_registry
 
@@ -45822,7 +48262,7 @@ class ToolWorkbenchTests(unittest.TestCase):
             ) as run_tool:
                 result = api_test_tool_with_llm(request)
 
-        run_tool.assert_called_once_with(source, arguments, timeout=5)
+        run_tool.assert_called_once_with(source, arguments, timeout=5, allow_internal_imports=False)
         self.assertEqual(result["function_input"], arguments)
         self.assertEqual(result["tool_execution_result"], execution)
 
@@ -46129,6 +48569,34 @@ class ToolWorkbenchTests(unittest.TestCase):
                 finally:
                     tool_catalog.registry.pop(tool_name, None)
                     tool_catalog.registry.pop(remaining_name, None)
+
+    def test_allow_internal_imports_opt_in_widens_sandbox_path(self):
+        source = "import tools\ndef check_internal_import():\n    return tools.__name__\n"
+        blocked = tool_workbench.run_python_tool(source, {})
+        self.assertEqual(blocked["status"], "ERROR")
+
+        allowed = tool_workbench.run_python_tool(source, {}, allow_internal_imports=True)
+        self.assertEqual(allowed["status"], "SUCCESS")
+        self.assertEqual(allowed["output"], "tools")
+
+    def test_list_internal_modules_includes_real_packages_excludes_assets(self):
+        modules = sandbox_env.list_internal_modules()
+        self.assertIn("tools", modules)
+        self.assertIn("core_engine", modules)
+        self.assertNotIn("frontend", modules)
+        self.assertNotIn("tests", modules)
+
+    def test_generate_reports_parameter_mismatch_without_failing(self):
+        ollama = Mock()
+        ollama.chat.return_value = {
+            "message": {"content": "```python\ndef add(left: int, right: int):\n    return left + right\n```"}
+        }
+        with patch.dict(sys.modules, {"ollama": ollama}):
+            result = tool_workbench.generate_python_function(
+                "Add two numbers.", "test-model", expected_parameters=["left", "total"],
+            )
+        self.assertEqual(result["function_name"], "add")
+        self.assertEqual(result["parameter_mismatch"], {"missing": ["total"], "extra": ["right"]})
 
 
 if __name__ == "__main__":
@@ -46955,11 +49423,14 @@ def test_prompt_starter_defaults_match_agent_and_subagent_scaffolds(client):
     assert subagent_yaml["type"] == "subagent"
     assert subagent_yaml["name"] == "[SUB-AGENT NAME]"
     assert subagent_yaml["tools"] == ["read_squad_scratchpad", "write_squad_scratchpad"]
-    assert defaults["subagent"]["prompt"] == subagent_yaml["prompt"].replace(
-        'agent: "novous-subagent"', 'agent: "[SUB-AGENT ID]"'
-    )
-    assert 'agent: "[SUB-AGENT ID]"' in defaults["subagent"]["prompt"]
-    assert "You are the [SUB-AGENT NAME]." in defaults["subagent"]["prompt"]
+    # The yaml scaffold (used outside the wizard) keeps fully-written text, but the
+    # wizard's editable prompt body is placeholder-based, same pattern as the agent
+    # template, so Prompt Starter's chain-fill can write each section.
+    assert "You are the [SUB-AGENT NAME]." in subagent_yaml["prompt"]
+    assert "## Role\n[ROLE]" in defaults["subagent"]["prompt"]
+    assert "## Purpose\n[PURPOSE]" in defaults["subagent"]["prompt"]
+    assert "## Boundaries\n[BOUNDARIES]" in defaults["subagent"]["prompt"]
+    assert "## Output Format\n[OUTPUT FORMAT]" in defaults["subagent"]["prompt"]
 
 
 def test_prompt_starter_agent_definition_parses_and_validates_tool_choices(client):
@@ -47253,6 +49724,80 @@ def test_flow_rejects_duplicate_outcome_and_missing_start(client):
         "start": "alpha", "routes": [route, route]
     }).status_code == 400
     assert client.post("/api/squad-development/squads/demo/runs", json={"query": "test"}).status_code == 400
+
+```
+
+### tests/test_tool_drafts.py
+
+```python
+"""Tool Creation Wizard drafts and the per-tool title field."""
+
+from core_engine.logic_core_engine import ToolCatalog, tool_catalog
+from test_environment.logic_tool_drafts import ToolDraftStore
+
+
+def test_draft_round_trip_save_get_list_delete(tmp_path, monkeypatch):
+    store = ToolDraftStore()
+    monkeypatch.setattr(store, "PATH", tmp_path / "tool_drafts.json")
+
+    saved = store.save_draft("draft-1", {"name": "my_tool", "title": "My Tool", "step": 2})
+    assert saved["draft_id"] == "draft-1"
+    assert saved["name"] == "my_tool"
+    assert "updated_at" in saved
+
+    fetched = store.get_draft("draft-1")
+    assert fetched["title"] == "My Tool"
+    assert fetched["step"] == 2
+
+    summaries = store.list_drafts()
+    assert len(summaries) == 1
+    assert summaries[0]["draft_id"] == "draft-1"
+    assert summaries[0]["name"] == "my_tool"
+
+    # Overwriting an existing draft upserts rather than duplicating it.
+    store.save_draft("draft-1", {"name": "my_tool", "title": "My Tool", "step": 4})
+    assert len(store.list_drafts()) == 1
+    assert store.get_draft("draft-1")["step"] == 4
+
+    result = store.delete_draft("draft-1")
+    assert result["deleted"] is True
+    assert store.list_drafts() == []
+
+
+def test_get_missing_draft_raises(tmp_path, monkeypatch):
+    store = ToolDraftStore()
+    monkeypatch.setattr(store, "PATH", tmp_path / "tool_drafts.json")
+    try:
+        store.get_draft("does-not-exist")
+        assert False, "expected FileNotFoundError"
+    except FileNotFoundError:
+        pass
+
+
+def test_title_field_reads_legacy_bare_string_entries(tmp_path, monkeypatch):
+    path = tmp_path / "tool_prompts.json"
+    path.write_text('{"ask_user_window": "Ask the user a question."}', encoding="utf-8")
+    monkeypatch.setattr(ToolCatalog, "PROMPT_DESCRIPTIONS_PATH", path)
+
+    assert tool_catalog.prompt_text("ask_user_window") == "Ask the user a question."
+    assert tool_catalog.title_text("ask_user_window") is None
+
+
+def test_set_tool_title_upgrades_legacy_entry_without_losing_the_prompt(tmp_path, monkeypatch):
+    path = tmp_path / "tool_prompts.json"
+    path.write_text('{"ask_user_window": "Ask the user a question."}', encoding="utf-8")
+    monkeypatch.setattr(ToolCatalog, "PROMPT_DESCRIPTIONS_PATH", path)
+    tool_catalog.load_tools()
+    assert "ask_user_window" in tool_catalog.registry
+
+    tool_catalog.set_tool_title("ask_user_window", "Ask User")
+
+    assert tool_catalog.title_text("ask_user_window") == "Ask User"
+    assert tool_catalog.prompt_text("ask_user_window") == "Ask the user a question."
+
+    tool_catalog.set_tool_title("ask_user_window", "")
+    assert tool_catalog.title_text("ask_user_window") is None
+    assert tool_catalog.prompt_text("ask_user_window") == "Ask the user a question."
 
 ```
 
@@ -49851,7 +52396,7 @@ from fastapi import APIRouter, HTTPException
 
 from core_engine.logic_core_engine import tool_catalog
 from tools.logic_tools import ToolConflictError, ToolNotFoundError, ToolReadOnlyError, tool_registry, workspace_files
-from tools.schemas_tools import MapPageRequest, RegisterToolRequest, ToolPromptRequest, UpdateToolRequest
+from tools.schemas_tools import MapPageRequest, RegisterToolRequest, ToolPromptRequest, ToolTitleRequest, UpdateToolRequest
 
 router = APIRouter()
 
@@ -49942,6 +52487,18 @@ def api_update_tool(name: str, req: UpdateToolRequest):
 def api_set_tool_prompt(name: str, req: ToolPromptRequest):
     try:
         return tool_registry.set_prompt_description(name, req.prompt_description)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.put("/api/tools/{name}/title")
+def api_set_tool_title(name: str, req: ToolTitleRequest):
+    try:
+        return tool_registry.set_tool_title(name, req.title)
+    except ToolNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -50584,6 +53141,7 @@ class ToolRegistryService:
             "path": source["path"],
             "source": source["source"],
             "docstring": docstring,
+            "title": tool_catalog.title_text(name) or "",
             "prompt_description": tool_catalog.prompt_overrides().get(name, ""),
             "prompt_preview": tool_catalog.prompt_text(name) or docstring,
             "parameters": tool_catalog.tool_parameters(name),
@@ -50600,6 +53158,16 @@ class ToolRegistryService:
             "prompt_preview": tool_catalog.prompt_text(name) or "",
             "refreshed_agents": agent_library.refresh_tool_sections(name),
         }
+
+    def set_tool_title(self, name: str, text: str) -> dict:
+        """Save (or clear) the human-readable display title for a tool."""
+        if len(text) > 200:
+            raise ValueError("The title is longer than 200 characters.")
+        tool_catalog.load_tools()
+        if name not in tool_catalog.registry:
+            raise ToolNotFoundError(f"Tool '{name}' not found.")
+        tool_catalog.set_tool_title(name, text)
+        return {"name": name, "title": tool_catalog.title_text(name) or ""}
 
     def list_tools(self) -> list[dict]:
         """Return tool metadata with custom-tool flags."""
@@ -51232,11 +53800,22 @@ class ToolPromptRequest(BaseModel):
     prompt_description: str = Field("", max_length=2000)
 
 
+class ToolTitleRequest(BaseModel):
+    title: str = Field("", max_length=200)
+
+
 class MapPageRequest(BaseModel):
     path: str
     max_depth: int = 3
     include_files: bool = True
     offset: int = 0
+
+```
+
+### tools/data/tool_drafts.json
+
+```json
+{}
 
 ```
 
