@@ -56,6 +56,11 @@ class AgentToolsRequest(BaseModel):
     subagents: List[SubagentUsage] | None = Field(default=None, max_length=50)
 
 
+class AgentReminderRequest(BaseModel):
+    remind_every_turn: bool = False
+    tool_reminder: str = Field(default="", max_length=2000)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     agent_id: str

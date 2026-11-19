@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  starterVariables, renderStarter, replaceToolVariables, addToolParameterVariables,
-  starterEditorText, extractSubagentConfig,
+  starterVariables, renderStarter, replaceToolVariables, currentToolNames,
+  setFrontmatterFields, starterEditorText, extractSubagentConfig,
 } from '../frontend/static/js/prompt_starter.js';
 
 test('finds distinct variables and replaces every occurrence without touching other text', () => {
@@ -28,34 +28,40 @@ test('empty tool slots are omitted from generated YAML', () => {
   }), 'tools:\n  - "read_file"\n  - ""\n');
 });
 
-test('tool selection replaces the YAML list while preserving prompt content', () => {
+test('tool selection writes real tool names into the YAML list while preserving prompt content', () => {
   const definition = '---\nid: "helper"\ntools: []\ndescription: "Useful helper"\n---\n# Helper\n';
-  const selected = replaceToolVariables(definition, [1, 2]);
-  assert.match(selected, /tools:\n  - "\[TOOL 1\]"\n  - "\[TOOL 2\]"\ndescription:/);
+  const selected = replaceToolVariables(definition, ['read_file', 'write_file']);
+  assert.match(selected, /tools:\n {2}- read_file\n {2}- write_file\ndescription:/);
   assert.match(selected, /# Helper/);
-  const updated = replaceToolVariables(selected, [2]);
-  assert.match(updated, /tools:\n  - "\[TOOL 2\]"\ndescription:/);
+  assert.deepEqual(currentToolNames(selected), ['read_file', 'write_file']);
+  const updated = replaceToolVariables(selected, ['write_file']);
+  assert.match(updated, /tools:\n {2}- write_file\ndescription:/);
+  assert.deepEqual(currentToolNames(updated), ['write_file']);
   const cleared = replaceToolVariables(updated, []);
   assert.match(cleared, /tools: \[\]\ndescription:/);
   assert.match(cleared, /# Helper/);
+  assert.deepEqual(currentToolNames(cleared), []);
 });
 
-test('tool parameters get fillable variables immediately after their colons', () => {
-  const instructions = [
-    'Parameters:',
-    '- agents (required): The agent IDs to call.',
-    '- timeout: Maximum wait in seconds.',
-    '- kind: Entry kind to filter by, or empty for all kinds.',
-    'Return format: JSON.',
-  ].join('\n');
-  const descriptions = {};
-  const withVariables = addToolParameterVariables(instructions, 2, descriptions);
-  assert.match(withVariables, /- agents \(required\): \[TOOL 2 AGENTS\] - The agent IDs to call\./);
-  assert.match(withVariables, /- timeout: \[TOOL 2 TIMEOUT\] - Maximum wait in seconds\./);
-  assert.match(withVariables, /- kind: \[TOOL 2 KIND\] - Entry kind to filter by, or empty for all kinds\./);
-  assert.match(withVariables, /Return format: JSON\./);
-  assert.deepEqual(starterVariables(withVariables), ['TOOL 2 AGENTS', 'TOOL 2 TIMEOUT', 'TOOL 2 KIND']);
-  assert.equal(descriptions['TOOL 2 KIND'], 'Entry kind to filter by, or empty for all kinds.');
+test('currentToolNames ignores stale bracket placeholders and missing frontmatter', () => {
+  assert.deepEqual(currentToolNames('---\ntools:\n  - "[TOOL 1]"\n  - read_file\n---\nbody'), ['read_file']);
+  assert.deepEqual(currentToolNames('no frontmatter here'), []);
+  assert.deepEqual(currentToolNames('---\nid: x\n---\nbody'), []);
+});
+
+test('setFrontmatterFields inserts new keys and updates existing ones', () => {
+  const definition = '---\nid: "helper"\ntools: []\ndescription: "Useful helper"\n---\n# Helper\n';
+  const withReminder = setFrontmatterFields(definition, [
+    ['remind_every_turn', 'true'],
+    ['tool_reminder', JSON.stringify('Always cite your sources.')],
+  ]);
+  assert.match(withReminder, /remind_every_turn: true/);
+  assert.match(withReminder, /tool_reminder: "Always cite your sources\."/);
+  assert.match(withReminder, /# Helper/);
+  const updatedAgain = setFrontmatterFields(withReminder, [['remind_every_turn', 'false']]);
+  assert.match(updatedAgain, /remind_every_turn: false/);
+  assert.equal((updatedAgain.match(/remind_every_turn:/g) || []).length, 1);
+  assert.throws(() => setFrontmatterFields('no frontmatter', [['x', 'y']]));
 });
 
 test('serializes inline controls as placeholders and preserves editable line breaks', () => {

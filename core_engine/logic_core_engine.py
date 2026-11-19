@@ -776,6 +776,38 @@ class AgentLibrary:
         path.write_text(updated, encoding="utf-8", newline="")
         return self.get_agent_tools(kind, agent_id)
 
+    def set_agent_reminder(self, kind: str, agent_id: str, remind_every_turn: bool,
+                           tool_reminder: str = "") -> dict:
+        """Rewrite the ``remind_every_turn``/``tool_reminder`` keys, leaving the rest of the file
+        intact. ``prepare_agent_message`` appends ``tool_reminder`` to the end of the agent's user
+        message every turn when ``remind_every_turn`` is set and a reminder is present."""
+        path = self._definition_file(kind, agent_id)
+        agent_id = path.stem
+        text = path.read_text(encoding="utf-8")
+        newline = "\r\n" if "\r\n" in text else "\n"
+        lines = text.splitlines()
+        reminder = str(tool_reminder or "").strip()
+
+        start, end = self._yaml_bounds(kind, lines)
+        lines = self._replace_top_level_key(lines, start, end, "remind_every_turn",
+                                            [f"remind_every_turn: {'true' if remind_every_turn else 'false'}"])
+        start, end = self._yaml_bounds(kind, lines)
+        reminder_block = yaml.safe_dump({"tool_reminder": reminder}, default_flow_style=False,
+                                        sort_keys=False, allow_unicode=True).rstrip("\n").split("\n") if reminder else []
+        lines = self._replace_top_level_key(lines, start, end, "tool_reminder", reminder_block)
+        updated = newline.join(lines) + (newline if text.endswith(("\n", "\r")) else "")
+
+        # Never write a file whose YAML no longer parses to exactly what was requested.
+        before = self._load_definition_yaml(kind, text)
+        data = self._load_definition_yaml(kind, updated)
+        untouched = {key for key in before if key not in ("remind_every_turn", "tool_reminder")}
+        if bool(data.get("remind_every_turn", False)) != remind_every_turn or (
+            str(data.get("tool_reminder") or "") != reminder
+        ) or any(data.get(key) != before[key] for key in untouched):
+            raise ValueError("Could not update the reminder without changing other YAML; edit the file directly.")
+        path.write_text(updated, encoding="utf-8", newline="")
+        return {"agent_id": agent_id, "remind_every_turn": remind_every_turn, "tool_reminder": reminder}
+
 
 # --- Runtime -----------------------------------------------------------------------
 

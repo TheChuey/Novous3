@@ -518,6 +518,18 @@
 .sd-starter-create-row[hidden], .sd-starter-create-row label[hidden] { display: none; }
 .sd-starter-create-row label { display: flex; flex-direction: column; gap: .15rem; font-weight: 500; }
 .sd-starter-create-row input, .sd-starter-create-row select { min-width: 140px; }
+.sd-agent-setup-modal { width: min(560px, 92vw); max-width: 92vw; max-height: 92vh; padding: 0; overflow: hidden; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-card); color: var(--text-main); }
+.sd-agent-setup-modal[open] { display: flex; }
+.sd-agent-setup-modal::backdrop { background: rgba(0, 0, 0, .72); }
+.sd-agent-setup-panel { display: flex; flex: 1; flex-direction: column; min-height: 0; gap: .6rem; padding: 1rem; overflow: hidden; }
+.sd-agent-setup-panel > p { margin: 0; }
+.sd-agent-setup-body { display: flex; flex-direction: column; gap: .6rem; flex: 1 1 auto; min-height: 0; overflow: auto; }
+.sd-agent-setup-panel .workspace-save-actions { flex: 0 0 auto; margin-top: .25rem; }
+.sd-agent-setup-row { display: flex; flex-direction: column; gap: .25rem; }
+.sd-agent-setup-row[hidden] { display: none; }
+.sd-agent-setup-row label { display: flex; flex-direction: column; gap: .15rem; font-weight: 500; }
+.sd-agent-setup-checkbox-row { flex-direction: row !important; align-items: center; gap: .4rem; }
+.sd-agent-setup-tools .sd-starter-fields-head { margin-bottom: .35rem; }
 @media (max-width: 800px) {
   .sd-starter-layout { flex-direction: column; overflow: auto; }
   .sd-starter-main { min-height: 360px; flex: none; }

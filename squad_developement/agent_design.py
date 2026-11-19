@@ -144,6 +144,11 @@ def parse_prompt_starter_agent(content: str) -> dict:
     if missing_tools:
         raise ValueError("Unregistered tools: " + ", ".join(missing_tools))
 
+    remind_every_turn = bool(metadata.get("remind_every_turn", False))
+    tool_reminder = metadata.get("tool_reminder", "") or ""
+    if not isinstance(tool_reminder, str):
+        raise ValueError("tool_reminder must be text.")
+
     prompt = "\n".join(lines[end_index + 1:]).strip("\n")
     if not prompt.strip():
         raise ValueError("The agent prompt body must not be empty.")
@@ -153,6 +158,8 @@ def parse_prompt_starter_agent(content: str) -> dict:
         "description": description.strip(),
         "mode": mode,
         "tools": tools,
+        "remind_every_turn": remind_every_turn,
+        "tool_reminder": tool_reminder.strip(),
         "prompt": prompt,
     }
 

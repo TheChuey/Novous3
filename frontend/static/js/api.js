@@ -87,6 +87,11 @@ export const Api = {
     return send('PUT', `/api/agent-tools/${encodeURIComponent(kind)}/${encodeURIComponent(agentId)}`, { tools, mode, subagents });
   },
 
+  async setAgentReminder(kind, agentId, remindEveryTurn, toolReminder = '') {
+    return send('PUT', `/api/agent-reminder/${encodeURIComponent(kind)}/${encodeURIComponent(agentId)}`,
+      { remind_every_turn: remindEveryTurn, tool_reminder: toolReminder });
+  },
+
   async getCodeBuilderAgents() {
     return get('/api/codebuilder/agents');
   },

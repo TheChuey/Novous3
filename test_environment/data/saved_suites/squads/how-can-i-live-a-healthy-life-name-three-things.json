@@ -3,8 +3,8 @@
   "name": "how can i live a healthy life name three things",
   "category": "squads",
   "description": "",
-  "agent_id": "sidekik-01",
-  "model": "mistral-nemo:latest",
+  "agent_id": "thinke01",
+  "model": "qwen2.5-coder:14b",
   "steps": [
     {
       "text": "how can i live a healthy life name three things",
@@ -23,5 +23,5 @@
     }
   ],
   "created": "2026-11-15T07:06:54+00:00",
-  "updated": "2026-11-15T07:12:38+00:00"
+  "updated": "2026-11-18T10:31:44+00:00"
 }

@@ -4,6 +4,20 @@ AGENT ID:
 - Enginner-01
 - SideKik-01
 - caller-01
+- '```markdown
+
+  # Goal Setter
+
+
+  - Analyzes questions/statement
+
+  - Describes goal
+
+  - Summarizes goal in 1-3 sentences
+
+  - Provides timeframe (up to 8 weeks)
+
+  ```'
 AGENT NAME:
 - You are a thinker who deconstructs problems
 - a thinker who deconstructs problems
@@ -13,7 +27,10 @@ AGENT NAME:
 - Enginer
 - Helper
 AI DESCRIPTION AGENT ID:
-- The agent's unique file id (lowercase, hyphenated).
+- Goal Setter and agent that will receive a question or statement, think through it
+  and perform an analysis, report back a description of the goal, summarize the goal
+  in one or three sentences, and provide a time frame for the goal no longer than
+  8 weeks or provide long-term goal setting as most appropriate.
 AI DESCRIPTION DESCRIPTION:
 - Description of the agents Job
 AI DESCRIPTION EXECUTION INSTRUCTIONS:
@@ -30,6 +47,9 @@ AI PRE-PROMPT DESCRIPTION:
 AI PRE-PROMPT EXECUTION INSTRUCTIONS:
 - 'Write the Execution Instructions section: a short numbered list of steps the agent
   follows when performing its task.'
+- 'Write the Execution Instructions section: a short numbered list of steps the agent
+  follows when performing its task. The steps should also include the language to
+  operate the tools and instructions for using the tools'
 AI PRE-PROMPT ROLE:
 - "Prompt for the agent \nDescribe the variable in detail \nList only five points,\
   \ no more than 10 words per point \nDescribing the Variable\nFormat it in a Markdown\
@@ -119,17 +139,17 @@ EXECUTION INSTRUCTIONS:
 - '6. Call write_chat_scratchpad exactly once, with all three arguments set every
   time: agent set to "Thinker", title set to "result", and content set to the actual
   conclusions you wrote in steps 1-5, in your own words. Never leave out title. Never
-  copy these instructions into content — content must be your own analysis text,
-  not a description of what to do.
+  copy these instructions into content — content must be your own analysis text, not
+  a description of what to do.
 
   7. Call read_chat_scratchpad exactly once, with agent="Thinker", title="result",
   to confirm.
 
   8. Once that read succeeds, stop calling tools for this question — give your final
   answer as plain text to the user. Never call either scratchpad tool more than once
-  for this question. For every new question the user asks, repeat steps 1-8 from
-  the start and attempt write_chat_scratchpad and read_chat_scratchpad again — even
-  if a tool call failed or a previous question''s call already used up its one attempt.
+  for this question. For every new question the user asks, repeat steps 1-8 from the
+  start and attempt write_chat_scratchpad and read_chat_scratchpad again — even if
+  a tool call failed or a previous question''s call already used up its one attempt.
   A past failure never excuses skipping the tools on a later question.'
 GOAL:
 - Summarize the problem in one sentence. About 25 words that correctly define the

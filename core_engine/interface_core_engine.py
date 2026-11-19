@@ -15,6 +15,7 @@ from core_engine.logic_system_state import project_state, system_health
 from core_engine.schemas_core_engine import (
     AgentDefinitionKind,
     AgentEnvironment,
+    AgentReminderRequest,
     AgentToolsRequest,
     AnswerSubmissionRequest,
     ChatRequest,
@@ -120,6 +121,16 @@ def api_set_agent_tools(kind: AgentDefinitionKind, agent_id: str, req: AgentTool
     try:
         subagents = None if req.subagents is None else [entry.model_dump() for entry in req.subagents]
         return agent_library.set_agent_tools(kind, agent_id, req.tools, req.mode, subagents)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.put("/api/agent-reminder/{kind}/{agent_id}")
+def api_set_agent_reminder(kind: AgentDefinitionKind, agent_id: str, req: AgentReminderRequest):
+    try:
+        return agent_library.set_agent_reminder(kind, agent_id, req.remind_every_turn, req.tool_reminder)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:

@@ -21,6 +21,8 @@ const STARTER_VARIABLE_DESCRIPTIONS = {
   'TASK': 'The task to send to a sub-agent.',
   'OUTPUT FORMAT': 'The format the agent must use for its final answer.',
   'CONDITION': 'When the action should happen.',
+  'TOOL REMINDER': "A short reminder appended to the end of the agent's user message every turn, "
+    + 'telling it how to correctly use its tools (remind_every_turn in the frontmatter).',
 };
 
 // Default pre-prompts the chain-fill wizard starts each variable with.
@@ -33,10 +35,14 @@ const STARTER_VARIABLE_PREPROMPTS = {
   'COMMUNICATION': 'Write the Communication section: a short bullet list of how the agent reports and communicates results.',
   'DESCRIPTION': 'Write a one-sentence description of what this agent does.',
   'OUTPUT FORMAT': 'Write the Output Format section: the exact format the agent must use for its final answer.',
+  'TOOL REMINDER': 'Write ONE short, imperative reminder (1-2 sentences) telling the agent to correctly use '
+    + 'its tools every turn, condensed from the Execution Instructions and tool descriptions in context below. '
+    + 'Output only the reminder text — no preamble, no quotes, no heading.',
 };
 
 export function starterVariables(text) {
-  return [...new Set([...text.matchAll(VARIABLE)].map(match => match[1]))];
+  return [...new Set([...text.matchAll(VARIABLE)].map(match => match[1]))]
+    .filter(name => !/^TOOL \d+$/.test(name));
 }
 
 export function renderStarter(text, values) {
@@ -47,21 +53,57 @@ export function renderStarter(text, values) {
   });
 }
 
-export function replaceToolVariables(text, indexes) {
+// Finds the `tools:` block-list in YAML frontmatter, if any.
+// Returns { end, toolsIndex, blockEnd } where toolsIndex/blockEnd mark the
+// list items' line range, or null if there's no frontmatter, no `tools:`
+// key, or the field isn't a plain empty-list/block-list.
+function findToolsBlock(lines) {
+  if (lines[0]?.trim() !== '---') return null;
+  const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+  if (end < 0) return null;
+  const toolsIndex = lines.findIndex((line, index) => index > 0 && index < end && /^tools\s*:/.test(line));
+  if (toolsIndex < 0) return { end, toolsIndex: -1, blockEnd: -1 };
+  const toolsLine = lines[toolsIndex].trim();
+  if (/^tools\s*:\s*\[\s*\]$/.test(toolsLine)) return { end, toolsIndex, blockEnd: toolsIndex + 1 };
+  if (!/^tools\s*:\s*$/.test(toolsLine)) return null;
+  let blockEnd = toolsIndex + 1;
+  while (blockEnd < end && (!lines[blockEnd].trim() || /^\s+-\s/.test(lines[blockEnd]))) blockEnd += 1;
+  if (blockEnd < end && /^\s/.test(lines[blockEnd])) return null;
+  return { end, toolsIndex, blockEnd };
+}
+
+// Reads the real tool names currently listed under YAML frontmatter `tools:`.
+// Tolerant: returns [] for missing/malformed frontmatter instead of throwing,
+// and drops any stale `[TOOL N]`-style bracket entry left over from a
+// template saved before tool names were written directly.
+export function currentToolNames(text) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const found = findToolsBlock(lines);
+  if (!found || found.toolsIndex < 0) return [];
+  const names = [];
+  for (let i = found.toolsIndex + 1; i < found.blockEnd; i++) {
+    const match = lines[i].match(/^\s*-\s*"?([^"\r\n]*?)"?\s*$/);
+    const name = match?.[1]?.trim();
+    if (name && !/^\[.*\]$/.test(name)) names.push(name);
+  }
+  return names;
+}
+
+export function replaceToolVariables(text, toolNames) {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   if (lines[0]?.trim() !== '---') throw new Error('Add tools only to an agent definition with YAML frontmatter.');
   let end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
   if (end < 0) throw new Error('The agent definition is missing its YAML frontmatter closing delimiter.');
   let toolsIndex = lines.findIndex((line, index) => index > 0 && index < end && /^tools\s*:/.test(line));
   if (toolsIndex < 0) {
-    lines.splice(end, 0, indexes.length ? 'tools:' : 'tools: []');
-    if (!indexes.length) return lines.join('\n');
+    lines.splice(end, 0, toolNames.length ? 'tools:' : 'tools: []');
+    if (!toolNames.length) return lines.join('\n');
     toolsIndex = end;
     end += 1;
   }
   const toolsLine = lines[toolsIndex].trim();
   if (/^tools\s*:\s*\[\s*\]$/.test(toolsLine)) {
-    if (!indexes.length) return lines.join('\n');
+    if (!toolNames.length) return lines.join('\n');
     lines[toolsIndex] = 'tools:';
   } else if (!/^tools\s*:\s*$/.test(toolsLine)) {
     throw new Error('The tools field must be an empty list or a block list before adding a tool.');
@@ -71,30 +113,31 @@ export function replaceToolVariables(text, indexes) {
   if (blockEnd < end && /^\s/.test(lines[blockEnd])) {
     throw new Error('The tools field contains an unsupported YAML entry.');
   }
-  lines.splice(toolsIndex + 1, blockEnd - toolsIndex - 1, ...indexes.map(index => `  - "[TOOL ${index}]"`));
-  if (!indexes.length) lines[toolsIndex] = 'tools: []';
+  lines.splice(toolsIndex + 1, blockEnd - toolsIndex - 1, ...toolNames.map(name => `  - ${name}`));
+  if (!toolNames.length) lines[toolsIndex] = 'tools: []';
   return lines.join('\n');
 }
 
-export function addToolParameterVariables(instructions, toolIndex, descriptions = {}) {
-  let inParameters = false;
-  return instructions.split(/\r?\n/).map(line => {
-    if (line.trim() === 'Parameters:') {
-      inParameters = true;
-      return line;
+// Sets or inserts top-level scalar fields (e.g. remind_every_turn, tool_reminder) in
+// YAML frontmatter. Updates an existing `key: ...` line in place, or appends a new
+// one just before the closing `---` when the key isn't present yet.
+export function setFrontmatterFields(text, fields) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  if (lines[0]?.trim() !== '---') throw new Error('This definition has no YAML frontmatter to update.');
+  let end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+  if (end < 0) throw new Error('The agent definition is missing its YAML frontmatter closing delimiter.');
+  for (const [key, rawValue] of fields) {
+    const line = `${key}: ${rawValue}`;
+    const existingIndex = lines.findIndex((entry, index) =>
+      index > 0 && index < end && new RegExp(`^${key}\\s*:`).test(entry));
+    if (existingIndex >= 0) {
+      lines[existingIndex] = line;
+    } else {
+      lines.splice(end, 0, line);
+      end += 1;
     }
-    if (inParameters && line.trim().startsWith('Return format:')) inParameters = false;
-    const match = inParameters && line.match(/^(-\s+)(.+?):\s*(.*)$/);
-    if (!match) return line;
-    const parameterName = match[2].replace(/\s*\(required\)$/i, '');
-    const tokenName = parameterName.toUpperCase()
-      .replace(/[^A-Z0-9 _-]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim() || 'VALUE';
-    const variable = `TOOL ${toolIndex} ${tokenName}`.slice(0, 63).trimEnd();
-    if (match[3]?.trim()) descriptions[variable] = match[3].trim();
-    return `${match[1]}${match[2]}: [${variable}]${match[3] ? ` - ${match[3]}` : ''}`;
-  }).join('\n');
+  }
+  return lines.join('\n');
 }
 
 export function starterEditorText(node) {
@@ -191,6 +234,9 @@ export function createPromptStarter(container, { embed = false } = {}) {
       <button type="button" class="btn btn-sm" data-starter="tpl-save" title="Save current editor as a reusable template">Save as Template</button>
       <button type="button" class="btn btn-sm" data-starter="tpl-delete" title="Delete the selected template" disabled>Delete</button>
       <button type="button" class="btn btn-sm" data-starter="tpl-load-generic" title="Load the generic prompt from the server">Load Generic</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-sm btn-primary" data-starter="new-agent-wizard"
+              title="Reopen the setup dialog to start a new agent">New Agent…</button>
     </div>
     <p class="small text-danger" role="alert" data-starter="error"></p>
     <div class="sd-starter-layout">
@@ -208,8 +254,6 @@ export function createPromptStarter(container, { embed = false } = {}) {
         <div class="sd-starter-fields-head">
           <h3>Variables</h3>
           <button type="button" class="btn btn-sm" data-starter="ai-fill-toolbar" title="Fill a variable with an LLM response">AI Fill</button>
-          <button type="button" class="btn btn-sm btn-primary" data-starter="ai-chain-fill"
-                  title="Generate every unfilled variable in order; each step uses the already-accepted ones as context">Chain Fill</button>
           <button type="button" class="btn btn-sm" data-starter="save-all-choices">Save All</button>
         </div>
         <div data-starter="fields"></div>
@@ -239,6 +283,56 @@ export function createPromptStarter(container, { embed = false } = {}) {
         <div class="workspace-save-actions">
           <button type="button" class="btn" data-starter="tool-picker-cancel">Cancel</button>
           <button type="button" class="btn btn-primary" data-starter="tool-picker-apply">Add selected tools</button>
+        </div>
+      </section>
+    </dialog>
+    <dialog class="sd-agent-setup-modal" data-starter="setup-dialog" aria-labelledby="sd-setup-title">
+      <section class="sd-agent-setup-panel">
+        <div class="sd-starter-tool-picker-head">
+          <h3 id="sd-setup-title">New Agent</h3>
+        </div>
+        <p class="small text-muted">Set up the basics, then the wizard will help write the rest.</p>
+        <div class="sd-agent-setup-body">
+          <div class="sd-agent-setup-row">
+            <label class="small">Kind
+              <select class="form-select form-select-sm" data-starter="setup-kind">
+                <option value="agent">Agent (Markdown)</option>
+                <option value="subagent">Sub-agent (YAML)</option>
+              </select>
+            </label>
+          </div>
+          <div class="sd-agent-setup-row">
+            <label class="small" data-starter="setup-name-label"><span>Agent Name</span>
+              <input class="form-input" data-starter="setup-name" placeholder="e.g. Report Builder"></label>
+          </div>
+          <div class="sd-agent-setup-row">
+            <label class="small" data-starter="setup-id-label"><span>Agent ID</span>
+              <input class="form-input" data-starter="setup-id" placeholder="auto-generated"></label>
+          </div>
+          <div class="sd-agent-setup-row" data-starter="setup-description-row">
+            <label class="small">Description
+              <textarea class="form-input" rows="3" data-starter="setup-description"
+                        placeholder="A short description of what this agent does"></textarea></label>
+          </div>
+          <div class="sd-agent-setup-row sd-agent-setup-tools" data-starter="setup-tools-row">
+            <div class="sd-starter-fields-head">
+              <span class="small">Required tools</span>
+              <button type="button" class="btn btn-sm" data-starter="setup-add-tools">+ Add required tools</button>
+            </div>
+            <div class="sq-chip-row" data-starter="setup-tool-chips"></div>
+          </div>
+          <div class="sd-agent-setup-row" data-starter="setup-reminder-row">
+            <label class="small sd-agent-setup-checkbox-row">
+              <input type="checkbox" data-starter="setup-remind"> Remind every turn
+            </label>
+            <textarea class="form-input" rows="2" data-starter="setup-reminder-text" disabled
+                      placeholder="Leave blank to generate automatically once the rest of the prompt is written"></textarea>
+          </div>
+          <p class="small text-danger" role="alert" data-starter="setup-error"></p>
+        </div>
+        <div class="workspace-save-actions">
+          <button type="button" class="btn" data-starter="setup-cancel">Cancel</button>
+          <button type="button" class="btn btn-primary" data-starter="setup-start">Start Wizard</button>
         </div>
       </section>
     </dialog>
@@ -291,6 +385,10 @@ export function createPromptStarter(container, { embed = false } = {}) {
             <div data-starter="ai-context-identity-wrap" hidden>
               <p class="small text-muted sd-starter-ai-context-label">Agent identity</p>
               <div class="sd-starter-ai-context" data-starter="ai-context-identity"></div>
+            </div>
+            <div data-starter="ai-context-tools-wrap" hidden>
+              <p class="small text-muted sd-starter-ai-context-label">Available tools</p>
+              <div class="sd-starter-ai-context" data-starter="ai-context-tools"></div>
             </div>
             <div data-starter="ai-context-accepted-wrap" hidden>
               <p class="small text-muted sd-starter-ai-context-label">Previously accepted variables</p>
@@ -397,7 +495,6 @@ export function createPromptStarter(container, { embed = false } = {}) {
   // regardless of whether `dialog` is a real <dialog> or a plain <div>.
   function showHost() { if (!embed) dialog.showModal(); }
   function closeHost() { if (!embed) dialog.close(); }
-  function isHostOpen() { return embed || dialog.open; }
   const fields = dialog.querySelector('[data-starter="fields"]');
   const editor = dialog.querySelector('[data-starter="editor"]');
   const picker = dialog.querySelector('[data-starter="picker"]');
@@ -430,6 +527,21 @@ export function createPromptStarter(container, { embed = false } = {}) {
   const createAgentButton = dialog.querySelector('[data-starter="create-agent"]');
   const createSquadButton = dialog.querySelector('[data-starter="create-squad"]');
   const applyToEditorButton = dialog.querySelector('[data-starter="apply-to-editor"]');
+  const setupDialog = dialog.querySelector('[data-starter="setup-dialog"]');
+  const setupTitle = dialog.querySelector('#sd-setup-title');
+  const setupKindSelect = dialog.querySelector('[data-starter="setup-kind"]');
+  const setupNameLabel = dialog.querySelector('[data-starter="setup-name-label"]');
+  const setupNameInput = dialog.querySelector('[data-starter="setup-name"]');
+  const setupIdLabel = dialog.querySelector('[data-starter="setup-id-label"]');
+  const setupIdInput = dialog.querySelector('[data-starter="setup-id"]');
+  const setupDescriptionRow = dialog.querySelector('[data-starter="setup-description-row"]');
+  const setupDescriptionInput = dialog.querySelector('[data-starter="setup-description"]');
+  const setupToolsRow = dialog.querySelector('[data-starter="setup-tools-row"]');
+  const setupToolChips = dialog.querySelector('[data-starter="setup-tool-chips"]');
+  const setupReminderRow = dialog.querySelector('[data-starter="setup-reminder-row"]');
+  const setupRemindCheckbox = dialog.querySelector('[data-starter="setup-remind"]');
+  const setupReminderInput = dialog.querySelector('[data-starter="setup-reminder-text"]');
+  const setupError = dialog.querySelector('[data-starter="setup-error"]');
   const aiDialog = dialog.querySelector('[data-starter="ai-dialog"]');
   const aiRequestPane = dialog.querySelector('[data-starter="ai-request"]');
   const aiResponsePane = dialog.querySelector('[data-starter="ai-response"]');
@@ -443,6 +555,8 @@ export function createPromptStarter(container, { embed = false } = {}) {
   const aiResultsList = dialog.querySelector('[data-starter="ai-results-list"]');
   const aiContextIdentityWrap = dialog.querySelector('[data-starter="ai-context-identity-wrap"]');
   const aiContextIdentityList = dialog.querySelector('[data-starter="ai-context-identity"]');
+  const aiContextToolsWrap = dialog.querySelector('[data-starter="ai-context-tools-wrap"]');
+  const aiContextToolsList = dialog.querySelector('[data-starter="ai-context-tools"]');
   const aiContextAcceptedWrap = dialog.querySelector('[data-starter="ai-context-accepted-wrap"]');
   const aiContextAcceptedList = dialog.querySelector('[data-starter="ai-context-accepted"]');
   const aiContextAdditionPreview = dialog.querySelector('[data-starter="ai-context-addition-preview"]');
@@ -480,6 +594,8 @@ export function createPromptStarter(container, { embed = false } = {}) {
   let toolPickerSelection = new Set();
   let toolPickerReturnFocus = null;
   let applyTarget = null;
+  let setupResolve = null;
+  let pendingToolReminder = false;
   const maximizeBtn = dialog.querySelector('[data-starter="maximize"]');
 
   function toggleMaximize() {
@@ -620,7 +736,6 @@ export function createPromptStarter(container, { embed = false } = {}) {
   }
 
   function showError(err) { error.textContent = err.message || String(err); }
-  function isToolParameterVariable(name) { return /^TOOL \d+ [A-Z0-9 _-]+$/.test(name); }
   function isToolPickerVariable(name) { return /^TOOL \d+$/.test(name); }
   function isCatalogVariable(name) {
     return isToolPickerVariable(name) || name === 'SUB-AGENT ID' || name === 'SUBAGENT ID';
@@ -643,11 +758,11 @@ export function createPromptStarter(container, { embed = false } = {}) {
     return marker ? text.slice(0, marker.index).replace(/\s+$/, '') : text;
   }
   function finishedPrompt() { return renderStarter(editorText(), values); }
-  // Bakes every filled, non-tool variable's text directly into the editor, leaving tool
-  // placeholders (TOOL N / TOOL N <PARAM>) as live tokens so tool management keeps working.
+  // Bakes every filled, non-tool variable's text directly into the editor, leaving any
+  // legacy TOOL N placeholder as a live token so tool management keeps working.
   function bakeFilledVariables(text) {
     return text.replace(VARIABLE, (match, name) => {
-      if (isToolPickerVariable(name) || isToolParameterVariable(name)) return match;
+      if (isToolPickerVariable(name)) return match;
       const value = (values[name] || values[name.replace(/-/g, ' ')])?.trim();
       return value || match;
     });
@@ -681,15 +796,9 @@ export function createPromptStarter(container, { embed = false } = {}) {
       token.setAttribute('aria-label', `${name}: ${values[name]?.trim() || 'unfilled'}`);
     });
   }
-  function selectedToolNames() {
-    return Object.entries(values)
-      .filter(([name, value]) => /^TOOL \d+$/.test(name) && value?.trim())
-      .map(([variable, value]) => ({ index: Number(variable.slice(5)), name: value.trim() }))
-      .sort((left, right) => left.index - right.index);
-  }
   async function refreshToolInstructions() {
     const request = ++toolInstructionsRequest;
-    const selected = selectedToolNames().filter(entry => tools.some(tool => tool.name === entry.name));
+    const selected = currentToolNames(editorText()).filter(name => tools.some(tool => tool.name === name));
     const body = promptBodyText();
     toolInstructionEntries = [];
     renderEditor(body);
@@ -700,12 +809,11 @@ export function createPromptStarter(container, { embed = false } = {}) {
     }
     toolInstructionsState = 'loading';
     try {
-      const entries = await Promise.all(selected.map(async ({ index, name }) => {
+      const entries = await Promise.all(selected.map(async name => {
         const result = await Api.getStarterToolInstructions(name);
         const lines = result.content.split(/\r?\n/);
-        const parameterDescriptions = {};
-        const description = addToolParameterVariables(lines.slice(1).join('\n').trim(), index, parameterDescriptions);
-        return { name, description, parameterDescriptions };
+        const description = lines.slice(1).join('\n').trim();
+        return { name, description };
       }));
       if (request !== toolInstructionsRequest || disposed) return;
       toolInstructionEntries = entries;
@@ -828,7 +936,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
       showError(new Error('The tool catalog is not available yet. Close and reopen Prompt Starter to retry.'));
       return;
     }
-    toolPickerSelection = new Set(selectedToolNames().map(tool => tool.name));
+    toolPickerSelection = new Set(currentToolNames(editorText()));
     toolPickerReturnFocus = trigger;
     toolPickerError.textContent = '';
     toolFilter.value = '';
@@ -843,24 +951,17 @@ export function createPromptStarter(container, { embed = false } = {}) {
     toolPickerReturnFocus = null;
   }
   function applyToolSelection() {
-    const currentTools = selectedToolNames();
-    const indexByName = new Map(currentTools.map(tool => [tool.name, tool.index]));
-    const frontmatterNumbers = [...editorText().matchAll(/\[TOOL (\d+)\]/g)].map(match => Number(match[1]));
-    let nextIndex = Math.max(0, ...frontmatterNumbers);
-    const assignments = [...toolPickerSelection].map(name => ({
-      name,
-      index: indexByName.get(name) || ++nextIndex,
-    }));
+    const existing = currentToolNames(editorText());
+    const finalNames = [
+      ...existing.filter(name => toolPickerSelection.has(name)),
+      ...[...toolPickerSelection].filter(name => !existing.includes(name)),
+    ];
     try {
-      const updatedText = replaceToolVariables(editorText(), assignments.map(tool => tool.index));
-      const retained = new Set(assignments.map(tool => `TOOL ${tool.index}`));
-      Object.keys(values).forEach(name => {
-        if (/^TOOL \d+$/.test(name) && !retained.has(name)) delete values[name];
-      });
-      assignments.forEach(tool => { values[`TOOL ${tool.index}`] = tool.name; });
+      const updatedText = replaceToolVariables(editorText(), finalNames);
       variablesKey = '';
       renderEditor(updatedText);
       renderFields();
+      renderSetupToolChips();
       closeToolPicker();
       refreshToolInstructions();
     } catch (err) {
@@ -870,6 +971,123 @@ export function createPromptStarter(container, { embed = false } = {}) {
   function addToolVariable() {
     openToolPicker();
   }
+
+  // --- Agent Setup Dialog: upfront step shown when launching a fresh wizard session ---
+  function renderSetupToolChips() {
+    const names = [...toolPickerSelection];
+    setupToolChips.innerHTML = names.map(name => `<span class="sq-chip">${esc(name)}
+      <button type="button" class="sq-chip-x" data-starter="setup-remove-tool" data-tool="${esc(name)}"
+              aria-label="Remove ${esc(name)}">×</button></span>`).join('');
+  }
+  function updateSetupKindVisibility() {
+    const isSubagent = setupKindSelect.value === 'subagent';
+    setupTitle.textContent = isSubagent ? 'New Sub-agent' : 'New Agent';
+    setupNameLabel.querySelector('span').textContent = isSubagent ? 'Sub-agent Name' : 'Agent Name';
+    setupIdLabel.querySelector('span').textContent = isSubagent ? 'Sub-agent ID' : 'Agent ID';
+    setupDescriptionRow.hidden = isSubagent;
+    setupToolsRow.hidden = isSubagent;
+    setupReminderRow.hidden = isSubagent;
+  }
+  function closeSetupDialog(outcome) {
+    const resolve = setupResolve;
+    setupResolve = null;
+    if (setupDialog.open) setupDialog.close();
+    if (resolve) resolve(outcome);
+  }
+  // Shows the Setup Dialog and resolves once it's dismissed: 'started' if the
+  // user confirmed Start Wizard (values/tools are already seeded by then), or
+  // 'cancelled' if they backed out (caller falls back to its old behavior).
+  function openSetupDialog() {
+    setupError.textContent = '';
+    setupKindSelect.value = tplSelect.value === 'subagent' ? 'subagent' : 'agent';
+    setupKindSelect.disabled = Boolean(applyTarget);
+    const presetName = applyTarget?.agentName || '';
+    setupNameInput.value = presetName;
+    setupIdInput.value = applyTarget?.agentId || (presetName ? toAgentId(presetName) : '');
+    setupIdInput.readOnly = Boolean(applyTarget);
+    setupDescriptionInput.value = '';
+    setupRemindCheckbox.checked = false;
+    setupReminderInput.value = '';
+    setupReminderInput.disabled = true;
+    pendingToolReminder = false;
+    toolPickerSelection = new Set();
+    renderSetupToolChips();
+    updateSetupKindVisibility();
+    return new Promise(resolve => {
+      setupResolve = resolve;
+      setupDialog.showModal();
+      setupNameInput.focus();
+    });
+  }
+  async function handleSetupStart(button) {
+    const name = setupNameInput.value.trim();
+    if (!name) { setupError.textContent = 'Enter a name.'; return; }
+    const kind = setupKindSelect.value === 'subagent' ? 'subagent' : 'agent';
+    const id = applyTarget?.agentId || (normalizeAgentId(setupIdInput.value) || toAgentId(name));
+    setupIdInput.value = id;
+    const currentKind = tplSelect.value === 'subagent' ? 'subagent' : 'agent';
+    if (kind !== currentKind) {
+      tplSelect.value = kind;
+      tplDeleteBtn.disabled = true;
+      applyTemplate(kind);
+    }
+    const nameVariable = kind === 'subagent' ? 'SUB-AGENT NAME' : 'AGENT NAME';
+    const idVariable = kind === 'subagent' ? 'SUB-AGENT ID' : 'AGENT ID';
+    values[nameVariable] = name;
+    values[idVariable] = id;
+    updateTokens(nameVariable);
+    updateTokens(idVariable);
+    if (kind === 'agent') {
+      values['DESCRIPTION'] = setupDescriptionInput.value.trim();
+      updateTokens('DESCRIPTION');
+      try {
+        let updated = replaceToolVariables(editorText(), [...toolPickerSelection]);
+        const reminderText = setupReminderInput.value.trim();
+        if (setupRemindCheckbox.checked && reminderText) {
+          updated = setFrontmatterFields(updated, [
+            ['remind_every_turn', 'true'],
+            ['tool_reminder', JSON.stringify(reminderText)],
+          ]);
+          pendingToolReminder = false;
+        } else {
+          // Checked but left blank: generate the wording as the last chain-fill
+          // step, once Execution Instructions exists to condense it from.
+          pendingToolReminder = setupRemindCheckbox.checked && toolPickerSelection.size > 0;
+        }
+        renderEditor(updated);
+      } catch (err) {
+        setupError.textContent = err.message || String(err);
+        return;
+      }
+      button.disabled = true;
+      await refreshToolInstructions();
+      button.disabled = false;
+      if (disposed) return;
+    }
+    variablesKey = '';
+    renderFields();
+    closeSetupDialog('started');
+    if (kind === 'agent') startChainFill();
+  }
+  setupKindSelect.addEventListener('change', updateSetupKindVisibility);
+  setupRemindCheckbox.addEventListener('change', () => {
+    setupReminderInput.disabled = !setupRemindCheckbox.checked;
+    if (setupRemindCheckbox.checked) setupReminderInput.focus();
+  });
+  setupNameInput.addEventListener('input', () => {
+    if (!setupIdInput.readOnly) setupIdInput.value = toAgentId(setupNameInput.value);
+  });
+  setupIdInput.addEventListener('change', () => {
+    if (setupIdInput.readOnly) return;
+    setupIdInput.value = normalizeAgentId(setupIdInput.value) || toAgentId(setupNameInput.value);
+  });
+  setupDialog.addEventListener('cancel', event => {
+    event.preventDefault();
+    closeSetupDialog('cancelled');
+  });
+  setupDialog.addEventListener('close', () => {
+    if (setupResolve) { const resolve = setupResolve; setupResolve = null; resolve('cancelled'); }
+  });
 
   // --- AI variable fill -----------------------------------------------------
   let aiModelsLoaded = false;
@@ -932,12 +1150,10 @@ export function createPromptStarter(container, { embed = false } = {}) {
   function aiDescriptionKey(name) {
     return `AI DESCRIPTION ${name}`.slice(0, 64).trimEnd();
   }
-  // A variable's description: the user-saved one, else a tool parameter's, else the built-in default.
+  // A variable's description: the user-saved one, else the built-in default.
   function variableDescription(name) {
     const saved = (choices[aiDescriptionKey(name)] || []).slice(-1)[0];
-    if (saved) return saved;
-    const parameterDescriptions = Object.assign({}, ...toolInstructionEntries.map(entry => entry.parameterDescriptions));
-    return parameterDescriptions[name] || STARTER_VARIABLE_DESCRIPTIONS[name] || '';
+    return saved || STARTER_VARIABLE_DESCRIPTIONS[name] || '';
   }
   function populateAiPreprompts() {
     const saved = choices[aiPrepromptKey(aiTargetSelect.value)] || [];
@@ -992,7 +1208,8 @@ export function createPromptStarter(container, { embed = false } = {}) {
     return label;
   }
   function aiContextCheckedInputs() {
-    return [...aiContextIdentityList.querySelectorAll('input'), ...aiContextAcceptedList.querySelectorAll('input')];
+    return [...aiContextIdentityList.querySelectorAll('input'), ...aiContextToolsList.querySelectorAll('input'),
+            ...aiContextAcceptedList.querySelectorAll('input')];
   }
   function updateAiAdditionPreview() {
     const addition = aiAddition.value.trim();
@@ -1001,15 +1218,15 @@ export function createPromptStarter(container, { embed = false } = {}) {
   }
   function renderAiContext() {
     const target = aiTargetSelect.value;
-    // Selected tools (bare TOOL N) are useful context for writing role/responsibilities text;
-    // their injected parameter placeholders (TOOL N <PARAM>) are just documentation tokens and
-    // would only add noise, so they're left out here.
     const entries = Object.entries(values)
-      .filter(([name, value]) => name !== target && value?.trim() && !isToolParameterVariable(name));
+      .filter(([name, value]) => name !== target && value?.trim());
     const identity = entries.filter(([name]) => CHAIN_SEED_VARIABLES.includes(name));
     const accepted = entries.filter(([name]) => !CHAIN_SEED_VARIABLES.includes(name));
     aiContextIdentityWrap.hidden = !identity.length;
     aiContextIdentityList.replaceChildren(...identity.map(([name, value]) => buildContextRow(name, value)));
+    aiContextToolsWrap.hidden = !toolInstructionEntries.length;
+    aiContextToolsList.replaceChildren(
+      ...toolInstructionEntries.map(entry => buildContextRow(entry.name, entry.description)));
     aiContextAcceptedWrap.hidden = !accepted.length;
     aiContextAcceptedList.replaceChildren(...accepted.map(([name, value]) => buildContextRow(name, value)));
     updateAiAdditionPreview();
@@ -1035,8 +1252,12 @@ export function createPromptStarter(container, { embed = false } = {}) {
     }
   }
   function openAiDialog(targetName = '', prePrompt = null) {
-    const variables = starterVariables(editorText())
-      .filter(name => !isCatalogVariable(name) && !isToolParameterVariable(name));
+    const bodyVariables = starterVariables(editorText())
+      .filter(name => !isCatalogVariable(name));
+    // Offer the tool reminder as a fillable target too, whenever tools exist — both
+    // for the automatic end-of-chain step and as a manually pickable "AI Fill" target.
+    const variables = currentToolNames(editorText()).length
+      ? [...bodyVariables, 'TOOL REMINDER'] : bodyVariables;
     if (!variables.length) {
       showError(new Error('Add a variable placeholder to the prompt before using AI fill.'));
       return;
@@ -1076,10 +1297,13 @@ export function createPromptStarter(container, { embed = false } = {}) {
     if (targetDescription) prompt += ` ${target} means: ${targetDescription}`;
     prompt += ' Output only the text for this variable — no section heading and no preamble.';
     if (chosen.length) {
-      prompt += '\n\nContext — already-filled variables of this agent prompt:\n' + chosen.map(name => {
-        const described = variableDescription(name);
-        return `- ${name}${described ? ` (${described})` : ''}: ${values[name].trim()}`;
-      }).join('\n');
+      prompt += '\n\nContext — already-filled variables and available tools of this agent prompt:\n'
+        + chosen.map(name => {
+          const toolEntry = toolInstructionEntries.find(entry => entry.name === name);
+          if (toolEntry) return `- Tool: ${name}\n  ${toolEntry.description.replace(/\n/g, '\n  ')}`;
+          const described = variableDescription(name);
+          return `- ${name}${described ? ` (${described})` : ''}: ${values[name].trim()}`;
+        }).join('\n');
     }
     aiBusy = true;
     button.disabled = true;
@@ -1126,6 +1350,16 @@ export function createPromptStarter(container, { embed = false } = {}) {
   // Fills the variable's text area in the Variables panel (and the value used by the
   // finished prompt) without rewriting the token shown in the Markdown editor.
   function aiApplyToVariable(variable, text) {
+    if (variable === 'TOOL REMINDER') {
+      try {
+        renderEditor(setFrontmatterFields(editorText(), [
+          ['remind_every_turn', 'true'],
+          ['tool_reminder', JSON.stringify(text.trim())],
+        ]));
+        renderFields();
+      } catch (err) { showError(err); }
+      return;
+    }
     values[variable] = text;
     showVariableField(variable, true);
     fields.querySelector('[data-starter-value]')?.scrollIntoView({ block: 'nearest' });
@@ -1177,8 +1411,12 @@ export function createPromptStarter(container, { embed = false } = {}) {
   }
   function startChainFill() {
     const variables = starterVariables(editorText())
-      .filter(name => !isCatalogVariable(name) && !isToolParameterVariable(name));
+      .filter(name => !isCatalogVariable(name));
     const queue = variables.filter(name => !values[name]?.trim() && !CHAIN_SEED_VARIABLES.includes(name));
+    if (pendingToolReminder && currentToolNames(editorText()).length) {
+      queue.push('TOOL REMINDER');
+      pendingToolReminder = false;
+    }
     if (!queue.length) {
       showError(new Error('All variables are already filled; nothing to chain-fill.'));
       return;
@@ -1301,9 +1539,8 @@ export function createPromptStarter(container, { embed = false } = {}) {
   function renderFields() {
     const variables = starterVariables(editorText())
       .filter(name => !isCatalogVariable(name));
-    const parameterDescriptions = Object.assign({}, ...toolInstructionEntries.map(entry => entry.parameterDescriptions));
     if (!variables.includes(currentVariable)) currentVariable = variables[0] || '';
-    const key = variables.map(name => `${name}:${parameterDescriptions[name] || ''}`).join('\n') + `\n@${currentVariable}`;
+    const key = variables.join('\n') + `\n@${currentVariable}`;
     if (variablesKey === key) return;
     variablesKey = key;
     if (!variables.length) {
@@ -1312,7 +1549,6 @@ export function createPromptStarter(container, { embed = false } = {}) {
     }
     const name = currentVariable;
     const index = variables.indexOf(name);
-    const description = parameterDescriptions[name];
     fields.innerHTML = `<div class="sd-starter-field-nav">
         <button type="button" class="btn btn-sm" data-starter="field-prev" title="Previous variable"${index === 0 ? ' disabled' : ''}>‹</button>
         <select class="form-select" data-starter="field-jump" aria-label="Choose variable">
@@ -1323,7 +1559,6 @@ export function createPromptStarter(container, { embed = false } = {}) {
         <button type="button" class="btn btn-sm" data-starter="field-next" title="Next variable"${index === variables.length - 1 ? ' disabled' : ''}>›</button>
       </div>
       <div class="sd-starter-field" data-variable="${esc(name)}">
-        ${description ? `<p class="sd-starter-field-description">${esc(description)}</p>` : ''}
         ${(choices[name] || []).length ? `<div class="sd-starter-choice-list" aria-label="Saved choices for ${esc(name)}">
           ${(choices[name] || []).map(value => `<div class="sd-starter-choice-row">
             <button type="button" class="sd-starter-choice" data-starter="use-choice" title="${esc(value)}">${esc(truncateOption(value))}</button>
@@ -1668,6 +1903,10 @@ export function createPromptStarter(container, { embed = false } = {}) {
       event.preventDefault();
       restorePendingSubagent();
       hideCreateForm();
+    } else if (!isUntouched() && !confirm(
+      'Close Prompt Starter? This discards the current unfinished prompt (saved choices are kept).'
+    )) {
+      event.preventDefault();
     }
   });
   fields.addEventListener('input', event => {
@@ -1711,6 +1950,9 @@ export function createPromptStarter(container, { embed = false } = {}) {
     status.textContent = '';
     if (action === 'close') {
       if (popoutWindow) { doPopin(); return; }
+      if (!isUntouched() && !confirm(
+        'Close Prompt Starter? This discards the current unfinished prompt (saved choices are kept).'
+      )) return;
       if (pendingSubagentCreation) restorePendingSubagent();
       if (toolPicker.open) closeToolPicker();
       picker.hidden = true;
@@ -1756,6 +1998,14 @@ export function createPromptStarter(container, { embed = false } = {}) {
       addToolVariable();
       return;
     }
+    if (action === 'setup-cancel') { closeSetupDialog('cancelled'); return; }
+    if (action === 'setup-add-tools') { openToolPicker(button); return; }
+    if (action === 'setup-remove-tool') {
+      toolPickerSelection.delete(button.dataset.tool);
+      renderSetupToolChips();
+      return;
+    }
+    if (action === 'setup-start') { handleSetupStart(button); return; }
     if (action === 'use-choice') {
       const field = button.closest('[data-variable]');
       if (!field) return;
@@ -1788,7 +2038,6 @@ export function createPromptStarter(container, { embed = false } = {}) {
       return;
     }
     if (action === 'ai-fill-toolbar') { openAiDialog(); return; }
-    if (action === 'ai-chain-fill') { startChainFill(); return; }
     if (action === 'ai-accept-next') { aiAcceptNext(); return; }
     if (action === 'ai-skip') { aiSkip(); return; }
     if (action === 'ai-copy-finished') {
@@ -1822,7 +2071,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
     if (action === 'ai-clear-restart') {
       if (!confirm('Clear the generated variables and run the chain again? The seed (agent name, ID, description) is kept.')) return;
       starterVariables(editorText())
-        .filter(name => !isCatalogVariable(name) && !isToolParameterVariable(name) && !CHAIN_SEED_VARIABLES.includes(name))
+        .filter(name => !isCatalogVariable(name) && !CHAIN_SEED_VARIABLES.includes(name))
         .forEach(name => { delete values[name]; updateTokens(name); });
       variablesKey = '';
       renderFields();
@@ -1894,7 +2143,7 @@ export function createPromptStarter(container, { embed = false } = {}) {
     }
     if (action === 'save-all-choices') {
       const toSave = Object.entries(values)
-        .filter(([name, val]) => val?.trim() && !isCatalogVariable(name) && !isToolParameterVariable(name));
+        .filter(([name, val]) => val?.trim() && !isCatalogVariable(name));
       if (!toSave.length) { showError(new Error('No variable values to save.')); return; }
       button.disabled = true;
       status.textContent = 'Saving…';
@@ -1980,6 +2229,20 @@ export function createPromptStarter(container, { embed = false } = {}) {
       finally { button.disabled = false; }
       return;
     }
+    if (action === 'new-agent-wizard') {
+      if (!catalogReady) {
+        showError(new Error('The tool catalog is not available yet. Wait for Prompt Starter to finish loading and try again.'));
+        return;
+      }
+      if (!isUntouched() && !confirm(
+        'Start a new agent? This discards the current unfinished prompt (saved choices are kept).'
+      )) return;
+      tplSelect.value = 'agent';
+      tplDeleteBtn.disabled = true;
+      applyTemplate('agent');
+      await openSetupDialog();
+      return;
+    }
 
     // --- Choice saving ---
     if (action === 'save-choice' || action === 'picker-save') {
@@ -2042,15 +2305,22 @@ export function createPromptStarter(container, { embed = false } = {}) {
         let promptToSave = promptText;
         let agentTools = null;
         let agentToolMode = null;
+        let remindEveryTurn = false;
+        let toolReminder = '';
         if (promptText.startsWith('---')) {
           const definition = await Api.parseStarterAgentDefinition(promptText);
           promptToSave = definition.prompt;
           agentTools = definition.tools;
           agentToolMode = definition.mode;
+          remindEveryTurn = Boolean(definition.remind_every_turn);
+          toolReminder = definition.tool_reminder || '';
         }
         await Api.setAgentPrompt(applyTarget.agentId, promptToSave);
         if (agentTools !== null && agentTools.length) {
           await Api.setAgentTools('prompt', applyTarget.agentId, agentTools, agentToolMode);
+        }
+        if (remindEveryTurn && toolReminder) {
+          await Api.setAgentReminder('prompt', applyTarget.agentId, remindEveryTurn, toolReminder);
         }
         status.textContent = '';
         closeHost();
@@ -2179,6 +2449,8 @@ export function createPromptStarter(container, { embed = false } = {}) {
         let description = '';
         let agentTools = null;
         let agentToolMode = null;
+        let remindEveryTurn = false;
+        let toolReminder = '';
         if (kind === 'agent' && promptText.startsWith('---')) {
           createStatus.textContent = 'Validating agent definition…';
           const definition = await Api.parseStarterAgentDefinition(promptText);
@@ -2189,6 +2461,8 @@ export function createPromptStarter(container, { embed = false } = {}) {
           description = definition.description || '';
           agentTools = definition.tools;
           agentToolMode = definition.mode;
+          remindEveryTurn = Boolean(definition.remind_every_turn);
+          toolReminder = definition.tool_reminder || '';
         }
         if (mode === 'squad') {
           createStatus.textContent = 'Creating squad…';
@@ -2199,6 +2473,10 @@ export function createPromptStarter(container, { embed = false } = {}) {
         if (agentTools !== null) {
           createStatus.textContent = 'Saving selected tools…';
           await Api.setAgentTools('prompt', agentId, agentTools, agentToolMode);
+        }
+        if (remindEveryTurn && toolReminder) {
+          createStatus.textContent = 'Saving reminder…';
+          await Api.setAgentReminder('prompt', agentId, remindEveryTurn, toolReminder);
         }
         createStatus.textContent = 'Setting prompt…';
         await Api.setAgentPrompt(agentId, promptToSave);
@@ -2235,6 +2513,16 @@ export function createPromptStarter(container, { embed = false } = {}) {
     }
   });
 
+  // Whether the current session is still exactly the untouched default template for
+  // its kind — the signal used both by hasChanges() and by the Setup Dialog gating
+  // below, since reopening an already-edited session must never re-show it.
+  function isUntouched() {
+    const kind = tplSelect.value === 'subagent' ? 'subagent' : 'agent';
+    const defaultPrompt = starterDefaults?.[kind]?.prompt || '';
+    return editorText().replace(/\r\n/g, '\n') === defaultPrompt
+      && !Object.values(values).some(value => value.trim());
+  }
+
   return {
     async open(options = {}) {
       error.textContent = '';
@@ -2257,12 +2545,14 @@ export function createPromptStarter(container, { embed = false } = {}) {
         createSquadButton.hidden = false;
         applyToEditorButton.hidden = true;
       }
+      let isFreshSession = false;
       if (!starterDefaults) {
         try {
           starterDefaults = await Api.getStarterDefaults();
           if (disposed) return;
           tplSelect.value = 'agent';
           applyTemplate('agent');
+          isFreshSession = true;
         } catch (err) {
           if (!disposed) {
             showError(err);
@@ -2270,8 +2560,46 @@ export function createPromptStarter(container, { embed = false } = {}) {
           }
           return;
         }
+      } else if (isUntouched()) {
+        isFreshSession = true;
+      } else if (applyTarget) {
+        // A brand-new blank file was just created elsewhere (e.g. editor.js's "New
+        // Prompt" form) — always treat this as a fresh wizard session for it.
+        tplSelect.value = 'agent';
+        tplDeleteBtn.disabled = true;
+        applyTemplate('agent');
+        isFreshSession = true;
+      } else if (!pendingSubagentCreation && confirm(
+        'Start a new agent? This discards the current unfinished prompt (saved choices are kept).'
+      )) {
+        tplSelect.value = 'agent';
+        tplDeleteBtn.disabled = true;
+        applyTemplate('agent');
+        isFreshSession = true;
       }
-      if (applyTarget) {
+      // Show the host dialog first — a nested <dialog> (the Setup Dialog, like the
+      // Tool Picker/AI dialog) only renders once its ancestor <dialog> is itself open.
+      showHost();
+      // Fetch the tool/sub-agent catalog before the Setup Dialog (rather than after
+      // showHost() as before), so its "Add Required Tools" button has data to show.
+      let catalogLoadError = null;
+      try {
+        const [catalog, agents, saved] = await Promise.all([
+          Api.getTools(), Api.getOrchestrationCatalog(), choiceRequest('GET'),
+        ]);
+        if (disposed) return;
+        tools = catalog.tools || [];
+        subagents = agents.subagents || [];
+        choices = saved;
+        catalogReady = true;
+      } catch (err) { catalogLoadError = err; }
+      if (disposed || (!embed && !dialog.open)) return;
+      let setupOutcome = 'skipped';
+      if (isFreshSession && !pendingSubagentCreation) {
+        setupOutcome = await openSetupDialog();
+        if (disposed) return;
+      }
+      if (setupOutcome !== 'started' && applyTarget) {
         values['AGENT NAME'] = applyTarget.agentName || '';
         values['AGENT ID'] = applyTarget.agentId || '';
         variablesKey = '';
@@ -2279,30 +2607,20 @@ export function createPromptStarter(container, { embed = false } = {}) {
         updateTokens('AGENT NAME');
         updateTokens('AGENT ID');
       }
-      showHost();
-      try {
-        const [catalog, agents, saved] = await Promise.all([
-          Api.getTools(), Api.getOrchestrationCatalog(), choiceRequest('GET'),
-        ]);
-        if (disposed || !isHostOpen()) return;
-        tools = catalog.tools || [];
-        subagents = agents.subagents || [];
-        choices = saved;
-        catalogReady = true;
+      if (catalogLoadError) {
+        if (!disposed) showError(catalogLoadError);
+      } else if (!disposed) {
         variablesKey = '';
         renderFields();
         dialog.querySelectorAll('.sd-starter-actions button').forEach(button => {
           if (button.hidden) return;
           button.disabled = false;
         });
-      } catch (err) { if (!disposed) showError(err); }
+      }
       loadTemplates();
     },
     hasChanges() {
-      const kind = tplSelect.value === 'subagent' ? 'subagent' : 'agent';
-      const defaultPrompt = starterDefaults?.[kind]?.prompt || '';
-      return editorText().replace(/\r\n/g, '\n') !== defaultPrompt
-        || Object.values(values).some(value => value.trim());
+      return !isUntouched();
     },
     dispose() {
       disposed = true;
